@@ -21,9 +21,15 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import String
 
 
+# Wrapped in English with explicit "only what's visible" / "short" framing —
+# qwen2.5vl:3b's Greek-language scene descriptions were noticeably more
+# accurate and consistent with this framing than a Greek-only prompt
+# (verified 2026-06-12: Greek-only prompt hallucinated unrelated objects/
+# colors; this version correctly described the actual scene twice in a row).
 PROMPT_TEMPLATE = (
-    "Απάντησε σύντομα και φιλικά στα Ελληνικά, με βάση αυτή την εικόνα από "
-    "την κάμερα του ρομπότ.\n\nΕρώτηση: {question}"
+    "Look at this image from a home robot's camera. Based only on what is "
+    "visible, answer the following question in Greek, in 1-3 short "
+    "sentences.\n\nQuestion: {question}"
 )
 
 
