@@ -21,6 +21,7 @@ def generate_launch_description():
     use_wake_word = LaunchConfiguration('use_wake_word', default='false')
     use_stt       = LaunchConfiguration('use_stt',       default='false')
     use_llm       = LaunchConfiguration('use_llm',       default='false')
+    use_vision    = LaunchConfiguration('use_vision',    default='false')
     use_tts       = LaunchConfiguration('use_tts',       default='false')
     use_rtabmap   = LaunchConfiguration('use_rtabmap',   default='false')
     use_rviz      = LaunchConfiguration('use_rviz',      default='true')
@@ -224,6 +225,18 @@ def generate_launch_description():
         condition=IfCondition(use_llm),
     )
 
+    # ── Vision Q&A (Qwen2.5-VL via ollama, "ask Max what he sees") ─
+    # Answers llm_bridge_node's `look` tool from the latest camera frame
+    # (vision/query -> vision/answer). Needs use_camera:=true for the
+    # RealSense color stream to actually have a frame to look at.
+    vision_node = Node(
+        package='home_robot',
+        executable='vision_node.py',
+        name='vision_node',
+        output='screen',
+        condition=IfCondition(use_vision),
+    )
+
     # ── Text-to-speech (edge-tts, speaks speech_response) ────────
     tts_node = Node(
         package='home_robot',
@@ -261,6 +274,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_wake_word', default_value='false'),
         DeclareLaunchArgument('use_stt',       default_value='false'),
         DeclareLaunchArgument('use_llm',       default_value='false'),
+        DeclareLaunchArgument('use_vision',    default_value='false'),
         DeclareLaunchArgument('use_tts',       default_value='false'),
         DeclareLaunchArgument('use_rtabmap',   default_value='false'),
         DeclareLaunchArgument('use_rviz',      default_value='true'),
@@ -280,6 +294,7 @@ def generate_launch_description():
         wake_word_node,
         stt_node,
         llm_bridge_node,
+        vision_node,
         tts_node,
         arm_node,
         rviz_node,

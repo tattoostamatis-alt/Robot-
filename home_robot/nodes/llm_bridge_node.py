@@ -22,6 +22,10 @@ Action dispatch notes (current state of the rest of the stack):
   node picks them up.
 - `report_clutter` — answered from the latest `detected_objects` message
   (std_msgs/String JSON, from object_detector.py), no ROS dispatch needed.
+- `look(question)` — published on `vision/query` (std_msgs/String);
+  vision_node.py (Qwen2.5-VL via ollama) answers from the latest camera
+  frame on `vision/answer` (std_msgs/String). Blocks (with timeout) for
+  the reply since the result feeds the follow-up LLM call.
 """
 
 import json
@@ -42,9 +46,9 @@ from std_msgs.msg import Bool, String
 SYSTEM_PROMPT = """Είσαι ο "Max", ο φωνητικός βοηθός ενός ρομπότ καθαρισμού σπιτιού.
 
 Όταν ο χρήστης ζητάει μια ενέργεια (καθάρισμα, μετακίνηση, επιστροφή στη
-βάση, σταμάτημα, περιπολία, αναφορά αντικειμένων), κάλεσε το αντίστοιχο
-tool. Αν ο χρήστης απλώς ρωτάει κάτι ή κάνει συζήτηση, απάντησε κανονικά
-χωρίς tool.
+βάση, σταμάτημα, περιπολία, αναφορά αντικειμένων) ή ρωτάει τι βλέπεις /
+τι υπάρχει γύρω σου αυτή τη στιγμή, κάλεσε το αντίστοιχο tool. Αν ο
+χρήστης απλώς ρωτάει κάτι ή κάνει συζήτηση, απάντησε κανονικά χωρίς tool.
 
 Απάντα πάντα σύντομα, φιλικά και στα Ελληνικά, χωρίς emoji."""
 
@@ -85,6 +89,15 @@ TOOLS = [
         'description': 'Πες τι αντικείμενα/ακαταστασία βλέπει αυτή τη στιγμή η κάμερα',
         'parameters': {'type': 'object', 'properties': {}},
     }},
+    {'type': 'function', 'function': {
+        'name': 'look',
+        'description': 'Κοίτα μέσα από την κάμερα και απάντησε σε μια ερώτηση για ό,τι '
+                        'βλέπει αυτή τη στιγμή (π.χ. περιγραφή χώρου, χρώματα, αντικείμενα)',
+        'parameters': {'type': 'object', 'properties': {
+            'question': {'type': 'string',
+                          'description': 'Η ερώτηση σχετικά με ό,τι βλέπει η κάμερα'},
+        }, 'required': ['question']},
+    }},
 ]
 
 _EMOJI_RE = re.compile(
@@ -109,11 +122,13 @@ class LLMBridgeNode(Node):
         self.declare_parameter('keep_alive', '10m')
         self.declare_parameter('temperature', 0.1)
         self.declare_parameter('history_turns', 4)
+        self.declare_parameter('vision_timeout', 60.0)
 
         self.model = self.get_parameter('model').value
         self.keep_alive = self.get_parameter('keep_alive').value
         self.temperature = self.get_parameter('temperature').value
         self.history_turns = self.get_parameter('history_turns').value
+        self.vision_timeout = self.get_parameter('vision_timeout').value
 
         locations_path = os.path.join(get_package_share_directory('home_robot'),
                                         'config', 'locations.yaml')
@@ -126,13 +141,17 @@ class LLMBridgeNode(Node):
         self.goal_pub = self.create_publisher(PoseStamped, 'goal_pose', 10)
         self.tidy_pub = self.create_publisher(String, 'tidy_command', 10)
         self.patrol_pub = self.create_publisher(Bool, 'patrol_command', 10)
+        self.vision_query_pub = self.create_publisher(String, 'vision/query', 10)
 
         self._history = []
         self._busy = threading.Lock()
         self._latest_objects = None
+        self._vision_event = threading.Event()
+        self._vision_answer = None
 
         self.create_subscription(String, 'speech_text', self._on_speech_text, 10)
         self.create_subscription(String, 'detected_objects', self._on_detected_objects, 10)
+        self.create_subscription(String, 'vision/answer', self._on_vision_answer, 10)
 
         self.get_logger().info(f'LLM bridge started — model={self.model}')
 
@@ -141,6 +160,10 @@ class LLMBridgeNode(Node):
             self._latest_objects = json.loads(msg.data)
         except json.JSONDecodeError:
             pass
+
+    def _on_vision_answer(self, msg: String):
+        self._vision_answer = msg.data
+        self._vision_event.set()
 
     def _on_speech_text(self, msg: String):
         text = msg.data.strip()
@@ -250,6 +273,15 @@ class LLMBridgeNode(Node):
                 return {'status': 'ok', 'objects': [], 'note': 'no detections yet'}
             clutter = [o for o in self._latest_objects if o.get('clutter')]
             return {'status': 'ok', 'objects': clutter}
+
+        elif name == 'look':
+            question = args.get('question') or 'Περίγραψε τι βλέπεις.'
+            self._vision_answer = None
+            self._vision_event.clear()
+            self.vision_query_pub.publish(String(data=question))
+            if not self._vision_event.wait(timeout=self.vision_timeout):
+                return {'status': 'error', 'reason': 'vision_node did not respond (timeout)'}
+            return {'status': 'ok', 'description': self._vision_answer}
 
         return {'status': 'error', 'reason': f'unknown tool: {name}'}
 

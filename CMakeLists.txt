@@ -15,6 +15,7 @@ install(PROGRAMS
   home_robot/nodes/wake_word_node.py
   home_robot/nodes/stt_node.py
   home_robot/nodes/llm_bridge_node.py
+  home_robot/nodes/vision_node.py
   home_robot/nodes/tts_node.py
   home_robot/nodes/calibrate_odom.py
   DESTINATION lib/${PROJECT_NAME}
