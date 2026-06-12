@@ -6,3 +6,8 @@ __pycache__/
 training/wake_word_max/wav/
 training/wake_word_max/raw/
 training/wake_word_max/features.npz
+
+# slam_toolbox lifelong-mapping pose-graphs — environment-specific,
+# regenerate via scripts/save_map.sh
+maps/*.posegraph
+maps/*.data

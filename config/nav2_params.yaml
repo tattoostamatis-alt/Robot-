@@ -275,7 +275,31 @@ slam_toolbox:
     map_frame: map
     base_frame: base_link
     scan_topic: /scan
+    # "Lifelong mapping": stays in `mapping` mode (keeps updating the map
+    # as furniture/objects move — important for a tidying robot) but can
+    # resume localizing in + extending a previously saved map via
+    # map_file_name below, instead of starting from an empty map every
+    # bringup.
     mode: mapping
+    use_map_saver: true
+    # After a good mapping session, save the pose-graph with:
+    #   ~/robot_ws/src/home_robot/scripts/save_map.sh home
+    # then uncomment map_file_name (and map_start_pose, if not starting
+    # at the dock) to resume + keep extending that map on next bringup.
+    # map_file_name: /home/dimi/robot_ws/src/home_robot/maps/home
+    # map_start_pose: [0.0, 0.0, 0.0]
+    # Lifelong-mapping tuning (only matters once map_file_name is set —
+    # controls how scan matches against the OLD loaded map vs NEW scans
+    # are weighted when deciding to keep/replace map data). Defaults from
+    # slam_toolbox's mapper_params_lifelong.yaml.
+    lifelong_search_use_tree: false
+    lifelong_minimum_score: 0.1
+    lifelong_iou_match: 0.85
+    lifelong_node_removal_score: 0.04
+    lifelong_overlap_score_scale: 0.06
+    lifelong_constraint_multiplier: 0.08
+    lifelong_nearby_penalty: 0.001
+    lifelong_candidates_scale: 0.03
     debug_logging: false
     throttle_scans: 1
     transform_publish_period: 0.02

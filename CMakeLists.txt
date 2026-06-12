@@ -20,7 +20,7 @@ install(PROGRAMS
   DESTINATION lib/${PROJECT_NAME}
 )
 
-install(DIRECTORY launch config
+install(DIRECTORY launch config scripts
   DESTINATION share/${PROJECT_NAME}
 )
 
