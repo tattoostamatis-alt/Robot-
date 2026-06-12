@@ -26,27 +26,35 @@ Action dispatch notes (current state of the rest of the stack):
   vision_node.py (Qwen2.5-VL via ollama) answers from the latest camera
   frame on `vision/answer` (std_msgs/String). Blocks (with timeout) for
   the reply since the result feeds the follow-up LLM call.
+- `system_status()` — read-only host diagnostics (CPU/RAM/disk/temperature
+  via psutil) plus the latest `battery/state` (sensor_msgs/BatteryState,
+  from roomba_driver.py). No ROS dispatch, answered directly.
 """
 
 import json
 import math
 import os
 import re
+import shutil
 import threading
 
 import ollama
+import psutil
 import rclpy
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseStamped, Quaternion, Twist
 from rclpy.node import Node
+from sensor_msgs.msg import BatteryState
 from std_msgs.msg import Bool, String
 
 
 SYSTEM_PROMPT = """Είσαι ο "Max", ο φωνητικός βοηθός ενός ρομπότ καθαρισμού σπιτιού.
 
 Όταν ο χρήστης ζητάει μια ενέργεια (καθάρισμα, μετακίνηση, επιστροφή στη
-βάση, σταμάτημα, περιπολία, αναφορά αντικειμένων), κάλεσε το αντίστοιχο tool.
+βάση, σταμάτημα, περιπολία, αναφορά αντικειμένων) ή ρωτάει για την
+κατάσταση/υγεία/μπαταρία του υπολογιστή/ρομπότ (π.χ. "πώς είσαι;",
+"όλα καλά;", "πόση μπαταρία έχεις;"), κάλεσε το αντίστοιχο tool.
 
 ΣΗΜΑΝΤΙΚΟ: Δεν έχεις δική σου όραση — δεν "θυμάσαι" και δεν φαντάζεσαι τι
 υπάρχει γύρω σου. Αν ο χρήστης ρωτήσει οτιδήποτε για το τι βλέπεις, τι
@@ -107,6 +115,13 @@ TOOLS = [
                           'description': 'Η ερώτηση σχετικά με ό,τι βλέπει η κάμερα'},
         }, 'required': ['question']},
     }},
+    {'type': 'function', 'function': {
+        'name': 'system_status',
+        'description': 'Έλεγξε την κατάσταση του υπολογιστή/ρομπότ — CPU, μνήμη, '
+                        'δίσκος, θερμοκρασία, μπαταρία (π.χ. "πώς είσαι;", '
+                        '"όλα καλά;", "πόση μπαταρία έχεις;")',
+        'parameters': {'type': 'object', 'properties': {}},
+    }},
 ]
 
 _EMOJI_RE = re.compile(
@@ -121,6 +136,17 @@ def _strip_emoji(text):
 
 def _yaw_to_quaternion(yaw):
     return Quaternion(x=0.0, y=0.0, z=math.sin(yaw / 2.0), w=math.cos(yaw / 2.0))
+
+
+def _get_cpu_temp():
+    try:
+        temps = psutil.sensors_temperatures()
+    except Exception:
+        return None
+    for name in ('k10temp', 'coretemp', 'cpu_thermal', 'acpitz'):
+        if temps.get(name):
+            return round(temps[name][0].current, 1)
+    return None
 
 
 class LLMBridgeNode(Node):
@@ -157,10 +183,12 @@ class LLMBridgeNode(Node):
         self._latest_objects = None
         self._vision_event = threading.Event()
         self._vision_answer = None
+        self._latest_battery = None
 
         self.create_subscription(String, 'speech_text', self._on_speech_text, 10)
         self.create_subscription(String, 'detected_objects', self._on_detected_objects, 10)
         self.create_subscription(String, 'vision/answer', self._on_vision_answer, 10)
+        self.create_subscription(BatteryState, 'battery/state', self._on_battery_state, 10)
 
         self.get_logger().info(f'LLM bridge started — model={self.model}')
 
@@ -173,6 +201,9 @@ class LLMBridgeNode(Node):
     def _on_vision_answer(self, msg: String):
         self._vision_answer = msg.data
         self._vision_event.set()
+
+    def _on_battery_state(self, msg: BatteryState):
+        self._latest_battery = msg
 
     def _on_speech_text(self, msg: String):
         text = msg.data.strip()
@@ -291,6 +322,30 @@ class LLMBridgeNode(Node):
             if not self._vision_event.wait(timeout=self.vision_timeout):
                 return {'status': 'error', 'reason': 'vision_node did not respond (timeout)'}
             return {'status': 'ok', 'description': self._vision_answer}
+
+        elif name == 'system_status':
+            mem = psutil.virtual_memory()
+            disk = shutil.disk_usage('/')
+            status = {
+                'status': 'ok',
+                'cpu_percent': psutil.cpu_percent(interval=0.5),
+                'ram_percent': mem.percent,
+                'ram_used_gb': round(mem.used / 1e9, 1),
+                'ram_total_gb': round(mem.total / 1e9, 1),
+                'disk_percent': round(disk.used / disk.total * 100, 1),
+                'disk_free_gb': round(disk.free / 1e9, 1),
+            }
+            cpu_temp = _get_cpu_temp()
+            if cpu_temp is not None:
+                status['cpu_temp_c'] = cpu_temp
+            if self._latest_battery is not None:
+                pct = self._latest_battery.percentage
+                if pct == pct:  # not NaN
+                    status['battery_percent'] = round(pct * 100, 1)
+                status['battery_charging'] = (
+                    self._latest_battery.power_supply_status
+                    == BatteryState.POWER_SUPPLY_STATUS_CHARGING)
+            return status
 
         return {'status': 'error', 'reason': f'unknown tool: {name}'}
 
