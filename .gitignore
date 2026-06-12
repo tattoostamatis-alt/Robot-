@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+
+# Generated wake-word training artifacts (regenerate via
+# training/wake_word_max/generate_data.py + extract_features.py)
+training/wake_word_max/wav/
+training/wake_word_max/raw/
+training/wake_word_max/features.npz

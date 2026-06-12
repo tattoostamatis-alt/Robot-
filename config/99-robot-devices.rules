@@ -1,0 +1,13 @@
+# SLAMTEC C1 LiDAR (Silicon Labs CP2102N)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", SYMLINK+="lidar", MODE="0666"
+
+# iRobot Roomba (FTDI FT232R)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", SYMLINK+="roomba", MODE="0666"
+
+# Waveshare RoArm-M3 (ESP32, usually CH340 USB-serial) — TODO once it arrives:
+#   1. lsusb                                  → confirm idVendor/idProduct (CH340=1a86:7523)
+#   2. udevadm info -a -n /dev/ttyUSBx | grep -E "idVendor|idProduct|serial"
+#   3. Update the values below. If idVendor/idProduct collide with the LiDAR
+#      (10c4:ea60), add ATTRS{serial}=="..." to disambiguate (or use KERNELS=="x-y"
+#      for the physical USB port instead).
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", SYMLINK+="arm", MODE="0666"
