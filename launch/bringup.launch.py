@@ -21,6 +21,7 @@ def generate_launch_description():
     use_wake_word = LaunchConfiguration('use_wake_word', default='false')
     use_stt       = LaunchConfiguration('use_stt',       default='false')
     use_llm       = LaunchConfiguration('use_llm',       default='false')
+    use_planner   = LaunchConfiguration('use_planner',   default='false')
     use_vision    = LaunchConfiguration('use_vision',    default='false')
     use_tts       = LaunchConfiguration('use_tts',       default='false')
     use_rtabmap   = LaunchConfiguration('use_rtabmap',   default='false')
@@ -225,6 +226,18 @@ def generate_launch_description():
         condition=IfCondition(use_llm),
     )
 
+    # ── Task planner (executes tidy/patrol via Nav2 + YOLO clutter check) ─
+    # Consumes llm_bridge_node's tidy_command/patrol_command and narrates
+    # progress on speech_response. Needs Nav2 (always on) + use_camera:=true
+    # (default) for object_detector's detected_objects to be meaningful.
+    planner_node = Node(
+        package='home_robot',
+        executable='task_planner_node.py',
+        name='task_planner_node',
+        output='screen',
+        condition=IfCondition(use_planner),
+    )
+
     # ── Vision Q&A (Qwen2.5-VL via ollama, "ask Max what he sees") ─
     # Answers llm_bridge_node's `look` tool from the latest camera frame
     # (vision/query -> vision/answer). Needs use_camera:=true for the
@@ -274,6 +287,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_wake_word', default_value='false'),
         DeclareLaunchArgument('use_stt',       default_value='false'),
         DeclareLaunchArgument('use_llm',       default_value='false'),
+        DeclareLaunchArgument('use_planner',   default_value='false'),
         DeclareLaunchArgument('use_vision',    default_value='false'),
         DeclareLaunchArgument('use_tts',       default_value='false'),
         DeclareLaunchArgument('use_rtabmap',   default_value='false'),
@@ -294,6 +308,7 @@ def generate_launch_description():
         wake_word_node,
         stt_node,
         llm_bridge_node,
+        planner_node,
         vision_node,
         tts_node,
         arm_node,
