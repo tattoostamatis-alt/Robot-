@@ -239,7 +239,7 @@ def generate_launch_description():
         condition=IfCondition(use_planner),
     )
 
-    # ── Vision Q&A (Qwen2.5-VL via ollama, "ask Max what he sees") ─
+    # ── Vision Q&A (qwen3-vl:4b-instruct via ollama, "ask Max what he sees") ─
     # Answers llm_bridge_node's `look` tool from the latest camera frame
     # (vision/query -> vision/answer). Needs use_camera:=true for the
     # RealSense color stream to actually have a frame to look at.

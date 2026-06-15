@@ -148,7 +148,7 @@ class VoiceControl(Node):
     def _handle_command(self, text: str):
         try:
             response = ollama.chat(
-                model='qwen3:8b',
+                model='qwen3-vl:4b-instruct',
                 messages=[
                     {'role': 'system', 'content': SYSTEM_PROMPT},
                     {'role': 'user',   'content': text},

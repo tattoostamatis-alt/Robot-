@@ -17,15 +17,15 @@ Action dispatch notes (current state of the rest of the stack):
 - `goto(location=...)` — looks up `config/locations.yaml` and publishes a
   geometry_msgs/PoseStamped on `goal_pose` (Nav2 bt_navigator's topic).
   Locations are placeholders until SLAM mapping works (see project memory).
-- `tidy`/`patrol` — no dedicated executor node yet (roadmap items 6/25-27).
-  Published as JSON on `tidy_command`/`patrol_command` for whichever future
-  node picks them up.
+- `tidy`/`patrol` — published as JSON on `tidy_command`/`patrol_command`,
+  executed by task_planner_node.py (Nav2 navigation + clutter check via
+  object_detector.py), which narrates progress on `speech_response`.
 - `report_clutter` — answered from the latest `detected_objects` message
   (std_msgs/String JSON, from object_detector.py), no ROS dispatch needed.
 - `look(question)` — published on `vision/query` (std_msgs/String);
-  vision_node.py (Qwen2.5-VL via ollama) answers from the latest camera
-  frame on `vision/answer` (std_msgs/String). Blocks (with timeout) for
-  the reply since the result feeds the follow-up LLM call.
+  vision_node.py (qwen3-vl:4b-instruct via ollama) answers from the latest
+  camera frame on `vision/answer` (std_msgs/String). Blocks (with timeout)
+  for the reply since the result feeds the follow-up LLM call.
 - `system_status()` — read-only host diagnostics (CPU/RAM/disk/temperature
   via psutil) plus the latest `battery/state` (sensor_msgs/BatteryState,
   from roomba_driver.py). No ROS dispatch, answered directly.

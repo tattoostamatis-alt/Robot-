@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Vision node — Qwen2.5-VL (via ollama), answers questions about the latest
-camera frame.
+"""Vision node — qwen3-vl:4b-instruct (via ollama), answers questions about
+the latest camera frame.
 
 Subscribes to the RealSense color image (caches the latest frame) and to
 `vision/query` (std_msgs/String, a question in Greek). Sends the cached
@@ -22,10 +22,11 @@ from std_msgs.msg import String
 
 
 # Wrapped in English with explicit "only what's visible" / "short" framing —
-# qwen2.5vl:3b's Greek-language scene descriptions were noticeably more
-# accurate and consistent with this framing than a Greek-only prompt
-# (verified 2026-06-12: Greek-only prompt hallucinated unrelated objects/
-# colors; this version correctly described the actual scene twice in a row).
+# Greek-language scene descriptions are noticeably more accurate and
+# consistent with this framing than a Greek-only prompt (verified
+# 2026-06-12 with qwen2.5vl:3b: Greek-only prompt hallucinated unrelated
+# objects/colors; this version correctly described the scene twice in a
+# row. Re-verified 2026-06-15 with qwen3-vl:4b-instruct: still accurate).
 PROMPT_TEMPLATE = (
     "Look at this image from a home robot's camera. Based only on what is "
     "visible, answer the following question in Greek, in 1-3 short "
