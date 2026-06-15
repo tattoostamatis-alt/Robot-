@@ -37,7 +37,7 @@ class VisionNode(Node):
     def __init__(self):
         super().__init__('vision_node')
 
-        self.declare_parameter('model', 'qwen2.5vl:3b')
+        self.declare_parameter('model', 'qwen3-vl:4b-instruct')
         self.declare_parameter('keep_alive', '5m')
 
         self.model = self.get_parameter('model').value

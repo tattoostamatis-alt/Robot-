@@ -153,7 +153,7 @@ class LLMBridgeNode(Node):
     def __init__(self):
         super().__init__('llm_bridge_node')
 
-        self.declare_parameter('model', 'qwen3:8b')
+        self.declare_parameter('model', 'qwen3-vl:4b-instruct')
         self.declare_parameter('keep_alive', '10m')
         self.declare_parameter('temperature', 0.1)
         self.declare_parameter('history_turns', 4)
