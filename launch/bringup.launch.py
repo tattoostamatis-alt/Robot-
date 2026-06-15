@@ -50,37 +50,38 @@ def generate_launch_description():
     # the robot never moves, so the map never grows past the first scan.
 
     # ── Static TF: base_link → laser ──────────────────────────────
-    # x/y/z/roll/pitch/yaw below are mostly PLACEHOLDERS, not precisely
-    # measured on the real robot. base_link = midpoint of the wheel axle
-    # (the point the odometry math in roomba_driver.py is computed about),
-    # at ground height.
-    #   - x: lidar sits ~100mm forward of the wheel axle (rough estimate
-    #     from the user, 2026-06-12 — re-measure with a ruler and adjust
-    #     if the map still looks off, especially during rotations).
-    #   - y/z: assumed dead-center / 0.1m height, not measured.
-    #   - roll/pitch: check the lidar is mounted level with a spirit
-    #     level (currently assumed perfectly level: 0,0). Tilt here
-    #     directly causes the kind of point-cloud noise seen in the
-    #     map, independent of odometry calibration.
+    # base_link = midpoint of the wheel axle (the point the odometry
+    # math in roomba_driver.py is computed about), at ground height.
+    # All values measured by the user:
+    #   - x: lidar sits 120mm forward of the wheel axle.
+    #   - y: 0 — lidar is centered left/right.
+    #   - z: lidar is 26mm above the wheel axle (corrected 2026-06-13,
+    #     was 90mm).
+    #   - roll/pitch: 0 — lidar mount confirmed level with a spirit level.
+    # Known limitation (not fixed, by user's choice): this lidar mount
+    # doesn't see a full 360 degrees — something blocks part of the
+    # rear scan. May affect SLAM loop-closure/map completeness.
     tf_base_laser = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
         name='tf_base_laser',
-        arguments=['--x', '0.1', '--y', '0.0', '--z', '0.1',
+        arguments=['--x', '0.12', '--y', '0.0', '--z', '0.026',
                    '--roll', '0', '--pitch', '0', '--yaw', '0',
                    '--frame-id', 'base_link', '--child-frame-id', 'laser'],
     )
 
     # ── Static TF: base_link → camera_link ───────────────────────
-    # Same caveat as tf_base_laser above — these offsets are
-    # placeholders, not measured. Matters for RTAB-Map RGBD odometry
+    # Fully measured 2026-06-13: x=0.12m forward, z=0.021m above the
+    # wheel axle (same mount/bracket as laser, centered left/right,
+    # level, facing straight ahead — so y=0, roll=pitch=yaw=0, same as
+    # tf_base_laser). Matters for RTAB-Map RGBD odometry
     # (use_rtabmap:=true) and for object_detector's detections being
     # placed correctly in the map/costmap.
     tf_base_camera = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
         name='tf_base_camera',
-        arguments=['--x', '0.05', '--y', '0.0', '--z', '0.15',
+        arguments=['--x', '0.12', '--y', '0.0', '--z', '0.021',
                    '--roll', '0', '--pitch', '0', '--yaw', '0',
                    '--frame-id', 'base_link', '--child-frame-id', 'camera_link'],
     )

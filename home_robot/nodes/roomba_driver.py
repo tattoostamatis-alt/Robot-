@@ -22,11 +22,11 @@ class RoombaDriver(Node):
         self.declare_parameter('baud', 115200)
         self.declare_parameter('wheel_base', 0.235)
         self.declare_parameter('idle_timeout', 30.0)  # seconds until passive mode
-        # Create 2 spec: 508.8 ticks/rev, 72mm wheel diameter. Theoretical
-        # value, not yet verified against this unit's actual wheels — run
-        # scripts/calibrate_odom.py to get a corrected value if the SLAM
-        # map looks scaled/smeared.
-        self.declare_parameter('mm_per_tick', (math.pi * 72.0) / 508.8)
+        # Calibrated 2026-06-13 via calibrate_odom.py (straight-line test:
+        # odom reported 1.2372m for a real 1.0m drive). Theoretical Create 2
+        # spec value was (pi*72)/508.8 = 0.44447; this unit's actual wheels
+        # need ~19% less.
+        self.declare_parameter('mm_per_tick', 0.359338)
 
         port = self.get_parameter('port').value
         baud = self.get_parameter('baud').value
