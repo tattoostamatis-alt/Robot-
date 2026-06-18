@@ -28,13 +28,19 @@ class RoombaDriver(Node):
         # with a rotation test, leaving wheel_base at the uncalibrated
         # spec default — that mismatch was producing the doubled/skewed
         # walls after turns during SLAM mapping.
-        # Recalibrated again 2026-06-18 via calibrate_odom.py straight-line
-        # test only (IMU-based rotation test was blocked by an
-        # intermittent BNO085 I2C-init hang, see imu_node.py's _open_serial
-        # comment — wheel_base left at the previous value, not re-verified
-        # this session).
-        self.declare_parameter('wheel_base', 0.27782)
-        self.declare_parameter('mm_per_tick', 0.2854)
+        # Recalibrated again 2026-06-18 via calibrate_odom.py, full
+        # straight-line + in-place rotation tests, this time with a
+        # working IMU (BNO085 was swapped for an MPU9250/6500 — see
+        # imu_node.py / firmware/mpu9250_imu — after the BNO08x turned out
+        # to have a well-documented I2C clock-stretching bug that locked
+        # the bus after ~15-20s of streaming, confirmed via Adafruit's own
+        # GitHub issue #53). The rotation test's IMU ground truth measured
+        # the robot turning ~2.5 full rotations for the ~1-rotation
+        # cmd_vel command (confirmed by direct observation, not a script
+        # artifact) — i.e. previous wheel_base values were significantly
+        # too large.
+        self.declare_parameter('wheel_base', 0.23842)
+        self.declare_parameter('mm_per_tick', 0.401635)
         # Compensates a physical drive bias (this unit veers right when
         # commanded to drive straight) — independent of wheel_base/
         # mm_per_tick, which are about odometry accuracy, not actual
