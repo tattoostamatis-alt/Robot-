@@ -3,11 +3,10 @@
 
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Twist, TransformStamped
+from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import BatteryState
 from std_msgs.msg import Bool, Float32
-from tf2_ros import TransformBroadcaster
 import pycreate2
 import math
 import struct
@@ -20,19 +19,52 @@ class RoombaDriver(Node):
 
         self.declare_parameter('port', '/dev/roomba')
         self.declare_parameter('baud', 115200)
-        self.declare_parameter('wheel_base', 0.235)
         self.declare_parameter('idle_timeout', 30.0)  # seconds until passive mode
-        # Calibrated 2026-06-13 via calibrate_odom.py (straight-line test:
-        # odom reported 1.2372m for a real 1.0m drive). Theoretical Create 2
-        # spec value was (pi*72)/508.8 = 0.44447; this unit's actual wheels
-        # need ~19% less.
-        self.declare_parameter('mm_per_tick', 0.359338)
+        # Recalibrated 2026-06-17 via calibrate_odom.py (straight-line +
+        # in-place rotation tests, after fixing a bug where the script's
+        # blocking input() calls starved the /odom subscription callback
+        # of spin time during the motion itself). Previous straight-line
+        # calibration (2026-06-13, mm_per_tick=0.359338) was never paired
+        # with a rotation test, leaving wheel_base at the uncalibrated
+        # spec default — that mismatch was producing the doubled/skewed
+        # walls after turns during SLAM mapping.
+        # Recalibrated again 2026-06-18 via calibrate_odom.py straight-line
+        # test only (IMU-based rotation test was blocked by an
+        # intermittent BNO085 I2C-init hang, see imu_node.py's _open_serial
+        # comment — wheel_base left at the previous value, not re-verified
+        # this session).
+        self.declare_parameter('wheel_base', 0.27782)
+        self.declare_parameter('mm_per_tick', 0.2854)
+        # Compensates a physical drive bias (this unit veers right when
+        # commanded to drive straight) — independent of wheel_base/
+        # mm_per_tick, which are about odometry accuracy, not actual
+        # motor output. >1.0 speeds up the right wheel relative to the
+        # left. Tune live with `ros2 param set /roomba_driver right_trim
+        # <value>` while driving straight, no relaunch needed.
+        # Calibrated 2026-06-17 at a higher teleop speed (0.15 m/s) for
+        # finer command resolution, then confirmed to still apply at the
+        # mapping speed (0.03 m/s) — see right/left round() note below.
+        # Re-tuned the same day after the lidar remount; settled on
+        # 1.14 after results kept oscillating between attempts (manual
+        # push/test noise was bigger than the residual drift itself).
+        self.declare_parameter('right_trim', 1.14)
+        # Forward and reverse needed different corrections — not a pure
+        # proportional motor gain mismatch, more likely asymmetric
+        # caster drag or forward/reverse motor controller response.
+        # Applied only when linear.x < 0. Settled on 1.10 the same way
+        # as right_trim above (noisy manual tuning oscillated between
+        # 0.95 and 1.3 across repeated attempts — stopped chasing exact
+        # zero drift and picked a value to move on with).
+        self.declare_parameter('right_trim_reverse', 1.10)
 
         port = self.get_parameter('port').value
         baud = self.get_parameter('baud').value
         self.wheel_base = self.get_parameter('wheel_base').value
         self.idle_timeout = self.get_parameter('idle_timeout').value
         self.mm_per_tick = self.get_parameter('mm_per_tick').value
+        self.right_trim = self.get_parameter('right_trim').value
+        self.right_trim_reverse = self.get_parameter('right_trim_reverse').value
+        self.add_on_set_parameters_callback(self._on_set_parameters)
 
         self.bot = pycreate2.Create2(port, baud)
         self.bot.wake()
@@ -49,7 +81,6 @@ class RoombaDriver(Node):
         self.cmd_sub = self.create_subscription(Twist, 'cmd_vel', self._cmd_vel_cb, 10)
         self.dock_sub = self.create_subscription(Bool, 'dock', self._dock_cb, 10)
         self.odom_pub = self.create_publisher(Odometry, 'odom', 10)
-        self.tf_broadcaster = TransformBroadcaster(self)
         self.battery_pub = self.create_publisher(BatteryState, 'battery/state', 10)
         self.charge_ratio_pub = self.create_publisher(Float32, 'battery/charge_ratio', 10)
 
@@ -63,6 +94,16 @@ class RoombaDriver(Node):
         self._th = 0.0
         self._prev_left_enc = None
         self._prev_right_enc = None
+        self._prev_odom_time = None
+
+    def _on_set_parameters(self, params):
+        from rcl_interfaces.msg import SetParametersResult
+        for p in params:
+            if p.name == 'right_trim':
+                self.right_trim = p.value
+            elif p.name == 'right_trim_reverse':
+                self.right_trim_reverse = p.value
+        return SetParametersResult(successful=True)
 
     def _cmd_vel_cb(self, msg: Twist):
         self._last_cmd_time = time.monotonic()
@@ -75,8 +116,14 @@ class RoombaDriver(Node):
         linear = msg.linear.x * 1000   # m/s → mm/s
         angular = msg.angular.z         # rad/s
 
-        right = int(linear + angular * self.wheel_base * 500)
-        left  = int(linear - angular * self.wheel_base * 500)
+        # round(), not int(): at low teleop speeds (mapping uses 30mm/s)
+        # the commanded mm/s is small enough that truncating toward zero
+        # swallows trim differences below ~3% — e.g. int(30*1.10) and
+        # int(30*1.12) both truncate to 33, making the trim untunable at
+        # this speed. round() halves that quantization error.
+        trim = self.right_trim_reverse if linear < 0 else self.right_trim
+        right = round((linear + angular * self.wheel_base * 500) * trim)
+        left  = round(linear - angular * self.wheel_base * 500)
 
         right = max(-500, min(500, right))
         left  = max(-500, min(500, left))
@@ -150,10 +197,14 @@ class RoombaDriver(Node):
             return
         left, right = enc
 
+        now_t = time.monotonic()
         if self._prev_left_enc is None:
             self._prev_left_enc = left
             self._prev_right_enc = right
+            self._prev_odom_time = now_t
             return
+        dt = now_t - self._prev_odom_time
+        self._prev_odom_time = now_t
 
         d_left = left - self._prev_left_enc
         d_right = right - self._prev_right_enc
@@ -193,20 +244,11 @@ class RoombaDriver(Node):
         q = tf_transformations.quaternion_from_euler(0, 0, self._th)
         now = self.get_clock().now().to_msg()
 
-        # TF: odom → base_link  (required by SLAM Toolbox)
-        t = TransformStamped()
-        t.header.stamp = now
-        t.header.frame_id = 'odom'
-        t.child_frame_id  = 'base_link'
-        t.transform.translation.x = self._x
-        t.transform.translation.y = self._y
-        t.transform.translation.z = 0.0
-        t.transform.rotation.x = q[0]
-        t.transform.rotation.y = q[1]
-        t.transform.rotation.z = q[2]
-        t.transform.rotation.w = q[3]
-        self.tf_broadcaster.sendTransform(t)
-
+        # odom -> base_link TF is published by ekf_node (robot_localization),
+        # which fuses this node's wheel velocity with the IMU's absolute yaw
+        # — do NOT also broadcast it here, that would fight the EKF's TF
+        # (see config/ekf.yaml for why: wheel-only yaw is what produced the
+        # skewed/doubled walls after turns during SLAM mapping).
         odom = Odometry()
         odom.header.stamp = now
         odom.header.frame_id = 'odom'
@@ -217,6 +259,12 @@ class RoombaDriver(Node):
         odom.pose.pose.orientation.y = q[1]
         odom.pose.pose.orientation.z = q[2]
         odom.pose.pose.orientation.w = q[3]
+        # Only twist.linear.x is actually consumed (ekf.yaml's odom0_config
+        # fuses just vx) — pose and angular velocity are still published for
+        # rqt/debugging but are not fed into the EKF.
+        if dt > 0:
+            odom.twist.twist.linear.x = delta_d / dt
+            odom.twist.twist.angular.z = delta_a / dt
         self.odom_pub.publish(odom)
 
     def _publish_battery(self):
