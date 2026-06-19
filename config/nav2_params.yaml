@@ -125,13 +125,24 @@ local_costmap:
         z_voxels: 16
         max_obstacle_height: 2.0
         mark_threshold: 0
-        observation_sources: scan
+        observation_sources: scan depth_camera
         scan:
           topic: /scan
           max_obstacle_height: 2.0
           clearing: true
           marking: true
           data_type: "LaserScan"
+          raytrace_max_range: 3.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 2.5
+          obstacle_min_range: 0.0
+        depth_camera:
+          topic: /camera/camera/depth/color/points
+          max_obstacle_height: 2.0
+          min_obstacle_height: 0.0
+          clearing: true
+          marking: true
+          data_type: "PointCloud2"
           raytrace_max_range: 3.0
           raytrace_min_range: 0.0
           obstacle_max_range: 2.5
@@ -313,18 +324,25 @@ slam_toolbox:
     enable_interactive_mode: true
     use_scan_matching: true
     use_scan_barycenter: true
-    # Lowered from 0.5/0.5 — with these large gaps, odometry drift between
-    # matched scans can exceed correlation_search_space_dimension (0.5m),
-    # causing bad scan matches (map smearing). Adding scans more often
-    # keeps the scan-matcher correction frequent and the drift per step
-    # small.
-    minimum_travel_distance: 0.2
-    minimum_travel_heading: 0.2
+    # Lowered again from 0.2/0.2 — IMU is an MPU9250 (gyro-only, no
+    # magnetometer, see ekf.yaml header), so yaw drifts slowly between
+    # scan-matcher updates instead of holding an absolute heading. Large
+    # gaps let that drift build up unnoticed until a loop-closure/match
+    # correction snaps it back all at once, which shows up as walls
+    # abruptly "doubling". Matching more often keeps each correction small
+    # and gradual instead of one big jump.
+    minimum_travel_distance: 0.15
+    minimum_travel_heading: 0.1
     scan_buffer_size: 10
     scan_buffer_maximum_scan_distance: 10.0
     link_match_minimum_response_fine: 0.1
     link_scan_maximum_distance: 1.5
-    loop_search_maximum_distance: 3.0
+    # Raised from 3.0 — with no magnetometer the IMU's yaw can drift enough
+    # over a full-room traverse that a true loop-closure candidate (same
+    # physical spot, revisited later) ends up slightly farther apart in the
+    # current pose-graph estimate than the old 3.0m search radius allowed,
+    # so the correction that would fix the drift never gets considered.
+    loop_search_maximum_distance: 6.0
     do_loop_closing: true
     loop_match_minimum_chain_size: 10
     loop_match_maximum_variance_coarse: 3.0
