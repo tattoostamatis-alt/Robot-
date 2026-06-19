@@ -111,7 +111,17 @@ local_costmap:
       height: 3
       resolution: 0.05
       robot_radius: 0.18
-      plugins: ["voxel_layer", "inflation_layer"]
+      # keepout_filter is harmless when use_keepout:=false (the default) —
+      # filter_mask_server/costmap_filter_info_server just aren't running,
+      # so this layer waits quietly for filter info and never applies
+      # anything. Placeholder mask (config/keepout_mask.yaml/.pgm) is
+      # entirely free until edited — see its header comment for the plan
+      # (RViz Publish Point on couch/table spots once a real map exists).
+      plugins: ["voxel_layer", "keepout_filter", "inflation_layer"]
+      keepout_filter:
+        plugin: "nav2_costmap_2d::KeepoutFilter"
+        enabled: True
+        filter_info_topic: "/costmap_filter_info"
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 2.0
@@ -163,7 +173,11 @@ global_costmap:
       robot_radius: 0.18
       resolution: 0.05
       track_unknown_space: true
-      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      plugins: ["static_layer", "obstacle_layer", "keepout_filter", "inflation_layer"]
+      keepout_filter:
+        plugin: "nav2_costmap_2d::KeepoutFilter"
+        enabled: True
+        filter_info_topic: "/costmap_filter_info"
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
@@ -362,3 +376,26 @@ slam_toolbox:
     minimum_angle_penalty: 0.9
     minimum_distance_penalty: 0.5
     use_response_expansion: true
+
+# ── Keepout zones (use_keepout:=true, default false) ──────────────────
+# filter_mask_server's yaml_filename is overridden at launch time
+# (bringup.launch.py) to point at config/keepout_mask.yaml's real
+# installed path, same pattern as slam_toolbox's map_file_name override.
+filter_mask_server:
+  ros__parameters:
+    use_sim_time: false
+    frame_id: map
+
+costmap_filter_info_server:
+  ros__parameters:
+    use_sim_time: false
+    filter_info_topic: /costmap_filter_info
+    # Must be absolute — KeepoutFilter resolves this name inside its own
+    # costmap's namespace (local_costmap/global_costmap), so a relative
+    # name here resolved to e.g. /local_costmap/keepout_filter_mask
+    # instead of the actual /keepout_filter_mask filter_mask_server
+    # publishes on, and the mask was silently never received.
+    mask_topic: /keepout_filter_mask
+    type: 0
+    base: 0.0
+    multiplier: 1.0

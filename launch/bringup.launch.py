@@ -41,6 +41,7 @@ def generate_launch_description():
     # slam_map_file when 'localization'.
     slam_mode     = LaunchConfiguration('slam_mode',     default='mapping')
     slam_map_file = LaunchConfiguration('slam_map_file', default='')
+    use_keepout   = LaunchConfiguration('use_keepout',   default='false')
 
     # ── SLAMTEC C1 LIDAR ─────────────────────────────────────────
     # Provided by ros-sllidar-c1.service (systemd, always running on
@@ -273,6 +274,52 @@ def generate_launch_description():
         }.items(),
     )
 
+    # ── Keepout zones (use_keepout, default false) ──────────────────
+    # Standard Nav2 "keepout filter" pattern: a small map_server publishing
+    # the binary mask + costmap_filter_info_server publishing how to
+    # interpret it (base/multiplier/type, see nav2_params.yaml), both
+    # lifecycle-managed by a dedicated lifecycle_manager since they're not
+    # part of navigation_launch.py's own managed set. The KeepoutFilter
+    # layer is already wired into both costmaps (nav2_params.yaml) and is
+    # harmless when this is off — it just waits for filter info forever.
+    # yaml_filename overridden here (not in nav2_params.yaml) so it
+    # resolves to this package's installed share path, same pattern as
+    # slam_toolbox's map_file_name override above.
+    filter_mask_server_node = Node(
+        package='nav2_map_server',
+        executable='map_server',
+        name='filter_mask_server',
+        output='screen',
+        parameters=[
+            PathJoinSubstitution([pkg, 'config', 'nav2_params.yaml']),
+            {'yaml_filename': PathJoinSubstitution([pkg, 'config', 'keepout_mask.yaml'])},
+        ],
+        remappings=[('map', 'keepout_filter_mask')],
+        condition=IfCondition(use_keepout),
+    )
+
+    costmap_filter_info_server_node = Node(
+        package='nav2_map_server',
+        executable='costmap_filter_info_server',
+        name='costmap_filter_info_server',
+        output='screen',
+        parameters=[PathJoinSubstitution([pkg, 'config', 'nav2_params.yaml'])],
+        condition=IfCondition(use_keepout),
+    )
+
+    keepout_lifecycle_manager = Node(
+        package='nav2_lifecycle_manager',
+        executable='lifecycle_manager',
+        name='lifecycle_manager_filters',
+        output='screen',
+        parameters=[{
+            'use_sim_time': False,
+            'autostart': True,
+            'node_names': ['filter_mask_server', 'costmap_filter_info_server'],
+        }],
+        condition=IfCondition(use_keepout),
+    )
+
     # ── Autonomous frontier exploration (m-explore-ros2 / explore_lite) ─
     # Drives Nav2 toward unexplored map edges on its own, so SLAM can build
     # the map without manual teleop. Needs Nav2 (always on) + an active map
@@ -421,6 +468,7 @@ def generate_launch_description():
         DeclareLaunchArgument('imu_port',      default_value='/dev/imu'),
         DeclareLaunchArgument('slam_mode',     default_value='mapping'),
         DeclareLaunchArgument('slam_map_file', default_value=''),
+        DeclareLaunchArgument('use_keepout',   default_value='false'),
 
         tf_base_laser,
         tf_base_camera,
@@ -434,6 +482,9 @@ def generate_launch_description():
         rgbd_odometry_node,
         rtabmap_node,
         nav2_node,
+        filter_mask_server_node,
+        costmap_filter_info_server_node,
+        keepout_lifecycle_manager,
         explore_node,
         realsense_node,
         detector_node,
