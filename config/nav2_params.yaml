@@ -110,7 +110,13 @@ local_costmap:
       width: 3
       height: 3
       resolution: 0.05
-      robot_radius: 0.18
+      # Was 0.18 (actual physical footprint) — raised by +0.15m so Nav2
+      # treats the robot as needing a ~150mm circular standoff from any
+      # obstacle, keeping it from brushing walls/furniture while
+      # exploring. (First tried +0.4m/0.58 total — too big, the robot
+      # got boxed in near its start point with no valid plan even for
+      # backup/recovery. 0.33 still blocks doorways narrower than ~0.66m.)
+      robot_radius: 0.33
       # keepout_filter is harmless when use_keepout:=false (the default) —
       # filter_mask_server/costmap_filter_info_server just aren't running,
       # so this layer waits quietly for filter info and never applies
@@ -125,7 +131,8 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 2.0
-        inflation_radius: 0.5
+        # Must be >= footprint's inscribed radius (robot_radius above).
+        inflation_radius: 0.6
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
         enabled: true
@@ -170,7 +177,9 @@ global_costmap:
       global_frame: map
       robot_base_frame: base_link
       use_sim_time: false
-      robot_radius: 0.18
+      # Same circular standoff as local_costmap's robot_radius — see
+      # comment there.
+      robot_radius: 0.33
       resolution: 0.05
       track_unknown_space: true
       plugins: ["static_layer", "obstacle_layer", "keepout_filter", "inflation_layer"]
@@ -198,7 +207,7 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 2.0
-        inflation_radius: 0.5
+        inflation_radius: 0.6
       always_send_full_costmap: true
 
 planner_server:

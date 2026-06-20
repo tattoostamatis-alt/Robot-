@@ -19,10 +19,11 @@ install(PROGRAMS
   home_robot/nodes/tts_node.py
   home_robot/nodes/task_planner_node.py
   home_robot/nodes/calibrate_odom.py
+  home_robot/nodes/imu_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
-install(DIRECTORY launch config scripts
+install(DIRECTORY launch config scripts firmware
   DESTINATION share/${PROJECT_NAME}
 )
 

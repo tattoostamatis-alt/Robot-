@@ -30,11 +30,8 @@ class RoombaDriver(Node):
         # walls after turns during SLAM mapping.
         # Recalibrated again 2026-06-18 via calibrate_odom.py, full
         # straight-line + in-place rotation tests, this time with a
-        # working IMU (BNO085 was swapped for an MPU9250/6500 — see
-        # imu_node.py / firmware/mpu9250_imu — after the BNO08x turned out
-        # to have a well-documented I2C clock-stretching bug that locked
-        # the bus after ~15-20s of streaming, confirmed via Adafruit's own
-        # GitHub issue #53). The rotation test's IMU ground truth measured
+        # working IMU (MPU9250/6500 — see imu_node.py / firmware/mpu9250_imu).
+        # The rotation test's IMU ground truth measured
         # the robot turning ~2.5 full rotations for the ~1-rotation
         # cmd_vel command (confirmed by direct observation, not a script
         # artifact) — i.e. previous wheel_base values were significantly

@@ -17,17 +17,52 @@ def generate_launch_description():
     # Do NOT start another sllidar_node here — it would fail to open the
     # serial port (SL_RESULT_OPERATION_TIMEOUT) since it's already in use.
 
-    # odom -> base_link is published dynamically by roomba_driver.py
-    # (run separately). Do NOT add a static fallback here — a static
-    # odom->base_link identity TF alongside the dynamic one makes
-    # slam_toolbox think the robot never moves, so the map never grows
-    # past the first scan.
+    # odom -> base_link is published dynamically by ekf_node (below), which
+    # fuses roomba_driver.py's wheel velocity with the IMU's absolute yaw —
+    # roomba_driver.py itself no longer broadcasts this TF. Do NOT add a
+    # static fallback here — a static odom->base_link identity TF alongside
+    # the dynamic one makes slam_toolbox think the robot never moves, so the
+    # map never grows past the first scan.
 
     tf_base_laser = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
         name='tf_base_laser',
-        arguments=['0.12', '0', '0.026', '0', '0', '0', 'base_link', 'laser'],
+        # Lidar remounted 2026-06-17: centered over the wheel axle
+        # (x=0, was 0.10m forward), 22mm above it (was 26mm).
+        # yaw=pi: that remount also flipped it front/back — see
+        # bringup.launch.py's tf_base_laser comment for the live symptom
+        # that confirmed this (2026-06-18).
+        arguments=['--x', '0', '--y', '0', '--z', '0.022',
+                   '--roll', '0', '--pitch', '0', '--yaw', '3.14159265',
+                   '--frame-id', 'base_link', '--child-frame-id', 'laser'],
+    )
+
+    # TODO: measure once the IMU is permanently mounted on the chassis
+    # (currently breadboard-prototyped) — identity assumes it sits flat and
+    # aligned with base_link (x forward, y left, z up).
+    tf_base_imu = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='tf_base_imu',
+        arguments=['--x', '0', '--y', '0', '--z', '0',
+                   '--roll', '0', '--pitch', '0', '--yaw', '0',
+                   '--frame-id', 'base_link', '--child-frame-id', 'imu_link'],
+    )
+
+    imu_node = Node(
+        package='home_robot',
+        executable='imu_node.py',
+        name='imu_node',
+        output='screen',
+    )
+
+    ekf_node = Node(
+        package='robot_localization',
+        executable='ekf_node',
+        name='ekf_filter_node',
+        output='screen',
+        parameters=[PathJoinSubstitution([pkg, 'config', 'ekf.yaml'])],
     )
 
     slam_node = IncludeLaunchDescription(
@@ -42,5 +77,8 @@ def generate_launch_description():
 
     return LaunchDescription([
         tf_base_laser,
+        tf_base_imu,
+        imu_node,
+        ekf_node,
         slam_node,
     ])

@@ -37,6 +37,7 @@ import os
 import re
 import shutil
 import threading
+import time
 
 import ollama
 import psutil
@@ -93,6 +94,18 @@ TOOLS = [
         'name': 'stop',
         'description': 'Σταμάτα αμέσως κάθε κίνηση',
         'parameters': {'type': 'object', 'properties': {}},
+    }},
+    {'type': 'function', 'function': {
+        'name': 'move',
+        'description': 'Κάνε μια μικρή χειροκίνητη κίνηση για λίγα δευτερόλεπτα — '
+                        'π.χ. "κάνε λίγο μπροστά", "πήγαινε λίγο πίσω", "γύρνα δεξιά". '
+                        'ΟΧΙ για μετάβαση σε δωμάτιο (χρήση goto) ή καθαρισμό/περιπολία.',
+        'parameters': {'type': 'object', 'properties': {
+            'direction': {'type': 'string', 'enum': ['forward', 'backward', 'left', 'right'],
+                          'description': 'Κατεύθυνση κίνησης (left/right = στροφή επί τόπου)'},
+            'duration': {'type': 'number',
+                         'description': 'Διάρκεια κίνησης σε δευτερόλεπτα (0.3-3, default 1)'},
+        }, 'required': ['direction']},
     }},
     {'type': 'function', 'function': {
         'name': 'patrol',
@@ -303,6 +316,32 @@ class LLMBridgeNode(Node):
         elif name == 'stop':
             self.cmd_vel_pub.publish(Twist())
             return {'status': 'ok', 'action': 'stop'}
+
+        elif name == 'move':
+            direction = args.get('direction')
+            duration = max(0.3, min(float(args.get('duration', 1.0)), 3.0))
+
+            twist = Twist()
+            if direction == 'forward':
+                twist.linear.x = 0.1
+            elif direction == 'backward':
+                twist.linear.x = -0.1
+            elif direction == 'left':
+                twist.angular.z = 0.5
+            elif direction == 'right':
+                twist.angular.z = -0.5
+            else:
+                return {'status': 'error', 'reason': f'unknown direction: {direction}'}
+
+            def _drive():
+                end = time.monotonic() + duration
+                while time.monotonic() < end:
+                    self.cmd_vel_pub.publish(twist)
+                    time.sleep(0.05)
+                self.cmd_vel_pub.publish(Twist())
+
+            threading.Thread(target=_drive, daemon=True).start()
+            return {'status': 'ok', 'action': 'move', 'direction': direction, 'duration': duration}
 
         elif name == 'patrol':
             self.patrol_pub.publish(Bool(data=True))

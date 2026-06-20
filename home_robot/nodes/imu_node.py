@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""ESP32 + BNO085 IMU -> sensor_msgs/Imu.
+"""ESP32 + MPU9250 IMU -> sensor_msgs/Imu.
 
 Reads the "IMU,qw,qi,qj,qk,gx,gy,gz,ax,ay,az" lines streamed by the
-bno085_imu.ino firmware (rotation vector + calibrated gyro + linear
-acceleration, ~60Hz) and republishes them as sensor_msgs/Imu on imu/data,
-frame_id imu_link, for robot_localization's ekf_node to fuse with wheel
-odometry.
+mpu9250_imu.ino firmware (yaw-only quaternion from gyro-Z integration +
+gyro + linear acceleration, ~60Hz) and republishes them as sensor_msgs/Imu
+on imu/data, frame_id imu_link, for robot_localization's ekf_node to fuse
+with wheel odometry.
 """
 
 import threading
@@ -45,10 +45,10 @@ class ImuNode(Node):
                 pass
         # Asserting DTR while opening triggers the CH340's auto-reset
         # (DTR wired to the ESP32 EN pin) — and resetting the ESP32 here
-        # re-runs its BNO085 I2C init, which is unreliable (~50% hangs,
-        # needs a physical USB power-cycle to recover). Setting dtr=False
-        # before open() avoids the reset pulse entirely, so this just
-        # attaches to the already-running/streaming firmware instead.
+        # re-runs its IMU init, which can hang and need a physical USB
+        # power-cycle to recover. Setting dtr=False before open() avoids
+        # the reset pulse entirely, so this just attaches to the
+        # already-running/streaming firmware instead.
         self.ser = serial.Serial()
         self.ser.port = self.port
         self.ser.baudrate = self.baud
@@ -87,9 +87,11 @@ class ImuNode(Node):
             msg.orientation.x = qi
             msg.orientation.y = qj
             msg.orientation.z = qk
-            # BNO085 rotation vector accuracy is typically a couple of
-            # degrees once fused (magnetometer-aided) — fixed diagonal
-            # covariance is good enough for EKF fusion here.
+            # Yaw-only quaternion, gyro-Z integrated with a boot-time bias
+            # calibration — no magnetometer, so it's a de-biased estimate
+            # that still drifts slowly over time, not an absolute
+            # reference. Fixed diagonal covariance is good enough for EKF
+            # fusion here.
             msg.orientation_covariance = [
                 0.01, 0.0,  0.0,
                 0.0,  0.01, 0.0,
