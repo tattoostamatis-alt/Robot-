@@ -26,6 +26,7 @@
   <depend>python3-serial</depend>
   <depend>robot_localization</depend>
   <depend>explore_lite</depend>
+  <depend>cv_bridge</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

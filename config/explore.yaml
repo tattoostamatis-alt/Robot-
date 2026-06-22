@@ -11,4 +11,10 @@
     orientation_scale: 0.0
     gain_scale: 1.0
     transform_tolerance: 0.3
-    min_frontier_size: 0.75
+    # Was 0.75 — the door to the next room is 0.8m wide, but the sliver of
+    # unexplored space visible through it at first glance (before the robot
+    # gets close) is narrower than that, so explore_lite discarded it as a
+    # frontier and never sent the robot to investigate. Lowering this doesn't
+    # change collision safety (robot_radius/inflation in nav2_params.yaml
+    # handle that) — it only changes which unexplored gaps count as goals.
+    min_frontier_size: 0.3

@@ -20,7 +20,7 @@ hey_mycroft, hey_marvin, timer, weather) for pipeline testing instead.
 .onnx/.tflite file (e.g. a newly retrained model before it's copied
 into `config/models/`).
 
-Mic capture follows the same conventions as voice_control.py for the
+Mic capture follows the same conventions as stt_node.py for the
 reSpeaker XVF3800 (2-channel firmware, channel 1 = "ASR" beam). For
 testing on a plain mono/stereo laptop mic, `mic_channel: 0` works too.
 """

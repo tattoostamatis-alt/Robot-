@@ -14,10 +14,16 @@ Subscribes:
 Publishes:
 - `speech_response` (std_msgs/String) — progress narration, picked up by
   tts_node. Independent of llm_bridge_node's own immediate "started" reply.
+- `pick_command` (std_msgs/String, JSON {'label': ...}) — only when the
+  `use_arm` parameter is true. One per clutter item found at a stop,
+  consumed by pick_place_node.py (UNTESTED — no arm hardware yet, see its
+  module docstring). Waits for that node's `pick_result` (with timeout)
+  before moving on; pick_place_node.py narrates its own progress/outcome
+  on speech_response, so this node only narrates the timeout/failure case.
 
 Scope: navigate + look for clutter ("Plan -> Execute -> Verify" for the
-"go check on a room" part of roadmap item 6). Does not physically pick
-anything up — that needs the arm (roadmap items 16-21), not yet connected.
+"go check on a room" part of roadmap item 6), and — when use_arm:=true —
+hand each item to pick_place_node.py to actually pick up.
 """
 
 import json
@@ -56,9 +62,13 @@ class TaskPlannerNode(Node):
 
         self.declare_parameter('nav_timeout', 120.0)
         self.declare_parameter('detect_wait', 2.0)
+        self.declare_parameter('use_arm', False)
+        self.declare_parameter('pick_timeout', 30.0)
 
         self.nav_timeout = self.get_parameter('nav_timeout').value
         self.detect_wait = self.get_parameter('detect_wait').value
+        self.use_arm = self.get_parameter('use_arm').value
+        self.pick_timeout = self.get_parameter('pick_timeout').value
 
         locations_path = os.path.join(get_package_share_directory('home_robot'),
                                         'config', 'locations.yaml')
@@ -66,14 +76,18 @@ class TaskPlannerNode(Node):
             self.locations = yaml.safe_load(f)
 
         self.response_pub = self.create_publisher(String, 'speech_response', 10)
+        self.pick_pub = self.create_publisher(String, 'pick_command', 10)
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
 
         self._latest_objects = None
         self._busy = threading.Lock()
+        self._pick_event = threading.Event()
+        self._pick_result = None
 
         self.create_subscription(String, 'tidy_command', self._on_tidy, 10)
         self.create_subscription(Bool, 'patrol_command', self._on_patrol, 10)
         self.create_subscription(String, 'detected_objects', self._on_detected_objects, 10)
+        self.create_subscription(String, 'pick_result', self._on_pick_result, 10)
 
         self.get_logger().info('Task planner started')
 
@@ -82,6 +96,13 @@ class TaskPlannerNode(Node):
             self._latest_objects = json.loads(msg.data)
         except json.JSONDecodeError:
             pass
+
+    def _on_pick_result(self, msg: String):
+        try:
+            self._pick_result = json.loads(msg.data)
+        except json.JSONDecodeError:
+            self._pick_result = None
+        self._pick_event.set()
 
     def _on_tidy(self, msg: String):
         try:
@@ -134,11 +155,26 @@ class TaskPlannerNode(Node):
             return
 
         clutter = self._check_clutter()
-        if clutter:
-            items = ', '.join(clutter)
-            self._say(f'Έφτασα {room_name}. Βρήκα ακαταστασία: {items}.')
-        else:
+        if not clutter:
             self._say(f'Έφτασα {room_name}. Δεν βρήκα ακαταστασία.')
+            return
+
+        items = ', '.join(clutter)
+        self._say(f'Έφτασα {room_name}. Βρήκα ακαταστασία: {items}.')
+
+        if self.use_arm:
+            for label in clutter:
+                self._pick(label)
+
+    def _pick(self, label):
+        self._pick_event.clear()
+        self._pick_result = None
+        self.pick_pub.publish(String(data=json.dumps({'label': label})))
+        if not self._pick_event.wait(timeout=self.pick_timeout):
+            self._say(f'Δεν κατάφερα να σηκώσω το {label} (λήξη χρόνου).')
+            return
+        if self._pick_result and self._pick_result.get('status') != 'ok':
+            self._say(f'Δεν κατάφερα να σηκώσω το {label}.')
 
     def _navigate(self, loc):
         if not self.nav_client.wait_for_server(timeout_sec=5.0):

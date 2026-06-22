@@ -12,8 +12,8 @@ The faster-whisper model itself is loaded once at startup in a background
 thread and kept resident — only the mic stream is opened/closed per
 utterance.
 
-Mic capture follows the same conventions as voice_control.py / wake_word_node
-for the reSpeaker XVF3800 (2-channel firmware, channel 1 = "ASR" beam). For
+Mic capture follows the same conventions as wake_word_node.py for the
+reSpeaker XVF3800 (2-channel firmware, channel 1 = "ASR" beam). For
 testing on a plain mono/stereo laptop mic, `mic_channel: 0` works too.
 """
 

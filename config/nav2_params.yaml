@@ -75,15 +75,21 @@ controller_server:
       yaw_goal_tolerance: 0.25
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
-      desired_linear_vel: 0.2
+      # Lowered from 0.2 — too abrupt for mapping, past sessions used ~0.03 m/s
+      # (see roomba_driver.py right_trim comment). 0.08 is a gentler middle
+      # ground; actual ramp-up smoothness comes from velocity_smoother below.
+      desired_linear_vel: 0.08
       lookahead_dist: 0.6
       min_lookahead_dist: 0.3
       max_lookahead_dist: 0.9
       lookahead_time: 1.5
-      rotate_to_heading_angular_vel: 1.8
+      # Was 1.8 (103 deg/s) — felt like a sudden full-speed spin before each
+      # straight segment. Smoothed further by velocity_smoother's angular
+      # max_accel below.
+      rotate_to_heading_angular_vel: 0.6
       transform_tolerance: 0.1
       use_velocity_scaled_lookahead_dist: false
-      min_approach_linear_velocity: 0.05
+      min_approach_linear_velocity: 0.03
       approach_velocity_scaling_dist: 1.0
       use_collision_detection: true
       max_allowed_time_to_collision_up_to_carrot: 1.0
@@ -92,11 +98,32 @@ controller_server:
       curvature_lookahead_dist: 0.25
       use_cost_regulated_linear_velocity_scaling: false
       regulated_linear_scaling_min_radius: 0.9
-      regulated_linear_scaling_min_speed: 0.25
+      # Must stay below desired_linear_vel (0.08) — was 0.25, higher than the
+      # new cruise speed, which would have made turn-slowdown meaningless.
+      regulated_linear_scaling_min_speed: 0.03
       use_rotate_to_heading: true
       allow_reversing: false
       rotate_to_heading_min_angle: 0.785
-      max_angular_accel: 3.2
+      max_angular_accel: 1.0
+
+# Was running with no explicit config (all nav2 defaults: max_accel 2.5 m/s²
+# linear / 3.2 rad/s² angular) — that's a near-instant jump to full speed,
+# felt like "too much gas" at the start of every move. These limits ramp
+# cmd_vel_nav -> cmd_vel_smoothed gently regardless of what FollowPath or
+# behavior_server (spin/backup) request.
+velocity_smoother:
+  ros__parameters:
+    smoothing_frequency: 20.0
+    scale_velocities: false
+    feedback: "OPEN_LOOP"
+    max_velocity: [0.1, 0.0, 0.6]
+    min_velocity: [-0.08, 0.0, -0.6]
+    deadband_velocity: [0.0, 0.0, 0.0]
+    velocity_timeout: 1.0
+    max_accel: [0.05, 0.0, 0.5]
+    max_decel: [-0.1, 0.0, -0.8]
+    odom_topic: "odom"
+    odom_duration: 0.1
 
 local_costmap:
   local_costmap:
@@ -253,7 +280,21 @@ collision_monitor:
     source_timeout: 1.0
     base_shift_correction: true
     stop_pub_timeout: 2.0
-    polygons: ["FootprintApproach"]
+    polygons: ["Stop", "FootprintApproach"]
+    # Last-resort hard stop, independent of the velocity-based prediction
+    # below: a fixed box ~20mm outside the robot's real physical body
+    # (radius 0.18, see local_costmap's robot_radius comment). If anything
+    # the lidar sees ever ends up inside this box, cmd_vel is zeroed
+    # immediately — catches cases FootprintApproach's time-to-collision
+    # estimate could miss (sensor noise/latency, something appearing
+    # right next to the robot, a bad recovery behavior, etc).
+    Stop:
+      type: "polygon"
+      action_type: "stop"
+      points: "[[0.20, 0.20], [0.20, -0.20], [-0.20, -0.20], [-0.20, 0.20]]"
+      min_points: 3
+      visualize: false
+      enabled: true
     FootprintApproach:
       type: "polygon"
       action_type: "approach"
@@ -321,7 +362,7 @@ slam_toolbox:
     # then uncomment map_file_name (and map_start_pose, if not starting
     # at the dock) to resume + keep extending that map on next bringup.
     # map_file_name: /home/dimi/robot_ws/src/home_robot/maps/home
-    # map_start_pose: [0.0, 0.0, 0.0]
+    map_start_pose: [0.0, 0.0, 0.0]  # rough; correct via RViz "2D Pose Estimate" after launch
     # Lifelong-mapping tuning (only matters once map_file_name is set —
     # controls how scan matches against the OLD loaded map vs NEW scans
     # are weighted when deciding to keep/replace map data). Defaults from

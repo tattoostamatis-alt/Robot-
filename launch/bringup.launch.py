@@ -21,8 +21,12 @@ def generate_launch_description():
 
     use_slam      = LaunchConfiguration('use_slam',      default='true')
     use_camera    = LaunchConfiguration('use_camera',    default='true')
-    use_voice     = LaunchConfiguration('use_voice',     default='false')
     use_arm       = LaunchConfiguration('use_arm',       default='false')
+    # Placeholder drop-off pose (arm_base frame) — no tray/bin measured yet.
+    pick_drop_x          = LaunchConfiguration('pick_drop_x',          default='0.15')
+    pick_drop_y          = LaunchConfiguration('pick_drop_y',          default='-0.15')
+    pick_drop_z          = LaunchConfiguration('pick_drop_z',          default='0.10')
+    pick_approach_height = LaunchConfiguration('pick_approach_height', default='0.10')
     use_wake_word = LaunchConfiguration('use_wake_word', default='false')
     use_stt       = LaunchConfiguration('use_stt',       default='false')
     use_llm       = LaunchConfiguration('use_llm',       default='false')
@@ -31,6 +35,8 @@ def generate_launch_description():
     use_tts       = LaunchConfiguration('use_tts',       default='false')
     use_rtabmap   = LaunchConfiguration('use_rtabmap',   default='false')
     use_explore   = LaunchConfiguration('use_explore',   default='false')
+    use_obstacle_safety = LaunchConfiguration('use_obstacle_safety', default='true')
+    obstacle_safety_distance = LaunchConfiguration('obstacle_safety_distance', default='0.5')
     use_rviz      = LaunchConfiguration('use_rviz',      default='true')
     roomba_port   = LaunchConfiguration('roomba_port',   default='/dev/roomba')
     arm_port      = LaunchConfiguration('arm_port',      default='/dev/arm')
@@ -50,12 +56,33 @@ def generate_launch_description():
     # port (SL_RESULT_OPERATION_TIMEOUT) since it's already in use.
 
     # ── Roomba driver ─────────────────────────────────────────────
+    # Listens on cmd_vel_safe, not cmd_vel directly — obstacle_safety_node
+    # (below) is the gatekeeper between whatever publishes cmd_vel
+    # (llm_bridge_node.py, teleop, Nav2's controller) and the wheels, so a
+    # YOLO-detected obstacle right ahead can override any of those sources.
+    # If use_obstacle_safety:=false, nothing relays cmd_vel -> cmd_vel_safe
+    # and the robot won't move — only turn this off together with a manual
+    # remap back to cmd_vel for direct testing.
     roomba_node = Node(
         package='home_robot',
         executable='roomba_driver.py',
         name='roomba_driver',
         parameters=[{'port': roomba_port}],
+        remappings=[('cmd_vel', 'cmd_vel_safe')],
         output='screen',
+    )
+
+    # ── YOLO/D435 forward obstacle safety stop ───────────────────
+    # Independent of Nav2's own costmap-based avoidance (which only
+    # applies to goal-directed navigation) — this catches raw cmd_vel
+    # from voice control/teleop that never goes through Nav2's controller.
+    obstacle_safety_node = Node(
+        package='home_robot',
+        executable='obstacle_safety_node.py',
+        name='obstacle_safety_node',
+        parameters=[{'safety_distance': obstacle_safety_distance}],
+        output='screen',
+        condition=IfCondition(use_obstacle_safety),
     )
 
     # odom -> base_link is published dynamically by ekf_node (below, only
@@ -122,13 +149,14 @@ def generate_launch_description():
         package='tf2_ros',
         executable='static_transform_publisher',
         name='tf_base_laser',
-        # yaw=pi: lidar mount was physically flipped front/back during the
-        # 2026-06-17 remount (centering it over the wheel axle) — without
-        # this, a wall actually in front of the robot gets drawn behind it
-        # in the map (confirmed live 2026-06-18: robot position/heading
-        # moves correctly forward, but the scanned walls appear to recede
-        # backward instead of approaching).
-        arguments=['--x', '0.0', '--y', '0.0', '--z', '0.022',
+        # Lidar remounted 2026-06-21: 120mm forward of the wheel axle,
+        # 220mm above it. yaw=pi: previous mount (2026-06-17) had it
+        # physically flipped front/back — without this, a wall actually
+        # in front of the robot gets drawn behind it in the map (confirmed
+        # live 2026-06-18: robot position/heading moves correctly forward,
+        # but the scanned walls appear to recede backward instead of
+        # approaching).
+        arguments=['--x', '0.12', '--y', '0.0', '--z', '0.22',
                    '--roll', '0', '--pitch', '0', '--yaw', '3.14159265',
                    '--frame-id', 'base_link', '--child-frame-id', 'laser'],
     )
@@ -147,6 +175,25 @@ def generate_launch_description():
         arguments=['--x', '0.10', '--y', '0.0', '--z', '0.021',
                    '--roll', '0', '--pitch', '0', '--yaw', '0',
                    '--frame-id', 'base_link', '--child-frame-id', 'camera_link'],
+    )
+
+    # ── Static TF: base_link → arm_base ───────────────────────────
+    # TODO: measure once the RoArm-M3 is physically mounted — placeholder
+    # only (arm not connected yet). Guessed at roughly centered left/right,
+    # behind the camera mount, at chassis-top height, facing forward (no
+    # rotation). pick_place_node.py uses this TF to convert object
+    # positions from object_detector.py (camera_color_optical_frame) into
+    # the arm_base frame that arm_driver.py's T:104 cartesian command
+    # expects — wrong values here mean wrong reach/grasp targets, so this
+    # MUST be corrected with a tape measure before trusting any pick.
+    tf_base_arm = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='tf_base_arm',
+        arguments=['--x', '0.05', '--y', '0.0', '--z', '0.05',
+                   '--roll', '0', '--pitch', '0', '--yaw', '0',
+                   '--frame-id', 'base_link', '--child-frame-id', 'arm_base'],
+        condition=IfCondition(use_arm),
     )
 
     # ── SLAM Toolbox ──────────────────────────────────────────────
@@ -360,15 +407,6 @@ def generate_launch_description():
         condition=IfCondition(use_camera),
     )
 
-    # ── Voice control ─────────────────────────────────────────────
-    voice_node = Node(
-        package='home_robot',
-        executable='voice_control.py',
-        name='voice_control',
-        output='screen',
-        condition=IfCondition(use_voice),
-    )
-
     # ── Wake word detector (openWakeWord) ────────────────────────
     wake_word_node = Node(
         package='home_robot',
@@ -404,6 +442,7 @@ def generate_launch_description():
         package='home_robot',
         executable='task_planner_node.py',
         name='task_planner_node',
+        parameters=[{'use_arm': use_arm}],
         output='screen',
         condition=IfCondition(use_planner),
     )
@@ -439,6 +478,24 @@ def generate_launch_description():
         condition=IfCondition(use_arm),
     )
 
+    # ── Pick-place (object_detector.py + arm_driver.py bridge) ──────
+    # UNTESTED — see pick_place_node.py's module docstring. Gated on the
+    # same use_arm flag as arm_node/tf_base_arm since it's meaningless
+    # without either.
+    pick_place_node = Node(
+        package='home_robot',
+        executable='pick_place_node.py',
+        name='pick_place_node',
+        parameters=[{
+            'drop_x': pick_drop_x,
+            'drop_y': pick_drop_y,
+            'drop_z': pick_drop_z,
+            'approach_height': pick_approach_height,
+        }],
+        output='screen',
+        condition=IfCondition(use_arm),
+    )
+
     # ── RViz2 ─────────────────────────────────────────────────────
     rviz_node = Node(
         package='rviz2',
@@ -452,8 +509,11 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('use_slam',      default_value='true'),
         DeclareLaunchArgument('use_camera',    default_value='true'),
-        DeclareLaunchArgument('use_voice',     default_value='false'),
         DeclareLaunchArgument('use_arm',       default_value='false'),
+        DeclareLaunchArgument('pick_drop_x',          default_value='0.15'),
+        DeclareLaunchArgument('pick_drop_y',          default_value='-0.15'),
+        DeclareLaunchArgument('pick_drop_z',          default_value='0.10'),
+        DeclareLaunchArgument('pick_approach_height', default_value='0.10'),
         DeclareLaunchArgument('use_wake_word', default_value='false'),
         DeclareLaunchArgument('use_stt',       default_value='false'),
         DeclareLaunchArgument('use_llm',       default_value='false'),
@@ -469,11 +529,15 @@ def generate_launch_description():
         DeclareLaunchArgument('slam_mode',     default_value='mapping'),
         DeclareLaunchArgument('slam_map_file', default_value=''),
         DeclareLaunchArgument('use_keepout',   default_value='false'),
+        DeclareLaunchArgument('use_obstacle_safety', default_value='true'),
+        DeclareLaunchArgument('obstacle_safety_distance', default_value='0.5'),
 
         tf_base_laser,
         tf_base_camera,
+        tf_base_arm,
         tf_base_imu,
         roomba_node,
+        obstacle_safety_node,
         imu_node,
         ekf_node,
         slam_toolbox_node,
@@ -488,7 +552,6 @@ def generate_launch_description():
         explore_node,
         realsense_node,
         detector_node,
-        voice_node,
         wake_word_node,
         stt_node,
         llm_bridge_node,
@@ -496,5 +559,6 @@ def generate_launch_description():
         vision_node,
         tts_node,
         arm_node,
+        pick_place_node,
         rviz_node,
     ])
