@@ -1,0 +1,26 @@
+teleop_twist_joy_node:
+  ros__parameters:
+    # DualSense (PS5) via Linux hid-playstation — same axis/button layout as
+    # DS4, confirmed live 2026-06-22 with `ros2 topic echo /joy --once`
+    # (8 axes, 13 buttons; L2/R2 triggers rest at 1.0, not -1.0).
+    axis_linear:
+      x: 1      # left stick vertical (up = forward)
+    scale_linear:
+      x: 0.20   # raised from 0.10 (teleop_twist_keyboard convention) 2026-06-22 — mapping speed felt too slow
+    scale_linear_turbo:
+      x: 0.30
+
+    axis_angular:
+      yaw: 0    # left stick horizontal
+    scale_angular:
+      yaw: 0.06   # lowered from 0.10 2026-06-22 — turns felt too fast
+    scale_angular_turbo:
+      yaw: 0.35   # lowered from 0.60 2026-06-22, same reason
+
+    # R1 must be held to drive at all — dead-man's switch so a dropped/idle
+    # controller can't send a stale nonzero twist.
+    enable_button: 5
+    # Hold L1 together with R1 for the turbo scale above.
+    enable_turbo_button: 4
+
+    require_enable_button: true

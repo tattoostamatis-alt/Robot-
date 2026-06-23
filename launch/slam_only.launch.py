@@ -2,6 +2,7 @@
 
 from launch import LaunchDescription
 from launch.actions import IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import PathJoinSubstitution, LaunchConfiguration
 from launch.actions import DeclareLaunchArgument
@@ -12,6 +13,10 @@ from launch_ros.substitutions import FindPackageShare
 def generate_launch_description():
     pkg = FindPackageShare('home_robot')
     roomba_port = LaunchConfiguration('roomba_port', default='/dev/roomba')
+    use_joy = LaunchConfiguration('use_joy', default='true')
+    # DualSense is /dev/input/js0 by default (confirmed live 2026-06-22) —
+    # js1 is its motion-sensor sub-device, not the gamepad itself.
+    joy_device_id = LaunchConfiguration('joy_device_id', default='0')
 
     # SLAMTEC C1 LIDAR is provided by ros-sllidar-c1.service (systemd,
     # always running on /dev/sllidar = same physical port as /dev/lidar).
@@ -85,12 +90,38 @@ def generate_launch_description():
         }.items(),
     )
 
+    # ── PS5 (DualSense) teleop for manual mapping runs ────────────
+    # Publishes straight to cmd_vel — roomba_node above listens on cmd_vel
+    # directly in this minimal launch (no obstacle_safety_node here to
+    # remap through), same as teleop_twist_keyboard would.
+    joy_node = Node(
+        package='joy',
+        executable='joy_node',
+        name='joy_node',
+        parameters=[{'device_id': joy_device_id, 'deadzone': 0.05}],
+        output='screen',
+        condition=IfCondition(use_joy),
+    )
+
+    teleop_twist_joy_node = Node(
+        package='teleop_twist_joy',
+        executable='teleop_node',
+        name='teleop_twist_joy_node',
+        parameters=[PathJoinSubstitution([pkg, 'config', 'teleop_twist_joy_ps5.yaml'])],
+        output='screen',
+        condition=IfCondition(use_joy),
+    )
+
     return LaunchDescription([
         DeclareLaunchArgument('roomba_port', default_value='/dev/roomba'),
+        DeclareLaunchArgument('use_joy',     default_value='true'),
+        DeclareLaunchArgument('joy_device_id', default_value='0'),
         roomba_node,
         tf_base_laser,
         tf_base_imu,
         imu_node,
         ekf_node,
         slam_node,
+        joy_node,
+        teleop_twist_joy_node,
     ])

@@ -30,6 +30,7 @@ def generate_launch_description():
     use_wake_word = LaunchConfiguration('use_wake_word', default='false')
     use_stt       = LaunchConfiguration('use_stt',       default='false')
     use_llm       = LaunchConfiguration('use_llm',       default='false')
+    llm_backend   = LaunchConfiguration('llm_backend',   default='ollama')
     use_planner   = LaunchConfiguration('use_planner',   default='false')
     use_vision    = LaunchConfiguration('use_vision',    default='false')
     use_tts       = LaunchConfiguration('use_tts',       default='false')
@@ -37,6 +38,8 @@ def generate_launch_description():
     use_explore   = LaunchConfiguration('use_explore',   default='false')
     use_obstacle_safety = LaunchConfiguration('use_obstacle_safety', default='true')
     obstacle_safety_distance = LaunchConfiguration('obstacle_safety_distance', default='0.5')
+    use_joy       = LaunchConfiguration('use_joy',       default='false')
+    joy_dev       = LaunchConfiguration('joy_dev',       default='/dev/input/js0')
     use_rviz      = LaunchConfiguration('use_rviz',      default='true')
     roomba_port   = LaunchConfiguration('roomba_port',   default='/dev/roomba')
     arm_port      = LaunchConfiguration('arm_port',      default='/dev/arm')
@@ -301,6 +304,16 @@ def generate_launch_description():
             'Reg/Force3DoF': 'true',
             'Grid/FromDepth': 'false',
             'Grid/Sensor': '0',
+            # /cloud_map (RViz "3D Map (RTAB-Map)" display) density —
+            # defaults (decimation=4, voxel=0.05m, max_depth=4.0m) made the
+            # published map look sparse/low-detail. cloud_decimation=1 keeps
+            # every depth pixel per keyframe instead of every 4th; smaller
+            # voxel + longer max_depth trade more RAM/bandwidth for a denser,
+            # more recognizable point cloud of the house.
+            'cloud_decimation': 1,
+            'cloud_max_depth': 6.0,
+            'cloud_voxel_size': 0.01,
+            'cloud_output_voxelized': True,
         }],
         remappings=[
             ('rgb/image', '/camera/camera/color/image_raw'),
@@ -430,6 +443,7 @@ def generate_launch_description():
         package='home_robot',
         executable='llm_bridge_node.py',
         name='llm_bridge_node',
+        parameters=[{'backend': llm_backend}],
         output='screen',
         condition=IfCondition(use_llm),
     )
@@ -455,6 +469,7 @@ def generate_launch_description():
         package='home_robot',
         executable='vision_node.py',
         name='vision_node',
+        parameters=[{'backend': llm_backend}],
         output='screen',
         condition=IfCondition(use_vision),
     )
@@ -496,6 +511,29 @@ def generate_launch_description():
         condition=IfCondition(use_arm),
     )
 
+    # ── PS5 DualSense teleop (manual mapping drive) ──────────────
+    # joy_node reads the raw /dev/input/jsN device (already paired over
+    # Bluetooth, see config/teleop_twist_joy_ps5.yaml header for the
+    # confirmed axis/button layout); teleop_twist_joy_node turns it into
+    # cmd_vel, which flows through obstacle_safety_node like any other
+    # cmd_vel source (R1 is the required dead-man's switch).
+    joy_node = Node(
+        package='joy',
+        executable='joy_node',
+        name='joy_node',
+        parameters=[{'dev': joy_dev}],
+        output='screen',
+        condition=IfCondition(use_joy),
+    )
+    teleop_twist_joy_node = Node(
+        package='teleop_twist_joy',
+        executable='teleop_node',
+        name='teleop_twist_joy_node',
+        parameters=[PathJoinSubstitution([pkg, 'config', 'teleop_twist_joy_ps5.yaml'])],
+        output='screen',
+        condition=IfCondition(use_joy),
+    )
+
     # ── RViz2 ─────────────────────────────────────────────────────
     rviz_node = Node(
         package='rviz2',
@@ -517,11 +555,14 @@ def generate_launch_description():
         DeclareLaunchArgument('use_wake_word', default_value='false'),
         DeclareLaunchArgument('use_stt',       default_value='false'),
         DeclareLaunchArgument('use_llm',       default_value='false'),
+        DeclareLaunchArgument('llm_backend',   default_value='ollama'),
         DeclareLaunchArgument('use_planner',   default_value='false'),
         DeclareLaunchArgument('use_vision',    default_value='false'),
         DeclareLaunchArgument('use_tts',       default_value='false'),
         DeclareLaunchArgument('use_rtabmap',   default_value='false'),
         DeclareLaunchArgument('use_explore',   default_value='false'),
+        DeclareLaunchArgument('use_joy',       default_value='false'),
+        DeclareLaunchArgument('joy_dev',       default_value='/dev/input/js0'),
         DeclareLaunchArgument('use_rviz',      default_value='true'),
         DeclareLaunchArgument('roomba_port',   default_value='/dev/roomba'),
         DeclareLaunchArgument('arm_port',      default_value='/dev/arm'),
@@ -560,5 +601,7 @@ def generate_launch_description():
         tts_node,
         arm_node,
         pick_place_node,
+        joy_node,
+        teleop_twist_joy_node,
         rviz_node,
     ])

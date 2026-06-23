@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""LLM bridge — Qwen3 (via ollama) tool calling, between speech_text and
-robot actions / speech_response.
+"""LLM bridge — Qwen3 (via ollama) or Gemini (via the google-genai API) tool
+calling, between speech_text and robot actions / speech_response.
 
 Subscribes to `speech_text` (std_msgs/String, from stt_node). Sends it to
 Qwen3 along with a fixed set of tools (tidy/goto/dock/stop/patrol/
@@ -14,8 +14,10 @@ Action dispatch notes (current state of the rest of the stack):
 - `dock`/`goto(location='dock')` — published on `dock` (std_msgs/Bool),
   consumed by roomba_driver.py (bot.seek_dock()).
 - `stop` — publishes a zero geometry_msgs/Twist on `cmd_vel`.
-- `goto(location=...)` — looks up `config/locations.yaml` and publishes a
-  geometry_msgs/PoseStamped on `goal_pose` (Nav2 bt_navigator's topic).
+- `goto(location=...)` — looks up `config/locations.yaml` and sends a real
+  nav2_msgs/action/NavigateToPose goal (same ActionClient pattern as
+  task_planner_node.py's `_navigate`), blocking on the result so the tool
+  reply reflects actual success/failure instead of a blind "started".
   Locations are placeholders until SLAM mapping works (see project memory).
 - `tidy`/`patrol` — published as JSON on `tidy_command`/`patrol_command`,
   executed by task_planner_node.py (Nav2 navigation + clutter check via
@@ -43,11 +45,17 @@ import ollama
 import psutil
 import rclpy
 import yaml
+from action_msgs.msg import GoalStatus
 from ament_index_python.packages import get_package_share_directory
-from geometry_msgs.msg import PoseStamped, Quaternion, Twist
+from dotenv import load_dotenv
+from geometry_msgs.msg import Quaternion, Twist
+from nav2_msgs.action import NavigateToPose
+from rclpy.action import ActionClient
 from rclpy.node import Node
 from sensor_msgs.msg import BatteryState
 from std_msgs.msg import Bool, String
+
+load_dotenv(os.path.expanduser('~/.env'))
 
 
 SYSTEM_PROMPT = """Είσαι ο "Max", ο φωνητικός βοηθός ενός ρομπότ καθαρισμού σπιτιού.
@@ -137,6 +145,16 @@ TOOLS = [
     }},
 ]
 
+
+def _build_gemini_tool():
+    from google.genai import types
+    decls = [types.FunctionDeclaration(name=t['function']['name'],
+                                         description=t['function']['description'],
+                                         parameters=t['function']['parameters'])
+             for t in TOOLS]
+    return types.Tool(function_declarations=decls)
+
+
 _EMOJI_RE = re.compile(
     '[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF'
     '\U00002190-\U000021FF\U00002B00-\U00002BFF️]+',
@@ -166,17 +184,30 @@ class LLMBridgeNode(Node):
     def __init__(self):
         super().__init__('llm_bridge_node')
 
+        self.declare_parameter('backend', 'ollama')
         self.declare_parameter('model', 'qwen3-vl:4b-instruct')
+        self.declare_parameter('gemini_model', 'gemini-flash-lite-latest')
         self.declare_parameter('keep_alive', '10m')
         self.declare_parameter('temperature', 0.1)
         self.declare_parameter('history_turns', 4)
         self.declare_parameter('vision_timeout', 60.0)
+        self.declare_parameter('nav_timeout', 60.0)
 
+        self.backend = self.get_parameter('backend').value
         self.model = self.get_parameter('model').value
+        self.gemini_model = self.get_parameter('gemini_model').value
         self.keep_alive = self.get_parameter('keep_alive').value
         self.temperature = self.get_parameter('temperature').value
         self.history_turns = self.get_parameter('history_turns').value
         self.vision_timeout = self.get_parameter('vision_timeout').value
+        self.nav_timeout = self.get_parameter('nav_timeout').value
+
+        self._gemini_client = None
+        self._gemini_tool = None
+        if self.backend == 'gemini':
+            from google import genai
+            self._gemini_client = genai.Client(api_key=os.environ['GEMINI_API_KEY'])
+            self._gemini_tool = _build_gemini_tool()
 
         locations_path = os.path.join(get_package_share_directory('home_robot'),
                                         'config', 'locations.yaml')
@@ -186,7 +217,7 @@ class LLMBridgeNode(Node):
         self.response_pub = self.create_publisher(String, 'speech_response', 10)
         self.dock_pub = self.create_publisher(Bool, 'dock', 10)
         self.cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
-        self.goal_pub = self.create_publisher(PoseStamped, 'goal_pose', 10)
+        self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
         self.tidy_pub = self.create_publisher(String, 'tidy_command', 10)
         self.patrol_pub = self.create_publisher(Bool, 'patrol_command', 10)
         self.vision_query_pub = self.create_publisher(String, 'vision/query', 10)
@@ -203,7 +234,9 @@ class LLMBridgeNode(Node):
         self.create_subscription(String, 'vision/answer', self._on_vision_answer, 10)
         self.create_subscription(BatteryState, 'battery/state', self._on_battery_state, 10)
 
-        self.get_logger().info(f'LLM bridge started — model={self.model}')
+        self.get_logger().info(
+            f'LLM bridge started — backend={self.backend} '
+            f'model={self.gemini_model if self.backend == "gemini" else self.model}')
 
     def _on_detected_objects(self, msg: String):
         try:
@@ -235,7 +268,12 @@ class LLMBridgeNode(Node):
 
     def _handle_text_inner(self, text):
         self.get_logger().info(f'Heard: {text}')
+        if self.backend == 'gemini':
+            self._handle_text_gemini(text)
+        else:
+            self._handle_text_ollama(text)
 
+    def _handle_text_ollama(self, text):
         messages = [{'role': 'system', 'content': SYSTEM_PROMPT}]
         for turn in self._history:
             messages.extend(turn)
@@ -286,6 +324,93 @@ class LLMBridgeNode(Node):
         self.get_logger().info(f'Max: {reply}')
         self.response_pub.publish(String(data=reply))
 
+    def _handle_text_gemini(self, text):
+        from google.genai import types
+
+        config = types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT, tools=[self._gemini_tool],
+            temperature=self.temperature)
+
+        contents = []
+        for turn in self._history:
+            contents.extend(turn)
+        user_content = types.Content(role='user', parts=[types.Part(text=text)])
+        contents.append(user_content)
+        turn = [user_content]
+
+        try:
+            resp = self._gemini_client.models.generate_content(
+                model=self.gemini_model, contents=contents, config=config)
+        except Exception as e:
+            self.get_logger().error(f'LLM call failed: {e}')
+            return
+
+        out = resp.candidates[0].content
+        function_calls = [p.function_call for p in out.parts if p.function_call]
+
+        if function_calls:
+            contents.append(out)
+            turn.append(out)
+            response_parts = []
+            for fc in function_calls:
+                args = fc.args or {}
+                self.get_logger().info(f'Tool call: {fc.name}({args})')
+                result = self._dispatch_tool(fc.name, args)
+                response_parts.append(types.Part.from_function_response(
+                    name=fc.name, response=result))
+            response_content = types.Content(role='user', parts=response_parts)
+            contents.append(response_content)
+            turn.append(response_content)
+
+            try:
+                resp2 = self._gemini_client.models.generate_content(
+                    model=self.gemini_model, contents=contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=SYSTEM_PROMPT, temperature=0.3))
+                reply = (resp2.text or '').strip()
+            except Exception as e:
+                self.get_logger().error(f'LLM follow-up call failed: {e}')
+                reply = ''
+        else:
+            reply = (out.parts[0].text or '').strip() if out.parts else ''
+
+        reply = _strip_emoji(reply)
+        if not reply:
+            return
+
+        turn.append(types.Content(role='model', parts=[types.Part(text=reply)]))
+        self._history.append(turn)
+        del self._history[:-self.history_turns]
+
+        self.get_logger().info(f'Max: {reply}')
+        self.response_pub.publish(String(data=reply))
+
+    def _navigate(self, loc):
+        if not self.nav_client.wait_for_server(timeout_sec=5.0):
+            return False, 'το Nav2 δεν είναι έτοιμο'
+
+        goal = NavigateToPose.Goal()
+        goal.pose.header.frame_id = 'map'
+        goal.pose.header.stamp = self.get_clock().now().to_msg()
+        goal.pose.pose.position.x = float(loc['x'])
+        goal.pose.pose.position.y = float(loc['y'])
+        goal.pose.pose.orientation = _yaw_to_quaternion(float(loc['yaw']))
+
+        send_future = self.nav_client.send_goal_async(goal)
+        goal_handle = send_future.result(timeout=10.0)
+        if goal_handle is None:
+            return False, 'καμία απάντηση από το Nav2'
+        if not goal_handle.accepted:
+            return False, 'ο στόχος απορρίφθηκε'
+
+        result_future = goal_handle.get_result_async()
+        result = result_future.result(timeout=self.nav_timeout)
+        if result is None:
+            return False, 'λήξη χρόνου πλοήγησης'
+        if result.status != GoalStatus.STATUS_SUCCEEDED:
+            return False, 'η πλοήγηση απέτυχε'
+        return True, None
+
     def _dispatch_tool(self, name, args):
         if name == 'tidy':
             room = args.get('room', 'all')
@@ -300,14 +425,10 @@ class LLMBridgeNode(Node):
             loc = self.locations.get(location)
             if loc is None:
                 return {'status': 'error', 'reason': f'unknown location: {location}'}
-            goal = PoseStamped()
-            goal.header.frame_id = 'map'
-            goal.header.stamp = self.get_clock().now().to_msg()
-            goal.pose.position.x = float(loc['x'])
-            goal.pose.position.y = float(loc['y'])
-            goal.pose.orientation = _yaw_to_quaternion(float(loc['yaw']))
-            self.goal_pub.publish(goal)
-            return {'status': 'started', 'action': 'goto', 'location': location}
+            ok, reason = self._navigate(loc)
+            if not ok:
+                return {'status': 'error', 'action': 'goto', 'location': location, 'reason': reason}
+            return {'status': 'ok', 'action': 'goto', 'location': location}
 
         elif name == 'dock':
             self.dock_pub.publish(Bool(data=True))

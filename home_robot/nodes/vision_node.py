@@ -1,24 +1,28 @@
 #!/usr/bin/env python3
-"""Vision node — qwen3-vl:4b-instruct (via ollama), answers questions about
-the latest camera frame.
+"""Vision node — qwen3-vl:4b-instruct (via ollama) or Gemini (via the
+google-genai API), answers questions about the latest camera frame.
 
 Subscribes to the RealSense color image (caches the latest frame) and to
 `vision/query` (std_msgs/String, a question in Greek). Sends the cached
-frame + question to a vision-language model via ollama and publishes the
-answer on `vision/answer` (std_msgs/String).
+frame + question to a vision-language model and publishes the answer on
+`vision/answer` (std_msgs/String).
 
 Used by llm_bridge_node.py's `look` tool ("ask Max what he sees").
 """
 
+import os
 import threading
 
 import cv2
 import ollama
 import rclpy
 from cv_bridge import CvBridge
+from dotenv import load_dotenv
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
+
+load_dotenv(os.path.expanduser('~/.env'))
 
 
 # Wrapped in English with explicit "only what's visible" / "short" framing —
@@ -38,11 +42,20 @@ class VisionNode(Node):
     def __init__(self):
         super().__init__('vision_node')
 
+        self.declare_parameter('backend', 'ollama')
         self.declare_parameter('model', 'qwen3-vl:4b-instruct')
+        self.declare_parameter('gemini_model', 'gemini-flash-lite-latest')
         self.declare_parameter('keep_alive', '5m')
 
+        self.backend = self.get_parameter('backend').value
         self.model = self.get_parameter('model').value
+        self.gemini_model = self.get_parameter('gemini_model').value
         self.keep_alive = self.get_parameter('keep_alive').value
+
+        self._gemini_client = None
+        if self.backend == 'gemini':
+            from google import genai
+            self._gemini_client = genai.Client(api_key=os.environ['GEMINI_API_KEY'])
 
         self.bridge = CvBridge()
         self._latest_frame = None
@@ -53,7 +66,9 @@ class VisionNode(Node):
         self.create_subscription(Image, '/camera/camera/color/image_raw', self._on_image, 1)
         self.create_subscription(String, 'vision/query', self._on_query, 10)
 
-        self.get_logger().info(f'Vision node started — model={self.model}')
+        self.get_logger().info(
+            f'Vision node started — backend={self.backend} '
+            f'model={self.gemini_model if self.backend == "gemini" else self.model}')
 
     def _on_image(self, msg: Image):
         with self._frame_lock:
@@ -91,22 +106,39 @@ class VisionNode(Node):
         self.get_logger().info(f'Vision query: {question}')
 
         try:
-            resp = ollama.chat(
-                model=self.model,
-                messages=[{
-                    'role': 'user',
-                    'content': PROMPT_TEMPLATE.format(question=question),
-                    'images': [jpg.tobytes()],
-                }],
-                keep_alive=self.keep_alive,
-            )
-            answer = (resp.message.content or '').strip()
+            if self.backend == 'gemini':
+                answer = self._query_gemini(jpg.tobytes(), question)
+            else:
+                answer = self._query_ollama(jpg.tobytes(), question)
         except Exception as e:
             self.get_logger().error(f'Vision model call failed: {e}')
             answer = 'Δεν μπόρεσα να δω αυτή τη στιγμή, συγγνώμη.'
 
         self.get_logger().info(f'Vision answer: {answer}')
         self.answer_pub.publish(String(data=answer or 'Δεν είδα κάτι ιδιαίτερο.'))
+
+    def _query_ollama(self, jpg_bytes, question):
+        resp = ollama.chat(
+            model=self.model,
+            messages=[{
+                'role': 'user',
+                'content': PROMPT_TEMPLATE.format(question=question),
+                'images': [jpg_bytes],
+            }],
+            keep_alive=self.keep_alive,
+        )
+        return (resp.message.content or '').strip()
+
+    def _query_gemini(self, jpg_bytes, question):
+        from google.genai import types
+        resp = self._gemini_client.models.generate_content(
+            model=self.gemini_model,
+            contents=[
+                types.Part.from_bytes(data=jpg_bytes, mime_type='image/jpeg'),
+                PROMPT_TEMPLATE.format(question=question),
+            ],
+        )
+        return (resp.text or '').strip()
 
 
 def main():

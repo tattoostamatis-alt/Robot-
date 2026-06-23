@@ -137,13 +137,16 @@ local_costmap:
       width: 3
       height: 3
       resolution: 0.05
-      # Was 0.18 (actual physical footprint) — raised by +0.15m so Nav2
-      # treats the robot as needing a ~150mm circular standoff from any
-      # obstacle, keeping it from brushing walls/furniture while
-      # exploring. (First tried +0.4m/0.58 total — too big, the robot
-      # got boxed in near its start point with no valid plan even for
-      # backup/recovery. 0.33 still blocks doorways narrower than ~0.66m.)
-      robot_radius: 0.33
+      # Back to 0.18 (actual physical footprint) 2026-06-22 — the +0.15m
+      # standoff was originally added so Nav2 wouldn't brush walls/furniture
+      # while exploring, but it also feeds collision_monitor's
+      # FootprintApproach (predictive stop, time_before_collision below),
+      # which made it block joystick driving whenever anything was within
+      # ~0.45-0.6m on any side — far more conservative than the asymmetric
+      # Stop polygon (100/400/300/300mm from the lidar, see collision_monitor
+      # section) that's meant to be the actual clearance spec. The standoff
+      # job now belongs to that Stop polygon instead of this radius.
+      robot_radius: 0.18
       # keepout_filter is harmless when use_keepout:=false (the default) —
       # filter_mask_server/costmap_filter_info_server just aren't running,
       # so this layer waits quietly for filter info and never applies
@@ -204,9 +207,8 @@ global_costmap:
       global_frame: map
       robot_base_frame: base_link
       use_sim_time: false
-      # Same circular standoff as local_costmap's robot_radius — see
-      # comment there.
-      robot_radius: 0.33
+      # Same as local_costmap's robot_radius — see comment there.
+      robot_radius: 0.18
       resolution: 0.05
       track_unknown_space: true
       plugins: ["static_layer", "obstacle_layer", "keepout_filter", "inflation_layer"]
@@ -274,7 +276,14 @@ collision_monitor:
     base_frame_id: "base_link"
     odom_frame_id: "odom"
     cmd_vel_in_topic: "cmd_vel_smoothed"
-    cmd_vel_out_topic: "cmd_vel"
+    # Was "cmd_vel" — but that's also the raw command topic teleop/llm_bridge
+    # publish to, so a relay from cmd_vel into cmd_vel_smoothed (joystick
+    # path, 2026-06-22) plus this node echoing back out to "cmd_vel" would
+    # loop forever. roomba_driver already listens on cmd_vel_safe, so this
+    # is the single point where ANY command source (joystick, Nav2's own
+    # autonomous chain, llm_bridge) gets the obstacle-distance check applied
+    # before reaching the motors.
+    cmd_vel_out_topic: "cmd_vel_safe"
     state_topic: "collision_monitor_state"
     transform_tolerance: 0.2
     source_timeout: 1.0
@@ -282,16 +291,58 @@ collision_monitor:
     stop_pub_timeout: 2.0
     polygons: ["Stop", "FootprintApproach"]
     # Last-resort hard stop, independent of the velocity-based prediction
-    # below: a fixed box ~20mm outside the robot's real physical body
-    # (radius 0.18, see local_costmap's robot_radius comment). If anything
-    # the lidar sees ever ends up inside this box, cmd_vel is zeroed
-    # immediately — catches cases FootprintApproach's time-to-collision
-    # estimate could miss (sensor noise/latency, something appearing
-    # right next to the robot, a bad recovery behavior, etc).
+    # below. If anything the lidar sees ever ends up inside the *relevant*
+    # sub-polygon for the commanded direction, cmd_vel is zeroed immediately
+    # — catches cases FootprintApproach's time-to-collision estimate could
+    # miss (sensor noise/latency, something appearing right next to the
+    # robot, a bad recovery behavior, etc).
+    #
+    # type: velocity_polygon (not a single static "polygon") — a plain
+    # static box stops ALL motion the instant anything enters it on ANY
+    # side, even motion that's moving AWAY from the violating side (e.g.
+    # something 400mm behind blocked driving forward too, confirmed live
+    # 2026-06-22). velocity_polygon instead picks one of several
+    # sub-polygons to check based on the commanded linear.x, so reversing
+    # only checks the rear sub-polygon and driving forward only checks the
+    # front one.
+    #
+    # User-specified clearances measured from the lidar itself (2026-06-22),
+    # not a uniform box — front 100mm, rear 400mm, left/right 300mm each.
+    # Converted to base_link frame here since that's what these polygons are
+    # defined in: lidar sits at x=+0.12, y=0.0 relative to base_link (see
+    # tf_base_laser in bringup.launch.py), so:
+    #   front edge = 0.12 + 0.100 =  0.22
+    #   rear  edge = 0.12 - 0.400 = -0.28
+    #   left  edge = 0.00 + 0.300 =  0.30
+    #   right edge = 0.00 - 0.300 = -0.30
+    # moving_forward/moving_backward only watch the side they're heading
+    # toward (the trailing edge is pulled in to a small ~50mm margin around
+    # the physical body, just enough to catch something already touching);
+    # stopped_or_rotating watches all four sides at once, since spinning in
+    # place can swing any side into something.
     Stop:
-      type: "polygon"
+      type: "velocity_polygon"
       action_type: "stop"
-      points: "[[0.20, 0.20], [0.20, -0.20], [-0.20, -0.20], [-0.20, 0.20]]"
+      holonomic: false
+      velocity_polygons: ["moving_forward", "moving_backward", "stopped_or_rotating"]
+      moving_forward:
+        points: "[[0.22, 0.30], [0.22, -0.30], [-0.05, -0.30], [-0.05, 0.30]]"
+        linear_min: 0.02
+        linear_max: 1.0
+        theta_min: -10.0
+        theta_max: 10.0
+      moving_backward:
+        points: "[[0.05, 0.30], [0.05, -0.30], [-0.28, -0.30], [-0.28, 0.30]]"
+        linear_min: -1.0
+        linear_max: -0.02
+        theta_min: -10.0
+        theta_max: 10.0
+      stopped_or_rotating:
+        points: "[[0.22, 0.30], [0.22, -0.30], [-0.28, -0.30], [-0.28, 0.30]]"
+        linear_min: -0.02
+        linear_max: 0.02
+        theta_min: -10.0
+        theta_max: 10.0
       min_points: 3
       visualize: false
       enabled: true
