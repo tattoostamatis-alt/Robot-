@@ -4,14 +4,15 @@ SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", SYMLINK+="l
 # iRobot Roomba (FTDI FT232R)
 SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", SYMLINK+="roomba", MODE="0666"
 
-# ESP32 + MPU9250 IMU (CH340 USB-serial). CH340 clones don't report a usable
+# ESP32 + BNO085 IMU (CH340 USB-serial). CH340 clones don't report a usable
 # per-device serial (ATTRS{serial} here is the PCIe USB controller, the same
 # for every CH340 on this bus) — so the only way to disambiguate from a
 # second CH340 device (e.g. the RoArm-M3 below) is the physical USB port
 # path. Confirm with `udevadm info -q path -n /dev/ttyUSBx` if it ever moves
-# (USB enumeration/bus numbering is not stable across reboots/replugs — this
-# was 5-1.2 originally, corrected to 3-4 on 2026-06-18).
-SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", KERNELS=="3-4", SYMLINK+="imu", MODE="0666"
+# (USB enumeration/bus numbering is not stable across reboots/replugs — was
+# 5-1.2 originally, corrected to 3-4 on 2026-06-18, corrected to 1-1.1 on
+# 2026-06-25 after swapping in a new BNO085 module).
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", KERNELS=="1-1.1", SYMLINK+="imu", MODE="0666"
 
 # Waveshare RoArm-M3 (ESP32, usually CH340 USB-serial) — TODO once it arrives:
 #   1. lsusb                                  → confirm idVendor/idProduct (CH340=1a86:7523)
