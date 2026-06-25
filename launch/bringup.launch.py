@@ -30,9 +30,11 @@ def generate_launch_description():
     use_wake_word = LaunchConfiguration('use_wake_word', default='false')
     use_stt       = LaunchConfiguration('use_stt',       default='false')
     use_llm       = LaunchConfiguration('use_llm',       default='false')
-    llm_backend   = LaunchConfiguration('llm_backend',   default='ollama')
+    llm_backend   = LaunchConfiguration('llm_backend',   default='lemonade')
+    vision_backend = LaunchConfiguration('vision_backend', default='gemini')
     use_planner   = LaunchConfiguration('use_planner',   default='false')
     use_vision    = LaunchConfiguration('use_vision',    default='false')
+    use_memory    = LaunchConfiguration('use_memory',    default='false')
     use_tts       = LaunchConfiguration('use_tts',       default='false')
     use_rtabmap   = LaunchConfiguration('use_rtabmap',   default='false')
     use_explore   = LaunchConfiguration('use_explore',   default='false')
@@ -96,7 +98,7 @@ def generate_launch_description():
     # TF alongside the dynamic one makes slam_toolbox think the robot never
     # moves, so the map never grows past the first scan.
 
-    # ── IMU (ESP32 + MPU9250) ───────────────────────────────────────
+    # ── IMU (ESP32 + BNO085) ───────────────────────────────────────
     imu_node = Node(
         package='home_robot',
         executable='imu_node.py',
@@ -443,9 +445,22 @@ def generate_launch_description():
         package='home_robot',
         executable='llm_bridge_node.py',
         name='llm_bridge_node',
-        parameters=[{'backend': llm_backend}],
+        parameters=[{'backend': llm_backend, 'memory_enabled': use_memory}],
         output='screen',
         condition=IfCondition(use_llm),
+    )
+
+    # ── RAG long-term memory (ChromaDB + embed-gemma-300m-FLM on NPU) ─────
+    # Stores facts via the llm_bridge_node 'remember' tool (memory/store) and
+    # answers similarity queries (memory/query -> memory/answer) injected
+    # into every LLM call as extra context. Needs the embed-gemma-300m-FLM
+    # model loaded in Lemonade (auto-loads on first request).
+    memory_node = Node(
+        package='home_robot',
+        executable='rag_memory_node.py',
+        name='rag_memory_node',
+        output='screen',
+        condition=IfCondition(use_memory),
     )
 
     # ── Task planner (executes tidy/patrol via Nav2 + YOLO clutter check) ─
@@ -469,7 +484,7 @@ def generate_launch_description():
         package='home_robot',
         executable='vision_node.py',
         name='vision_node',
-        parameters=[{'backend': llm_backend}],
+        parameters=[{'backend': vision_backend}],
         output='screen',
         condition=IfCondition(use_vision),
     )
@@ -555,9 +570,11 @@ def generate_launch_description():
         DeclareLaunchArgument('use_wake_word', default_value='false'),
         DeclareLaunchArgument('use_stt',       default_value='false'),
         DeclareLaunchArgument('use_llm',       default_value='false'),
-        DeclareLaunchArgument('llm_backend',   default_value='ollama'),
+        DeclareLaunchArgument('llm_backend',   default_value='lemonade'),
+        DeclareLaunchArgument('vision_backend', default_value='gemini'),
         DeclareLaunchArgument('use_planner',   default_value='false'),
         DeclareLaunchArgument('use_vision',    default_value='false'),
+        DeclareLaunchArgument('use_memory',    default_value='false'),
         DeclareLaunchArgument('use_tts',       default_value='false'),
         DeclareLaunchArgument('use_rtabmap',   default_value='false'),
         DeclareLaunchArgument('use_explore',   default_value='false'),
@@ -596,6 +613,7 @@ def generate_launch_description():
         wake_word_node,
         stt_node,
         llm_bridge_node,
+        memory_node,
         planner_node,
         vision_node,
         tts_node,

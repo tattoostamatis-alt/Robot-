@@ -30,7 +30,8 @@ class RoombaDriver(Node):
         # walls after turns during SLAM mapping.
         # Recalibrated again 2026-06-18 via calibrate_odom.py, full
         # straight-line + in-place rotation tests, this time with a
-        # working IMU (MPU9250/6500 — see imu_node.py / firmware/mpu9250_imu).
+        # working IMU (MPU9250/6500 at the time, since replaced by a
+        # BNO085 — see imu_node.py / firmware/bno085_imu).
         # The rotation test's IMU ground truth measured
         # the robot turning ~2.5 full rotations for the ~1-rotation
         # cmd_vel command (confirmed by direct observation, not a script

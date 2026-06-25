@@ -439,13 +439,14 @@ slam_toolbox:
     enable_interactive_mode: true
     use_scan_matching: true
     use_scan_barycenter: true
-    # Lowered again from 0.2/0.2 — IMU is an MPU9250 (gyro-only, no
-    # magnetometer, see ekf.yaml header), so yaw drifts slowly between
-    # scan-matcher updates instead of holding an absolute heading. Large
-    # gaps let that drift build up unnoticed until a loop-closure/match
-    # correction snaps it back all at once, which shows up as walls
-    # abruptly "doubling". Matching more often keeps each correction small
-    # and gradual instead of one big jump.
+    # Lowered again from 0.2/0.2 — was tuned for the old MPU9250
+    # (gyro-only, no magnetometer, drifted between scan-matcher updates).
+    # Now using a BNO085 (absolute heading via magnetometer, see ekf.yaml
+    # header) so this is more conservative than strictly necessary, but
+    # left as-is since frequent matching is still harmless. Original
+    # rationale: large gaps let yaw drift build up unnoticed until a
+    # loop-closure/match correction snaps it back all at once, showing up
+    # as walls abruptly "doubling".
     minimum_travel_distance: 0.15
     minimum_travel_heading: 0.1
     scan_buffer_size: 10

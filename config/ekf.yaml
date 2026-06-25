@@ -4,11 +4,13 @@
 ### wheel_base/right_trim calibration comments — that calibration reduces
 ### but doesn't eliminate turn error).
 ###
-### NOTE: the IMU (MPU9250, gyro+accel only, no magnetometer) does NOT
-### hold an absolute heading — yaw is gyro-integrated and drifts slowly
-### over time/turns, it's just a better/de-biased estimate than raw wheel
-### odom. See nav2_params.yaml's slam_toolbox minimum_travel_heading
-### comment for how this interacts with mapping.
+### NOTE: the IMU is now a BNO085 (9-DOF, with magnetometer) — its
+### orientation output IS an absolute heading, not gyro-only drift like
+### the MPU9250 this replaced. The fusion mask below still only takes
+### yaw + yaw-rate from it (not roll/pitch), which is more conservative
+### than necessary now but hasn't been revisited. See nav2_params.yaml's
+### slam_toolbox minimum_travel_heading comment for how this interacts
+### with mapping.
 ###
 ### Key idea: wheel odom's own x/y/yaw already bakes in whatever heading
 ### error accumulated up to that point, so fusing its position doesn't fix

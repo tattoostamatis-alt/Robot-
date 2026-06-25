@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""ESP32 + MPU9250 IMU -> sensor_msgs/Imu.
+"""ESP32 + BNO085 IMU -> sensor_msgs/Imu.
 
 Reads the "IMU,qw,qi,qj,qk,gx,gy,gz,ax,ay,az" lines streamed by the
-mpu9250_imu.ino firmware (yaw-only quaternion from gyro-Z integration +
-gyro + linear acceleration, ~60Hz) and republishes them as sensor_msgs/Imu
-on imu/data, frame_id imu_link, for robot_localization's ekf_node to fuse
-with wheel odometry.
+bno085_imu.ino firmware (absolute orientation quaternion from the
+BNO085's onboard sensor fusion + calibrated gyro + linear acceleration,
+~100Hz) and republishes them as sensor_msgs/Imu on imu/data, frame_id
+imu_link, for robot_localization's ekf_node to fuse with wheel odometry.
 """
 
 import threading
@@ -87,11 +87,9 @@ class ImuNode(Node):
             msg.orientation.x = qi
             msg.orientation.y = qj
             msg.orientation.z = qk
-            # Yaw-only quaternion, gyro-Z integrated with a boot-time bias
-            # calibration — no magnetometer, so it's a de-biased estimate
-            # that still drifts slowly over time, not an absolute
-            # reference. Fixed diagonal covariance is good enough for EKF
-            # fusion here.
+            # Full 3-axis absolute orientation from the BNO085's onboard
+            # sensor fusion (accel+gyro+magnetometer), not just yaw. Fixed
+            # diagonal covariance is good enough for EKF fusion here.
             msg.orientation_covariance = [
                 0.01, 0.0,  0.0,
                 0.0,  0.01, 0.0,
