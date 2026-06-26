@@ -15,12 +15,20 @@ To enroll a specific name: publish the name to diarization/register, then speak.
 """
 
 import os
+import sys
 import threading
 import queue
 from collections import deque
 
+# VitisAI EP setup before onnxruntime import.
+_VENV_SITE = '/home/dimi/ryzenai_venv/lib/python3.12/site-packages'
+if os.path.isdir(_VENV_SITE):
+    sys.path.insert(0, _VENV_SITE)
+os.environ.setdefault('XILINX_XRT', '/opt/xilinx/xrt')
+os.environ.setdefault('RYZEN_AI_INSTALLATION_PATH', '/home/dimi/ryzenai_venv')
+
 import numpy as np
-import webrtcvad
+import onnxruntime as ort
 import sounddevice as sd
 from resemblyzer import VoiceEncoder, preprocess_wav
 
@@ -29,8 +37,43 @@ from rclpy.node import Node
 from std_msgs.msg import String
 
 SAMPLE_RATE    = 16000
-FRAME_MS       = 30                              # webrtcvad requires 10/20/30ms frames
+FRAME_MS       = 30
 FRAME_SAMPLES  = SAMPLE_RATE * FRAME_MS // 1000  # 480 samples per frame
+
+_VAIP_CONFIG   = '/home/dimi/ryzenai_venv/voe-4.0-linux_x86_64/vaip_config.json'
+_SILERO_MODEL  = '/home/dimi/.local/lib/python3.12/site-packages/openwakeword/resources/models/silero_vad.onnx'
+
+
+class SileroVAD:
+    """Silero VAD ONNX session with persistent LSTM state, running on NPU."""
+    def __init__(self):
+        opts = ort.SessionOptions()
+        opts.inter_op_num_threads = 1
+        opts.intra_op_num_threads = 1
+        if os.path.isfile(_VAIP_CONFIG):
+            self._sess = ort.InferenceSession(
+                _SILERO_MODEL, sess_options=opts,
+                providers=['VitisAIExecutionProvider', 'CPUExecutionProvider'],
+                provider_options=[{'config_file': _VAIP_CONFIG}, {}])
+        else:
+            self._sess = ort.InferenceSession(
+                _SILERO_MODEL, sess_options=opts,
+                providers=['CPUExecutionProvider'])
+        self._sr = np.array(SAMPLE_RATE, dtype=np.int64)
+        self.reset()
+
+    def reset(self):
+        self._h = np.zeros((2, 1, 64), dtype=np.float32)
+        self._c = np.zeros((2, 1, 64), dtype=np.float32)
+
+    def is_speech(self, frame_int16: np.ndarray, threshold: float = 0.5) -> bool:
+        x = frame_int16.astype(np.float32) / 32768.0
+        x = x[np.newaxis, :]  # (1, N)
+        out, hn, cn = self._sess.run(None, {
+            'input': x, 'sr': self._sr, 'h': self._h, 'c': self._c
+        })
+        self._h, self._c = hn, cn
+        return float(out[0, 0]) >= threshold
 PROFILES_FILE  = os.path.expanduser('~/.robot_speakers.npz')
 MIN_FRAMES_FOR_EMBED = 17                        # ~0.5s — shorter segments give bad embeddings
 
@@ -58,7 +101,8 @@ class DiarizationNode(Node):
         self._sil_lim   = self.get_parameter('silence_frames').value
         self._max_seg   = self.get_parameter('max_segment_frames').value
 
-        self._vad = webrtcvad.Vad(self.get_parameter('vad_aggressiveness').value)
+        self._vad = SileroVAD()
+        self.get_logger().info(f'VAD: Silero on {self._vad._sess.get_providers()[0]}')
 
         self.get_logger().info('Loading VoiceEncoder…')
         self._encoder = VoiceEncoder()
@@ -141,7 +185,7 @@ class DiarizationNode(Node):
                 continue
 
             try:
-                is_speech = self._vad.is_speech(frame.tobytes(), SAMPLE_RATE)
+                is_speech = self._vad.is_speech(frame)
             except Exception:
                 continue
 

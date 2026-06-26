@@ -11,3 +11,6 @@ training/wake_word_max/features.npz
 # regenerate via scripts/save_map.sh
 maps/*.posegraph
 maps/*.data
+
+# Quantized ONNX model — regenerate via scripts/quantize_yolo.sh
+*.onnx

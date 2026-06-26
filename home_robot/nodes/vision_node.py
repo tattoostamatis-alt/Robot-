@@ -42,7 +42,7 @@ class VisionNode(Node):
     def __init__(self):
         super().__init__('vision_node')
 
-        self.declare_parameter('backend', 'ollama')
+        self.declare_parameter('backend', 'gemini')
         self.declare_parameter('model', 'qwen3-vl:4b-instruct')
         self.declare_parameter('gemini_model', 'gemini-flash-lite-latest')
         self.declare_parameter('keep_alive', '5m')
