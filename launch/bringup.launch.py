@@ -60,10 +60,14 @@ def generate_launch_description():
     slam_map_file = LaunchConfiguration('slam_map_file', default='')
     use_keepout   = LaunchConfiguration('use_keepout',   default='false')
     use_tracker         = LaunchConfiguration('use_tracker',         default='false')
+    use_pose            = LaunchConfiguration('use_pose',            default='false')
+    use_face_detection  = LaunchConfiguration('use_face_detection',  default='false')
     use_diarization     = LaunchConfiguration('use_diarization',     default='false')
     use_recovery        = LaunchConfiguration('use_recovery',        default='true')
     use_prediction      = LaunchConfiguration('use_prediction',      default='false')
     use_situational     = LaunchConfiguration('use_situational',     default='false')
+    use_mission         = LaunchConfiguration('use_mission',         default='true')
+    use_semantic_costmap = LaunchConfiguration('use_semantic_costmap', default='false')
     # RTAB-Map database path — placed alongside slam_toolbox maps so all
     # mapping artefacts live in one directory. Pass delete_db_on_start:=true
     # to recover from a corrupted database (see scripts/reset_rtabmap.sh).
@@ -443,6 +447,24 @@ def generate_launch_description():
         condition=IfCondition(use_camera),
     )
 
+    # ── Pose estimation (YOLO11n-pose on NPU) ────────────────────
+    pose_node = Node(
+        package='home_robot',
+        executable='pose_node.py',
+        name='pose_node',
+        output='screen',
+        condition=IfCondition(use_pose),
+    )
+
+    # ── Face detection (YuNet on NPU) ─────────────────────────────
+    face_detection_node = Node(
+        package='home_robot',
+        executable='face_detection_node.py',
+        name='face_detection_node',
+        output='screen',
+        condition=IfCondition(use_face_detection),
+    )
+
     # ── SORT multi-object tracker ─────────────────────────────────
     # Wraps detected_objects with persistent integer track IDs and estimated
     # pixel-space velocities. Publishes tracked_objects (same JSON format +
@@ -501,6 +523,27 @@ def generate_launch_description():
         name='situational_awareness_node',
         output='screen',
         condition=IfCondition(use_situational),
+    )
+
+    # ── Mission executor — patrol, find, dock, check_rooms ───────
+    # Triggered via mission/start topic. Default ON — no extra hardware needed.
+    mission_node = Node(
+        package='home_robot',
+        executable='mission_executor_node.py',
+        name='mission_executor_node',
+        output='screen',
+        condition=IfCondition(use_mission),
+    )
+
+    # ── Semantic costmap — inflated person/animal zones ───────────
+    # Publishes /semantic_obstacles with per-class radius expansion.
+    # Needs use_camera:=true; enable when people are expected nearby.
+    semantic_costmap_node_action = Node(
+        package='home_robot',
+        executable='semantic_costmap_node.py',
+        name='semantic_costmap_node',
+        output='screen',
+        condition=IfCondition(use_semantic_costmap),
     )
 
     # ── Wake word detector (openWakeWord) ────────────────────────
@@ -699,10 +742,14 @@ def generate_launch_description():
         DeclareLaunchArgument('slam_map_file', default_value=''),
         DeclareLaunchArgument('use_keepout',         default_value='false'),
         DeclareLaunchArgument('use_tracker',         default_value='false'),
+        DeclareLaunchArgument('use_pose',            default_value='false'),
+        DeclareLaunchArgument('use_face_detection',  default_value='false'),
         DeclareLaunchArgument('use_diarization',     default_value='false'),
-        DeclareLaunchArgument('use_recovery',        default_value='true'),
-        DeclareLaunchArgument('use_prediction',      default_value='false'),
-        DeclareLaunchArgument('use_situational',     default_value='false'),
+        DeclareLaunchArgument('use_recovery',           default_value='true'),
+        DeclareLaunchArgument('use_prediction',         default_value='false'),
+        DeclareLaunchArgument('use_situational',        default_value='false'),
+        DeclareLaunchArgument('use_mission',            default_value='true'),
+        DeclareLaunchArgument('use_semantic_costmap',   default_value='false'),
         DeclareLaunchArgument('rtabmap_db',
             default_value=os.path.expanduser('~/robot_ws/maps/rtabmap.db')),
         DeclareLaunchArgument('delete_db_on_start',  default_value='false'),
@@ -729,11 +776,15 @@ def generate_launch_description():
         explore_node,
         realsense_node,
         detector_node,
+        pose_node,
+        face_detection_node,
         tracker_node,
         diarization_node_action,
         recovery_node,
         prediction_node,
         situational_node,
+        mission_node,
+        semantic_costmap_node_action,
         wake_word_node,
         stt_node,
         doa_node,

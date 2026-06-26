@@ -172,7 +172,7 @@ local_costmap:
         z_voxels: 16
         max_obstacle_height: 2.0
         mark_threshold: 0
-        observation_sources: scan depth_camera predicted_obstacles
+        observation_sources: scan depth_camera predicted_obstacles semantic_obstacles
         scan:
           topic: /scan
           max_obstacle_height: 2.0
@@ -196,6 +196,17 @@ local_costmap:
           obstacle_min_range: 0.0
         predicted_obstacles:
           topic: /predicted_obstacles
+          max_obstacle_height: 2.0
+          min_obstacle_height: 0.0
+          clearing: false
+          marking: true
+          data_type: "PointCloud2"
+          raytrace_max_range: 5.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 5.0
+          obstacle_min_range: 0.0
+        semantic_obstacles:
+          topic: /semantic_obstacles
           max_obstacle_height: 2.0
           min_obstacle_height: 0.0
           clearing: false
