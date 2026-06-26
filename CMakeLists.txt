@@ -26,6 +26,9 @@ install(PROGRAMS
   home_robot/nodes/person_follower_node.py
   home_robot/nodes/tracker_node.py
   home_robot/nodes/diarization_node.py
+  home_robot/nodes/recovery_manager_node.py
+  home_robot/nodes/obstacle_prediction_node.py
+  home_robot/nodes/situational_awareness_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

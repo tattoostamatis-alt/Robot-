@@ -59,8 +59,11 @@ def generate_launch_description():
     slam_mode     = LaunchConfiguration('slam_mode',     default='mapping')
     slam_map_file = LaunchConfiguration('slam_map_file', default='')
     use_keepout   = LaunchConfiguration('use_keepout',   default='false')
-    use_tracker   = LaunchConfiguration('use_tracker',   default='false')
-    use_diarization = LaunchConfiguration('use_diarization', default='false')
+    use_tracker         = LaunchConfiguration('use_tracker',         default='false')
+    use_diarization     = LaunchConfiguration('use_diarization',     default='false')
+    use_recovery        = LaunchConfiguration('use_recovery',        default='true')
+    use_prediction      = LaunchConfiguration('use_prediction',      default='false')
+    use_situational     = LaunchConfiguration('use_situational',     default='false')
     # RTAB-Map database path — placed alongside slam_toolbox maps so all
     # mapping artefacts live in one directory. Pass delete_db_on_start:=true
     # to recover from a corrupted database (see scripts/reset_rtabmap.sh).
@@ -465,6 +468,41 @@ def generate_launch_description():
         condition=IfCondition(use_diarization),
     )
 
+    # ── Physical stuck detection + Nav2 backup/spin recovery ─────
+    # Default ON — requires no extra hardware. Publishes recovery/status
+    # and speech_response. Detects stuck via cmd_vel_safe vs /odom.
+    recovery_node = Node(
+        package='home_robot',
+        executable='recovery_manager_node.py',
+        name='recovery_manager_node',
+        output='screen',
+        condition=IfCondition(use_recovery),
+    )
+
+    # ── Moving-obstacle trajectory prediction ─────────────────────
+    # Projects tracked_objects with velocity > min_speed ahead by `horizon`
+    # seconds and publishes /predicted_obstacles PointCloud2 for Nav2's
+    # local_costmap. Needs use_tracker:=true + use_camera:=true.
+    prediction_node = Node(
+        package='home_robot',
+        executable='obstacle_prediction_node.py',
+        name='obstacle_prediction_node',
+        output='screen',
+        condition=IfCondition(use_prediction),
+    )
+
+    # ── Situational awareness (room/objects/system → situation_context) ──
+    # Publishes a JSON context snapshot at 1Hz; llm_bridge_node injects it
+    # as a system message before every LLM turn so Max always knows his
+    # location, nearby objects, and system health without tool calls.
+    situational_node = Node(
+        package='home_robot',
+        executable='situational_awareness_node.py',
+        name='situational_awareness_node',
+        output='screen',
+        condition=IfCondition(use_situational),
+    )
+
     # ── Wake word detector (openWakeWord) ────────────────────────
     wake_word_node = Node(
         package='home_robot',
@@ -662,6 +700,9 @@ def generate_launch_description():
         DeclareLaunchArgument('use_keepout',         default_value='false'),
         DeclareLaunchArgument('use_tracker',         default_value='false'),
         DeclareLaunchArgument('use_diarization',     default_value='false'),
+        DeclareLaunchArgument('use_recovery',        default_value='true'),
+        DeclareLaunchArgument('use_prediction',      default_value='false'),
+        DeclareLaunchArgument('use_situational',     default_value='false'),
         DeclareLaunchArgument('rtabmap_db',
             default_value=os.path.expanduser('~/robot_ws/maps/rtabmap.db')),
         DeclareLaunchArgument('delete_db_on_start',  default_value='false'),
@@ -690,6 +731,9 @@ def generate_launch_description():
         detector_node,
         tracker_node,
         diarization_node_action,
+        recovery_node,
+        prediction_node,
+        situational_node,
         wake_word_node,
         stt_node,
         doa_node,
