@@ -32,12 +32,7 @@ _NMS_THR     = 0.3
 
 
 def _build_session():
-    providers = ort.get_available_providers()
-    if 'VitisAIExecutionProvider' in providers and os.path.isfile(_VAIP_CONFIG):
-        return ort.InferenceSession(
-            _MODEL_PATH,
-            providers=['VitisAIExecutionProvider', 'CPUExecutionProvider'],
-            provider_options=[{'config_file': _VAIP_CONFIG}, {}]), 'NPU'
+    # YuNet is 158 KB — CPU inference is <3ms, no benefit mapping to NPU.
     return ort.InferenceSession(_MODEL_PATH, providers=['CPUExecutionProvider']), 'CPU'
 
 
