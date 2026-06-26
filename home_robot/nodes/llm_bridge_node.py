@@ -206,7 +206,7 @@ class LLMBridgeNode(Node):
         self.declare_parameter('model', 'qwen3-vl:4b-instruct')
         self.declare_parameter('gemini_model', 'gemini-flash-lite-latest')
         self.declare_parameter('lemonade_url', 'http://127.0.0.1:13305/api/v1')
-        self.declare_parameter('lemonade_model', 'qwen3.5-9b-FLM')
+        self.declare_parameter('lemonade_model', 'qwen3vl-it-4b-FLM')
         self.declare_parameter('keep_alive', '10m')
         self.declare_parameter('temperature', 0.1)
         self.declare_parameter('history_turns', 4)

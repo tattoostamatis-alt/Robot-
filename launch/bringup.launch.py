@@ -725,7 +725,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_person_follower', default_value='false'),
         DeclareLaunchArgument('use_llm',       default_value='false'),
         DeclareLaunchArgument('llm_backend',   default_value='lemonade'),
-        DeclareLaunchArgument('vision_backend', default_value='gemini'),
+        DeclareLaunchArgument('vision_backend', default_value='lemonade'),
         DeclareLaunchArgument('use_planner',   default_value='false'),
         DeclareLaunchArgument('use_vision',    default_value='false'),
         DeclareLaunchArgument('use_memory',    default_value='false'),

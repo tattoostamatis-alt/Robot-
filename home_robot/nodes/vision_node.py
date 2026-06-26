@@ -13,9 +13,11 @@ Used by llm_bridge_node.py's `look` tool ("ask Max what he sees").
 import os
 import threading
 
+import base64
 import cv2
 import ollama
 import rclpy
+import requests
 from cv_bridge import CvBridge
 from dotenv import load_dotenv
 from rclpy.node import Node
@@ -42,14 +44,18 @@ class VisionNode(Node):
     def __init__(self):
         super().__init__('vision_node')
 
-        self.declare_parameter('backend', 'gemini')
+        self.declare_parameter('backend', 'lemonade')
         self.declare_parameter('model', 'qwen3-vl:4b-instruct')
         self.declare_parameter('gemini_model', 'gemini-flash-lite-latest')
+        self.declare_parameter('lemonade_url', 'http://127.0.0.1:13305/api/v1')
+        self.declare_parameter('lemonade_model', 'qwen3vl-it-4b-FLM')
         self.declare_parameter('keep_alive', '5m')
 
         self.backend = self.get_parameter('backend').value
         self.model = self.get_parameter('model').value
         self.gemini_model = self.get_parameter('gemini_model').value
+        self.lemonade_url = self.get_parameter('lemonade_url').value
+        self.lemonade_model = self.get_parameter('lemonade_model').value
         self.keep_alive = self.get_parameter('keep_alive').value
 
         self._gemini_client = None
@@ -66,9 +72,13 @@ class VisionNode(Node):
         self.create_subscription(Image, '/camera/camera/color/image_raw', self._on_image, 1)
         self.create_subscription(String, 'vision/query', self._on_query, 10)
 
-        self.get_logger().info(
-            f'Vision node started — backend={self.backend} '
-            f'model={self.gemini_model if self.backend == "gemini" else self.model}')
+        if self.backend == 'gemini':
+            active_model = self.gemini_model
+        elif self.backend == 'lemonade':
+            active_model = self.lemonade_model
+        else:
+            active_model = self.model
+        self.get_logger().info(f'Vision node started — backend={self.backend} model={active_model}')
 
     def _on_image(self, msg: Image):
         with self._frame_lock:
@@ -108,6 +118,8 @@ class VisionNode(Node):
         try:
             if self.backend == 'gemini':
                 answer = self._query_gemini(jpg.tobytes(), question)
+            elif self.backend == 'lemonade':
+                answer = self._query_lemonade(jpg.tobytes(), question)
             else:
                 answer = self._query_ollama(jpg.tobytes(), question)
         except Exception as e:
@@ -128,6 +140,23 @@ class VisionNode(Node):
             keep_alive=self.keep_alive,
         )
         return (resp.message.content or '').strip()
+
+    def _query_lemonade(self, jpg_bytes, question):
+        b64 = base64.b64encode(jpg_bytes).decode('ascii')
+        payload = {
+            'model': self.lemonade_model,
+            'messages': [{
+                'role': 'user',
+                'content': [
+                    {'type': 'image_url',
+                     'image_url': {'url': f'data:image/jpeg;base64,{b64}'}},
+                    {'type': 'text', 'text': PROMPT_TEMPLATE.format(question=question)},
+                ],
+            }],
+        }
+        r = requests.post(f'{self.lemonade_url}/chat/completions', json=payload, timeout=60)
+        r.raise_for_status()
+        return (r.json()['choices'][0]['message'].get('content') or '').strip()
 
     def _query_gemini(self, jpg_bytes, question):
         from google.genai import types
