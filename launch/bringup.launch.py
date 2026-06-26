@@ -29,6 +29,12 @@ def generate_launch_description():
     pick_approach_height = LaunchConfiguration('pick_approach_height', default='0.10')
     use_wake_word = LaunchConfiguration('use_wake_word', default='false')
     use_stt       = LaunchConfiguration('use_stt',       default='false')
+    use_doa             = LaunchConfiguration('use_doa',             default='false')
+    doa_rotate_on_wake  = LaunchConfiguration('doa_rotate_on_wake',  default='true')
+    doa_rotate_speed    = LaunchConfiguration('doa_rotate_speed',    default='0.6')
+    doa_min_angle_deg   = LaunchConfiguration('doa_min_angle_deg',   default='20.0')
+    doa_led_enabled     = LaunchConfiguration('doa_led_enabled',     default='true')
+    use_person_follower = LaunchConfiguration('use_person_follower', default='false')
     use_llm       = LaunchConfiguration('use_llm',       default='false')
     llm_backend   = LaunchConfiguration('llm_backend',   default='lemonade')
     vision_backend = LaunchConfiguration('vision_backend', default='gemini')
@@ -53,6 +59,14 @@ def generate_launch_description():
     slam_mode     = LaunchConfiguration('slam_mode',     default='mapping')
     slam_map_file = LaunchConfiguration('slam_map_file', default='')
     use_keepout   = LaunchConfiguration('use_keepout',   default='false')
+    use_tracker   = LaunchConfiguration('use_tracker',   default='false')
+    use_diarization = LaunchConfiguration('use_diarization', default='false')
+    # RTAB-Map database path — placed alongside slam_toolbox maps so all
+    # mapping artefacts live in one directory. Pass delete_db_on_start:=true
+    # to recover from a corrupted database (see scripts/reset_rtabmap.sh).
+    rtabmap_db    = LaunchConfiguration('rtabmap_db',
+                        default=os.path.expanduser('~/robot_ws/maps/rtabmap.db'))
+    delete_db     = LaunchConfiguration('delete_db_on_start', default='false')
 
     # ── SLAMTEC C1 LIDAR ─────────────────────────────────────────
     # Provided by ros-sllidar-c1.service (systemd, always running on
@@ -316,6 +330,10 @@ def generate_launch_description():
             'cloud_max_depth': 6.0,
             'cloud_voxel_size': 0.01,
             'cloud_output_voxelized': True,
+            # Keep the database alongside slam_toolbox maps. Pass
+            # delete_db_on_start:=true to recover from a crash-corrupted DB.
+            'database_path': rtabmap_db,
+            'delete_db_on_start': delete_db,
         }],
         remappings=[
             ('rgb/image', '/camera/camera/color/image_raw'),
@@ -422,6 +440,31 @@ def generate_launch_description():
         condition=IfCondition(use_camera),
     )
 
+    # ── SORT multi-object tracker ─────────────────────────────────
+    # Wraps detected_objects with persistent integer track IDs and estimated
+    # pixel-space velocities. Publishes tracked_objects (same JSON format +
+    # track_id/track_age/vel_x/vel_y). Needs use_camera:=true.
+    tracker_node = Node(
+        package='home_robot',
+        executable='tracker_node.py',
+        name='tracker_node',
+        output='screen',
+        condition=IfCondition(use_tracker),
+    )
+
+    # ── Speaker diarization (resemblyzer d-vectors + webrtcvad) ───
+    # Continuously listens on the microphone and publishes who is speaking
+    # on current_speaker. Enroll a voice by publishing the name to
+    # diarization/register then speaking; profiles persist in
+    # ~/.robot_speakers.npz. Runs independently of the STT/wake-word path.
+    diarization_node_action = Node(
+        package='home_robot',
+        executable='diarization_node.py',
+        name='diarization_node',
+        output='screen',
+        condition=IfCondition(use_diarization),
+    )
+
     # ── Wake word detector (openWakeWord) ────────────────────────
     wake_word_node = Node(
         package='home_robot',
@@ -438,6 +481,30 @@ def generate_launch_description():
         name='stt_node',
         output='screen',
         condition=IfCondition(use_stt),
+    )
+
+    # ── Direction of Arrival (XVF3800 hardware DoA) ───────────────
+    doa_node = Node(
+        package='home_robot',
+        executable='doa_node.py',
+        name='doa_node',
+        output='screen',
+        condition=IfCondition(use_doa),
+        parameters=[{
+            'rotate_on_wake': doa_rotate_on_wake,
+            'rotate_speed':   doa_rotate_speed,
+            'min_angle_deg':  doa_min_angle_deg,
+            'led_enabled':    doa_led_enabled,
+        }],
+    )
+
+    # ── Person follower (D435 depth + DoA) ────────────────────────
+    person_follower_node = Node(
+        package='home_robot',
+        executable='person_follower_node.py',
+        name='person_follower_node',
+        output='screen',
+        condition=IfCondition(use_person_follower),
     )
 
     # ── LLM bridge (Qwen3 tool calling, speech_text -> actions/speech_response) ─
@@ -569,6 +636,12 @@ def generate_launch_description():
         DeclareLaunchArgument('pick_approach_height', default_value='0.10'),
         DeclareLaunchArgument('use_wake_word', default_value='false'),
         DeclareLaunchArgument('use_stt',       default_value='false'),
+        DeclareLaunchArgument('use_doa',            default_value='false'),
+        DeclareLaunchArgument('doa_rotate_on_wake', default_value='true'),
+        DeclareLaunchArgument('doa_rotate_speed',   default_value='0.6'),
+        DeclareLaunchArgument('doa_min_angle_deg',  default_value='20.0'),
+        DeclareLaunchArgument('doa_led_enabled',    default_value='true'),
+        DeclareLaunchArgument('use_person_follower', default_value='false'),
         DeclareLaunchArgument('use_llm',       default_value='false'),
         DeclareLaunchArgument('llm_backend',   default_value='lemonade'),
         DeclareLaunchArgument('vision_backend', default_value='gemini'),
@@ -586,7 +659,12 @@ def generate_launch_description():
         DeclareLaunchArgument('imu_port',      default_value='/dev/imu'),
         DeclareLaunchArgument('slam_mode',     default_value='mapping'),
         DeclareLaunchArgument('slam_map_file', default_value=''),
-        DeclareLaunchArgument('use_keepout',   default_value='false'),
+        DeclareLaunchArgument('use_keepout',         default_value='false'),
+        DeclareLaunchArgument('use_tracker',         default_value='false'),
+        DeclareLaunchArgument('use_diarization',     default_value='false'),
+        DeclareLaunchArgument('rtabmap_db',
+            default_value=os.path.expanduser('~/robot_ws/maps/rtabmap.db')),
+        DeclareLaunchArgument('delete_db_on_start',  default_value='false'),
         DeclareLaunchArgument('use_obstacle_safety', default_value='true'),
         DeclareLaunchArgument('obstacle_safety_distance', default_value='0.5'),
 
@@ -610,8 +688,12 @@ def generate_launch_description():
         explore_node,
         realsense_node,
         detector_node,
+        tracker_node,
+        diarization_node_action,
         wake_word_node,
         stt_node,
+        doa_node,
+        person_follower_node,
         llm_bridge_node,
         memory_node,
         planner_node,

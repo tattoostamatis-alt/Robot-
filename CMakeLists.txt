@@ -21,6 +21,11 @@ install(PROGRAMS
   home_robot/nodes/task_planner_node.py
   home_robot/nodes/calibrate_odom.py
   home_robot/nodes/imu_node.py
+  home_robot/nodes/rag_memory_node.py
+  home_robot/nodes/doa_node.py
+  home_robot/nodes/person_follower_node.py
+  home_robot/nodes/tracker_node.py
+  home_robot/nodes/diarization_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
