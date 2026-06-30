@@ -22,7 +22,17 @@ unsigned long lastReportMs = 0;
 const unsigned long STALL_MS = 1500;  // no report for this long -> assume hung I2C bus
 
 void setReports() {
-  bno08x.enableReport(SH2_ROTATION_VECTOR, 10000);   // 100Hz
+  // GAME_ROTATION_VECTOR = gyro + accel fusion WITHOUT the magnetometer.
+  // The magnetometer-fused SH2_ROTATION_VECTOR gave an "absolute" heading
+  // that was corrupted indoors by the Roomba's DC motors and nearby metal,
+  // so the yaw jumped/drifted unpredictably -> EKF odom->base_link rotated
+  // -> the LiDAR scan no longer lined up with the mapped walls and AMCL
+  // could not stay converged ("the compass doesn't work"). For SLAM/AMCL we
+  // do NOT need true north -- only a stable, low-drift relative heading, and
+  // AMCL corrects the slow gyro yaw drift via scan matching. The game
+  // rotation vector yaw=0 is an arbitrary direction each boot, which is fine
+  // because AMCL computes map->odom anyway.
+  bno08x.enableReport(SH2_GAME_ROTATION_VECTOR, 10000);   // 100Hz
   bno08x.enableReport(SH2_GYROSCOPE_CALIBRATED, 10000);
   bno08x.enableReport(SH2_LINEAR_ACCELERATION, 10000);
 }
@@ -71,11 +81,11 @@ void loop() {
   if (bno08x.getSensorEvent(&sensorValue)) {
     lastReportMs = millis();
     switch (sensorValue.sensorId) {
-      case SH2_ROTATION_VECTOR:
-        qw = sensorValue.un.rotationVector.real;
-        qi = sensorValue.un.rotationVector.i;
-        qj = sensorValue.un.rotationVector.j;
-        qk = sensorValue.un.rotationVector.k;
+      case SH2_GAME_ROTATION_VECTOR:
+        qw = sensorValue.un.gameRotationVector.real;
+        qi = sensorValue.un.gameRotationVector.i;
+        qj = sensorValue.un.gameRotationVector.j;
+        qk = sensorValue.un.gameRotationVector.k;
         break;
       case SH2_GYROSCOPE_CALIBRATED:
         gx = sensorValue.un.gyroscope.x;

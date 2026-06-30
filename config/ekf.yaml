@@ -4,13 +4,14 @@
 ### wheel_base/right_trim calibration comments — that calibration reduces
 ### but doesn't eliminate turn error).
 ###
-### NOTE: the IMU is now a BNO085 (9-DOF, with magnetometer) — its
-### orientation output IS an absolute heading, not gyro-only drift like
-### the MPU9250 this replaced. The fusion mask below still only takes
-### yaw + yaw-rate from it (not roll/pitch), which is more conservative
-### than necessary now but hasn't been revisited. See nav2_params.yaml's
-### slam_toolbox minimum_travel_heading comment for how this interacts
-### with mapping.
+### NOTE: the IMU is a BNO085 but the firmware now streams the GAME
+### rotation vector (gyro + accel fusion, NO magnetometer) — see
+### firmware/bno085_imu.ino for why (magnetometer heading was corrupted
+### indoors by the Roomba's motors / metal, jumping the yaw and rotating
+### the scan off the walls). So the yaw is a stable LOW-DRIFT RELATIVE
+### heading, not true north. That is exactly what AMCL/SLAM want: AMCL
+### corrects the slow residual gyro drift via scan matching. The fusion
+### mask below takes yaw + yaw-rate from it (not roll/pitch).
 ###
 ### Key idea: wheel odom's own x/y/yaw already bakes in whatever heading
 ### error accumulated up to that point, so fusing its position doesn't fix

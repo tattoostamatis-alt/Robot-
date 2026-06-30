@@ -384,30 +384,46 @@ def generate_launch_description():
     )
 
     # Restores the last saved AMCL pose on startup (polls until AMCL is
-    # active, then publishes to /initialpose).  Falls back to global_localizer
-    # if no saved pose file exists.
+    # active, then publishes to /initialpose).  global_localizer auto-runs
+    # only when no per-map saved pose file exists.
     pose_saver_node = Node(
         package='home_robot',
         executable='pose_saver_node.py',
         name='pose_saver_node',
         output='screen',
-        parameters=[{'save_interval': 10.0, 'map_yaml': localization_map}],
+        parameters=[{'save_interval': 10.0, 'map_yaml': localization_map,
+                     # Don't restore the last pose on boot — global_localizer
+                     # self-localizes from a random start instead (the user
+                     # wants to power on anywhere without a manual 2D Pose
+                     # Estimate). pose_saver still saves the live pose.
+                     'restore_pose': False}],
         condition=IfCondition(use_localization),
     )
 
     # FFT scan-matching global localizer: finds the robot on the map by
     # correlating the LiDAR scan + D435 depth virtual scan against the
-    # occupancy map likelihood field.  auto_localize=False: it does NOT run
-    # on every boot — pose_saver restores the last saved pose instead (in an
-    # ambiguous/symmetric home the FFT auto-guess would override the good
-    # saved pose with a wrong one every startup).  Call /localize_globally
-    # manually when the robot is actually lost.
+    # occupancy map likelihood field.  Auto-runs only when pose_saver has
+    # no saved pose file for this map (defer_to_saved_pose:=true); otherwise
+    # pose_saver restores the last AMCL pose and the LiDAR stays aligned.
+    # Call /localize_globally manually when the robot was moved to a new spot.
+    # The laser→base_link frame conversion (_laser_to_base in the node) is
+    # required for this yaw=π-mounted lidar — without it every auto-match
+    # lands 180° flipped.
     global_localizer_node = Node(
         package='home_robot',
         executable='global_localizer_node.py',
         name='global_localizer',
         output='screen',
-        parameters=[{'auto_localize': False, 'depth_weight': 0.5}],
+        parameters=[{
+            'auto_localize': True,
+            # Run on EVERY boot, not just when no saved pose exists — the user
+            # wants the robot to self-localize from wherever it is powered on,
+            # never relying on a stale saved pose (which forced a manual 2D
+            # Pose Estimate whenever the robot had been moved).
+            'defer_to_saved_pose': False,
+            'map_yaml': localization_map,
+            'depth_weight': 0.5,
+        }],
         condition=IfCondition(use_localization),
     )
 

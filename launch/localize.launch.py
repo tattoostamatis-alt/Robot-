@@ -1,9 +1,13 @@
 """One command to open a saved map and localize on it — no manual 2D Pose Estimate.
 
-Loads a saved map (default 'kela') and brings up AMCL + the auto-localizer
-(pose_saver restores the last pose; global_localizer finds the robot from
-scratch via FFT scan-matching) + RViz, by including bringup.launch.py with the
-heavy AI/voice/camera stack switched off.
+Loads a saved map (default 'kela') and brings up AMCL + pose_saver (restores
+the last pose when available) + global_localizer (FFT scan-match only when
+no saved pose) + RViz, by including bringup.launch.py with the heavy
+AI/voice/camera stack switched off.
+
+If the robot was moved since the last session, call:
+  ros2 service call /localize_globally std_srvs/srv/Empty "{}"
+or delete ~/.ros/last_amcl_pose_<map>.yaml and relaunch.
 
 The LiDAR runs as a systemd service (ros-sllidar-c1.service) and is always up,
 so it is NOT started here. Wheel odometry + IMU + EKF (odom->base_link) and

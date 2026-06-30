@@ -51,8 +51,17 @@ class PoseSaverNode(Node):
         self.declare_parameter('publish_delay', 8.0)
         # Path to the active map's .yaml — used to pick a per-map pose file.
         self.declare_parameter('map_yaml', '')
+        # When False, do NOT publish the saved pose on startup — let
+        # global_localizer find the position from scratch instead. This is the
+        # default now: the user starts the robot anywhere on the map and it
+        # self-localizes, so a stale saved pose must not be restored on top of
+        # the global match (the two would fight over /initialpose). The node
+        # still SAVES the live AMCL pose periodically (harmless, useful for
+        # debugging / re-enabling restore later).
+        self.declare_parameter('restore_pose', False)
 
         self._interval = self.get_parameter('save_interval').value
+        self._restore_pose = self.get_parameter('restore_pose').value
         self._pose_file = _pose_file_for(self.get_parameter('map_yaml').value)
         self._last_pose = None
         self._restored = False
@@ -62,8 +71,16 @@ class PoseSaverNode(Node):
         self.create_subscription(PoseWithCovarianceStamped, '/amcl_pose', self._on_pose, 10)
         self.create_timer(self._interval, self._save)
 
-        # Poll every 1s until AMCL is ready, then publish the saved pose.
-        self._restore_timer = self.create_timer(1.0, self._try_restore)
+        # Poll every 1s until AMCL is ready, then publish the saved pose —
+        # only if restore_pose is enabled; otherwise global_localizer owns
+        # the initial pose.
+        if self._restore_pose:
+            self._restore_timer = self.create_timer(1.0, self._try_restore)
+        else:
+            self._restored = True
+            self.get_logger().info(
+                'restore_pose=False — global_localizer will set the initial '
+                'pose; pose_saver will only save the live pose')
 
         self.get_logger().info(f'pose_saver_node started — pose file: {self._pose_file}')
 
