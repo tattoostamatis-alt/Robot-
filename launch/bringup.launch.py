@@ -629,10 +629,10 @@ def generate_launch_description():
         executable='wake_word_node.py',
         name='wake_word_node',
         output='screen',
-        # threshold raised 0.50 -> 0.65: at 0.50 random noise/speech kept
-        # false-triggering "Max", so the beep fired continuously. Only beep
-        # on a genuine wake-word detection.
-        parameters=[{'threshold': 0.65}],
+        # threshold raised 0.50 -> 0.72: at 0.50 random noise/speech kept
+        # false-triggering "Max", so the beep fired continuously. 0.65 still
+        # let some through; 0.72 only fires on a genuine wake-word detection.
+        parameters=[{'threshold': 0.72}],
         condition=IfCondition(use_wake_word),
     )
 
