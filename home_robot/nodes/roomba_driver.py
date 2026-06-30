@@ -8,9 +8,126 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import BatteryState
 from std_msgs.msg import Bool, Float32
 import pycreate2
+import fcntl
 import math
+import os
+import select
 import struct
+import termios
 import time
+
+
+_BAUD_MAP = {
+    9600:   termios.B9600,
+    19200:  termios.B19200,
+    38400:  termios.B38400,
+    57600:  termios.B57600,
+    115200: termios.B115200,
+}
+
+
+class _RawTermiosSerial:
+    """Drop-in replacement for the pyserial ``Serial`` object that pycreate2's
+    SerialCommandInterface talks to, backed by raw ``os``/``termios`` instead.
+
+    Why: on this robot's FTDI FT232R the stock pyserial read path returns
+    partial/empty OI responses — the FTDI latency timer (~16ms) can hold a
+    short reply just past the driver's fixed post-write sleep, so ``read(4)``
+    fires before the bytes land and comes back 0/short. That misframes the
+    encoder packets (the "Encoder data not 4 bytes" / "implausible odom delta"
+    spam) and starves the EKF of wheel odometry while driving, so the LiDAR
+    scan drifts off the map. ``read()`` here *accumulates* until it has exactly
+    the requested number of bytes (or the timeout elapses), via ``select`` +
+    ``os.read``, so the framing stays aligned regardless of the latency timer.
+    Same raw-termios approach as imu_node.py.
+
+    Exposes only what pycreate2's SCI + roomba_driver use: ``is_open``,
+    ``write``, ``read``, ``reset_input_buffer``/``reset_output_buffer``,
+    ``close``, the ``rts``/``dtr`` modem lines (pycreate2.wake() pulses them
+    for the BRC wake — works on FTDI, unlike the CH340 ioctl hang), and the
+    ``port``/``baudrate`` attributes its prints read.
+    """
+
+    def __init__(self, port, baud, timeout=0.15):
+        self.port = port
+        self.baudrate = baud
+        self.timeout = timeout
+        self._rts = False
+        self._dtr = False
+        self._fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        speed = _BAUD_MAP[baud]
+        attrs = termios.tcgetattr(self._fd)
+        attrs[0] = 0                                              # iflag: raw input
+        attrs[1] = 0                                              # oflag: raw output
+        attrs[2] = termios.CS8 | termios.CREAD | termios.CLOCAL   # 8N1, no modem ctrl
+        attrs[3] = 0                                              # lflag: raw
+        attrs[4] = speed                                          # ispeed
+        attrs[5] = speed                                          # ospeed
+        attrs[6][termios.VMIN] = 0                               # non-blocking reads;
+        attrs[6][termios.VTIME] = 0                              # select() gates timing
+        termios.tcsetattr(self._fd, termios.TCSANOW, attrs)
+        flags = fcntl.fcntl(self._fd, fcntl.F_GETFL)
+        fcntl.fcntl(self._fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)  # blocking mode
+
+    @property
+    def is_open(self):
+        return self._fd is not None
+
+    def write(self, data):
+        return os.write(self._fd, data)
+
+    def read(self, num_bytes):
+        """Read exactly num_bytes, accumulating until they arrive or timeout."""
+        buf = b''
+        deadline = time.monotonic() + self.timeout
+        while len(buf) < num_bytes:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            ready, _, _ = select.select([self._fd], [], [], remaining)
+            if not ready:
+                break
+            chunk = os.read(self._fd, num_bytes - len(buf))
+            if not chunk:
+                break
+            buf += chunk
+        return buf
+
+    def reset_input_buffer(self):
+        termios.tcflush(self._fd, termios.TCIFLUSH)
+
+    def reset_output_buffer(self):
+        termios.tcflush(self._fd, termios.TCOFLUSH)
+
+    def _set_modem_bit(self, bit, level):
+        fcntl.ioctl(self._fd,
+                    termios.TIOCMBIS if level else termios.TIOCMBIC,
+                    struct.pack('I', bit))
+
+    @property
+    def rts(self):
+        return self._rts
+
+    @rts.setter
+    def rts(self, level):
+        self._rts = bool(level)
+        self._set_modem_bit(termios.TIOCM_RTS, level)
+
+    @property
+    def dtr(self):
+        return self._dtr
+
+    @dtr.setter
+    def dtr(self, level):
+        self._dtr = bool(level)
+        self._set_modem_bit(termios.TIOCM_DTR, level)
+
+    def close(self):
+        if self._fd is not None:
+            try:
+                os.close(self._fd)
+            finally:
+                self._fd = None
 
 
 class RoombaDriver(Node):
@@ -86,6 +203,18 @@ class RoombaDriver(Node):
         self.add_on_set_parameters_callback(self._on_set_parameters)
 
         self.bot = pycreate2.Create2(port, baud)
+        # Swap pycreate2's stock pyserial backend for a raw-termios one: the
+        # pyserial read path returned partial/empty OI responses on this FTDI
+        # adapter (latency-timer races -> "Encoder data not 4 bytes" / discarded
+        # "implausible odom delta"), which starved the EKF of wheel odometry and
+        # let the LiDAR scan drift off the map while driving. _RawTermiosSerial
+        # accumulates each read to the exact expected length. pycreate2 keeps
+        # owning the OI protocol (drive_direct/wake/start/full/get_sensors).
+        try:
+            self.bot.SCI.ser.close()
+        except Exception:
+            pass
+        self.bot.SCI.ser = _RawTermiosSerial(port, baud)
         # Connection health, used by the keep-awake watchdog (_keep_awake) to
         # auto-recover if the Roomba falls asleep. The one-shot init below is
         # NOT enough on its own: if the robot is already asleep at boot it
@@ -266,7 +395,9 @@ class RoombaDriver(Node):
             try:
                 self.bot.SCI.ser.reset_input_buffer()
                 self.bot.SCI.write(149, (2, 43, 44))  # Query List: 2 packets, IDs 43+44
-                time.sleep(0.015)
+                # No fixed post-write sleep needed: _RawTermiosSerial.read()
+                # blocks (up to its timeout) until all 4 bytes have arrived, so
+                # it no longer races the FTDI latency timer.
                 data = self.bot.SCI.read(4)
                 if len(data) != 4:
                     raise Exception(f'Encoder data not 4 bytes long, it is: {len(data)}')
