@@ -1,39 +1,29 @@
 #!/usr/bin/env python3
-"""LLM bridge — Qwen3 (via ollama), Qwen3.5 (via Lemonade/NPU,
-OpenAI-compatible API), or Gemini (via the google-genai API) tool calling,
-between speech_text and robot actions / speech_response.
+"""LLM bridge — on-demand vision: the camera frame is included only when the
+user's question is vision-related (keyword detection), keeping non-vision
+commands fast (~2s) while vision queries use the full VLM path (~11s).
 
-Subscribes to `speech_text` (std_msgs/String, from stt_node). Sends it to
-Qwen3 along with a fixed set of tools (tidy/goto/dock/stop/patrol/
-report_clutter) and a short rolling conversation history. Any tool calls
-are dispatched to the relevant ROS2 topics (see _dispatch_tool); a second
-LLM call, with the tool results appended, produces a short natural-language
-Greek reply, published on `speech_response` (std_msgs/String) for the
-planned edge-tts streaming TTS node.
+Qwen3-VL 4B (via Lemonade/NPU) handles vision + conversation.
+The `look` tool and vision_node.py are not needed.
 
-Action dispatch notes (current state of the rest of the stack):
-- `dock`/`goto(location='dock')` — published on `dock` (std_msgs/Bool),
-  consumed by roomba_driver.py (bot.seek_dock()).
+Subscribes to `speech_text` (std_msgs/String, from stt_node). Sends text
+(+ camera frame when vision-related) to Qwen3-VL with a fixed tool set and
+rolling history. Tool calls are dispatched to the relevant ROS2 topics; a
+follow-up LLM call produces a Greek reply on `speech_response` for the TTS node.
+
+Action dispatch notes:
+- `dock`/`goto(location='dock')` — published on `dock` (std_msgs/Bool).
 - `stop` — publishes a zero geometry_msgs/Twist on `cmd_vel`.
 - `goto(location=...)` — looks up `config/locations.yaml` and sends a real
-  nav2_msgs/action/NavigateToPose goal (same ActionClient pattern as
-  task_planner_node.py's `_navigate`), blocking on the result so the tool
-  reply reflects actual success/failure instead of a blind "started".
-  Locations are placeholders until SLAM mapping works (see project memory).
-- `tidy`/`patrol` — published as JSON on `tidy_command`/`patrol_command`,
-  executed by task_planner_node.py (Nav2 navigation + clutter check via
-  object_detector.py), which narrates progress on `speech_response`.
-- `report_clutter` — answered from the latest `detected_objects` message
-  (std_msgs/String JSON, from object_detector.py), no ROS dispatch needed.
-- `look(question)` — published on `vision/query` (std_msgs/String);
-  vision_node.py (qwen3-vl:4b-instruct via ollama) answers from the latest
-  camera frame on `vision/answer` (std_msgs/String). Blocks (with timeout)
-  for the reply since the result feeds the follow-up LLM call.
-- `system_status()` — read-only host diagnostics (CPU/RAM/disk/temperature
-  via psutil) plus the latest `battery/state` (sensor_msgs/BatteryState,
-  from roomba_driver.py). No ROS dispatch, answered directly.
+  nav2_msgs/action/NavigateToPose goal, blocking on the result.
+- `tidy`/`patrol` — published as JSON on `tidy_command`/`patrol_command`.
+- `report_clutter` — answered from the latest `detected_objects` message.
+- `system_status()` — host diagnostics via psutil + battery/state.
+- `remember` — stores a fact via rag_memory_node's memory/store topic.
 """
 
+import base64
+import cv2
 import json
 import math
 import os
@@ -49,46 +39,52 @@ import requests
 import yaml
 from action_msgs.msg import GoalStatus
 from ament_index_python.packages import get_package_share_directory
+from cv_bridge import CvBridge
 from dotenv import load_dotenv
 from geometry_msgs.msg import Quaternion, Twist
 from nav2_msgs.action import NavigateToPose
 from rclpy.action import ActionClient
 from rclpy.node import Node
-from sensor_msgs.msg import BatteryState
+from sensor_msgs.msg import BatteryState, Image
 from std_msgs.msg import Bool, String
 
 load_dotenv(os.path.expanduser('~/.env'))
 
 
-SYSTEM_PROMPT = """Είσαι ο "Max", ο φωνητικός βοηθός ενός ρομπότ καθαρισμού σπιτιού.
+# Greek keywords (accent-stripped) that signal a vision question.
+# When matched, the current camera frame is included in the LLM message.
+_VISION_KEYWORDS = {
+    'βλεπ', 'βλεπεις', 'βλεπω', 'κοιτ', 'κοιταξ', 'κοιτα', 'δες', 'δε ',
+    'εικον', 'χρωμ', 'αντικειμ', 'περιγρ', 'μπροστ', 'γυρω', 'υπαρχ',
+    'τι ειν', 'τι εχ', 'τι βλ', 'χωρος', 'δωματ', 'ακαταστ', 'βρωμ',
+}
 
-Όταν ο χρήστης ζητάει μια ενέργεια (καθάρισμα, μετακίνηση, επιστροφή στη
-βάση, σταμάτημα, περιπολία, αναφορά αντικειμένων) ή ρωτάει για την
-κατάσταση/υγεία/μπαταρία του υπολογιστή/ρομπότ (π.χ. "πώς είσαι;",
-"όλα καλά;", "πόση μπαταρία έχεις;"), κάλεσε το αντίστοιχο tool.
 
-ΣΗΜΑΝΤΙΚΟ: Δεν έχεις δική σου όραση — δεν "θυμάσαι" και δεν φαντάζεσαι τι
-υπάρχει γύρω σου. Αν ο χρήστης ρωτήσει οτιδήποτε για το τι βλέπεις, τι
-υπάρχει μπροστά/γύρω σου αυτή τη στιγμή, περιγραφή του χώρου, χρώματα,
-αντικείμενα κλπ, ΠΡΕΠΕΙ να καλέσεις το tool 'look' για να "δεις" μέσω της
-κάμερας — ποτέ μην απαντάς μόνος σου σε τέτοιες ερωτήσεις.
+def _needs_vision(text: str) -> bool:
+    """Return True if the text appears to be a vision-related question."""
+    import unicodedata
+    # Strip accents for robust matching
+    normalized = ''.join(
+        c for c in unicodedata.normalize('NFD', text.lower())
+        if unicodedata.category(c) != 'Mn'
+    )
+    return any(kw in normalized for kw in _VISION_KEYWORDS)
 
-ΣΗΜΑΝΤΙΚΟ: Αν ο χρήστης σου ζητήσει ρητά να θυμηθείς κάτι (π.χ. "θυμήσου
-ότι...", "να θυμάσαι ότι...", "κράτα στο μυαλό σου ότι..."), ΠΡΕΠΕΙ να
-καλέσεις το tool 'remember' με το ακριβές γεγονός — μην απαντάς απλά ότι
-θα το θυμηθείς χωρίς να καλέσεις το tool, αλλιώς δεν αποθηκεύεται πουθενά.
 
-Αν ο χρήστης απλώς ρωτάει κάτι άσχετο ή κάνει συζήτηση, απάντησε κανονικά
-χωρίς tool.
+SYSTEM_PROMPT = """Είσαι ο "Max", βοηθός ρομπότ καθαρισμού σπιτιού. Απάντα σύντομα, φιλικά, στα Ελληνικά, χωρίς emoji.
 
-Απάντα πάντα σύντομα, φιλικά και στα Ελληνικά, χωρίς emoji."""
+Κάλεσε tool όταν ο χρήστης ζητάει ενέργεια (κίνηση, καθαρισμό, docking, εξερεύνηση, αναφορά αντικειμένων) ή ρωτάει κατάσταση/μπαταρία. Αν απλώς συζητά, απάντα χωρίς tool.
+
+Αν ζητήσει να θυμηθείς κάτι ("θυμήσου...", "να θυμάσαι..."), ΠΑΝΤΑ κάλεσε 'remember' — αλλιώς χάνεται.
+
+Αν η ερώτηση αφορά την εικόνα, η περιγραφή της κάμερας συνοδεύει ήδη το μήνυμα."""
 
 TOOLS = [
     {'type': 'function', 'function': {
         'name': 'tidy',
         'description': 'Ξεκίνα να τακτοποιείς/καθαρίζεις ένα δωμάτιο',
         'parameters': {'type': 'object', 'properties': {
-            'room': {'type': 'string', 'enum': ['living_room', 'bedroom', 'kitchen', 'all'],
+            'room': {'type': 'string', 'enum': ['saloni', 'kouzina', 'diadromos', 'toualeta', 'domatio tou max', 'domatio tou mbamba', 'all'],
                      'description': 'Το δωμάτιο προς καθαρισμό'},
         }, 'required': ['room']},
     }},
@@ -96,7 +92,7 @@ TOOLS = [
         'name': 'goto',
         'description': 'Πήγαινε σε μια συγκεκριμένη τοποθεσία',
         'parameters': {'type': 'object', 'properties': {
-            'location': {'type': 'string', 'enum': ['living_room', 'bedroom', 'kitchen', 'dock'],
+            'location': {'type': 'string', 'enum': ['saloni', 'kouzina', 'diadromos', 'toualeta', 'domatio tou max', 'domatio tou mbamba', 'dock'],
                           'description': 'Η τοποθεσία προορισμού'},
         }, 'required': ['location']},
     }},
@@ -128,20 +124,25 @@ TOOLS = [
         'parameters': {'type': 'object', 'properties': {}},
     }},
     {'type': 'function', 'function': {
-        'name': 'report_clutter',
-        'description': 'Πες τι αντικείμενα/ακαταστασία βλέπει αυτή τη στιγμή η κάμερα',
+        'name': 'explore',
+        'description': 'Ξεκίνα αυτόνομη εξερεύνηση — κινείσαι μόνος σου και χαρτογραφείς '
+                        'άγνωστες περιοχές του σπιτιού (frontier exploration). '
+                        'Χρήσιμο για: "εξερεύνησε", "χαρτογράφησε", "δες τι υπάρχει γύρω".',
         'parameters': {'type': 'object', 'properties': {}},
     }},
     {'type': 'function', 'function': {
-        'name': 'look',
-        'description': 'ΥΠΟΧΡΕΩΤΙΚΟ tool για κάθε ερώτηση σχετικά με το τι βλέπει/τι '
-                        'υπάρχει γύρω από το ρομπότ αυτή τη στιγμή (π.χ. "τι βλέπεις;", '
-                        '"τι υπάρχει μπροστά σου;", περιγραφή χώρου, χρώματα, '
-                        'αντικείμενα). Κοιτάζει μέσα από την κάμερα και απαντά.',
-        'parameters': {'type': 'object', 'properties': {
-            'question': {'type': 'string',
-                          'description': 'Η ερώτηση σχετικά με ό,τι βλέπει η κάμερα'},
-        }, 'required': ['question']},
+        'name': 'stop_explore',
+        'description': 'Σταμάτα την αυτόνομη εξερεύνηση.',
+        'parameters': {'type': 'object', 'properties': {}},
+    }},
+    {'type': 'function', 'function': {
+        'name': 'report_clutter',
+        'description': 'Αναφορά ακαταστασίας για καθαρισμό/τακτοποίηση — επιστρέφει '
+                        'λίστα αντικειμένων που εντόπισε το YOLO ως clutter (π.χ. '
+                        '"πόσα αντικείμενα έχουν μείνει σκόρπια;", "υπάρχει ακαταστασία;"). '
+                        'ΟΧΙ για γενικές ερωτήσεις "τι βλέπεις" — αυτές απαντώνται '
+                        'από το vision context που ήδη έχεις.',
+        'parameters': {'type': 'object', 'properties': {}},
     }},
     {'type': 'function', 'function': {
         'name': 'remember',
@@ -210,10 +211,10 @@ class LLMBridgeNode(Node):
         self.declare_parameter('keep_alive', '10m')
         self.declare_parameter('temperature', 0.1)
         self.declare_parameter('history_turns', 4)
-        self.declare_parameter('vision_timeout', 60.0)
         self.declare_parameter('nav_timeout', 60.0)
         self.declare_parameter('memory_enabled', False)
         self.declare_parameter('memory_timeout', 5.0)
+        self.declare_parameter('jpeg_quality', 70)
 
         self.backend = self.get_parameter('backend').value
         self.model = self.get_parameter('model').value
@@ -223,10 +224,10 @@ class LLMBridgeNode(Node):
         self.keep_alive = self.get_parameter('keep_alive').value
         self.temperature = self.get_parameter('temperature').value
         self.history_turns = self.get_parameter('history_turns').value
-        self.vision_timeout = self.get_parameter('vision_timeout').value
         self.nav_timeout = self.get_parameter('nav_timeout').value
         self.memory_enabled = self.get_parameter('memory_enabled').value
         self.memory_timeout = self.get_parameter('memory_timeout').value
+        self.jpeg_quality = self.get_parameter('jpeg_quality').value
 
         self._gemini_client = None
         self._gemini_tool = None
@@ -246,26 +247,29 @@ class LLMBridgeNode(Node):
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
         self.tidy_pub = self.create_publisher(String, 'tidy_command', 10)
         self.patrol_pub = self.create_publisher(Bool, 'patrol_command', 10)
-        self.vision_query_pub = self.create_publisher(String, 'vision/query', 10)
+        self.explore_pub = self.create_publisher(Bool, 'explore_command', 10)
         self.memory_store_pub = self.create_publisher(String, 'memory/store', 10)
         self.memory_query_pub = self.create_publisher(String, 'memory/query', 10)
 
         self._history = []
         self._busy = threading.Lock()
         self._latest_objects = None
-        self._vision_event = threading.Event()
-        self._vision_answer = None
         self._latest_battery = None
         self._memory_event = threading.Event()
         self._memory_answer = None
-        self._situation: dict = {}   # from situational_awareness_node, optional
+        self._situation: dict = {}
+
+        # Camera frame — encoded to JPEG once on arrival, reused per message
+        self._bridge = CvBridge()
+        self._frame_lock = threading.Lock()
+        self._latest_frame_jpg: bytes | None = None
 
         self.create_subscription(String, 'speech_text', self._on_speech_text, 10)
         self.create_subscription(String, 'detected_objects', self._on_detected_objects, 10)
-        self.create_subscription(String, 'vision/answer', self._on_vision_answer, 10)
         self.create_subscription(BatteryState, 'battery/state', self._on_battery_state, 10)
         self.create_subscription(String, 'memory/answer', self._on_memory_answer, 10)
         self.create_subscription(String, 'situation_context', self._on_situation, 10)
+        self.create_subscription(Image, '/camera/camera/color/image_raw', self._on_image, 1)
 
         if self.backend == 'gemini':
             active_model = self.gemini_model
@@ -273,17 +277,52 @@ class LLMBridgeNode(Node):
             active_model = self.lemonade_model
         else:
             active_model = self.model
-        self.get_logger().info(f'LLM bridge started — backend={self.backend} model={active_model}')
+        self.get_logger().info(f'LLM bridge started — backend={self.backend} model={active_model} | vision=Gemini Flash Lite')
+
+    # ── callbacks ──────────────────────────────────────────────────────────
+
+    def _on_image(self, msg: Image):
+        frame = self._bridge.imgmsg_to_cv2(msg, 'bgr8')
+        ok, jpg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality])
+        if ok:
+            with self._frame_lock:
+                self._latest_frame_jpg = jpg.tobytes()
+
+    def _get_frame_jpg(self) -> bytes | None:
+        with self._frame_lock:
+            return self._latest_frame_jpg
+
+    def _vision_describe(self, question: str, frame_jpg: bytes) -> str | None:
+        """Fast visual description via Gemini Flash Lite (~2s)."""
+        try:
+            from google import genai
+            from google.genai import types
+            api_key = os.environ.get('GEMINI_API_KEY', '')
+            if not api_key:
+                return None
+            client = genai.Client(api_key=api_key)
+            prompt = (
+                'Look at this robot camera image. Answer the following question '
+                'in Greek in 1-3 short sentences, based only on what is visible.\n'
+                f'Question: {question}'
+            )
+            resp = client.models.generate_content(
+                model='gemini-flash-lite-latest',
+                contents=[
+                    types.Part.from_bytes(data=frame_jpg, mime_type='image/jpeg'),
+                    prompt,
+                ]
+            )
+            return (resp.text or '').strip()
+        except Exception as e:
+            self.get_logger().warn(f'Gemini vision failed: {e}')
+            return None
 
     def _on_detected_objects(self, msg: String):
         try:
             self._latest_objects = json.loads(msg.data)
         except json.JSONDecodeError:
             pass
-
-    def _on_vision_answer(self, msg: String):
-        self._vision_answer = msg.data
-        self._vision_event.set()
 
     def _on_battery_state(self, msg: BatteryState):
         self._latest_battery = msg
@@ -297,6 +336,8 @@ class LLMBridgeNode(Node):
             self._situation = json.loads(msg.data)
         except json.JSONDecodeError:
             pass
+
+    # ── context helpers ────────────────────────────────────────────────────
 
     def _situation_system_message(self) -> str | None:
         if not self._situation:
@@ -330,6 +371,8 @@ class LLMBridgeNode(Node):
         bullets = '\n'.join(f'- {f}' for f in facts)
         return f'Πράγματα που θυμάσαι από πριν:\n{bullets}'
 
+    # ── speech entry point ─────────────────────────────────────────────────
+
     def _on_speech_text(self, msg: String):
         text = msg.data.strip()
         if not text:
@@ -354,62 +397,7 @@ class LLMBridgeNode(Node):
         else:
             self._handle_text_ollama(text)
 
-    def _handle_text_ollama(self, text):
-        messages = [{'role': 'system', 'content': SYSTEM_PROMPT}]
-        memory_msg = self._memory_system_message(self._retrieve_memories(text))
-        if memory_msg:
-            messages.append({'role': 'system', 'content': memory_msg})
-        sit_msg = self._situation_system_message()
-        if sit_msg:
-            messages.append({'role': 'system', 'content': sit_msg})
-        for turn in self._history:
-            messages.extend(turn)
-        user_msg = {'role': 'user', 'content': text}
-        messages.append(user_msg)
-
-        try:
-            resp = ollama.chat(model=self.model, messages=messages, tools=TOOLS,
-                                options={'temperature': self.temperature}, think=False,
-                                keep_alive=self.keep_alive)
-        except Exception as e:
-            self.get_logger().error(f'LLM call failed: {e}')
-            return
-
-        out = resp.message
-        turn = [user_msg]
-
-        if out.tool_calls:
-            messages.append(out)
-            turn.append(out)
-            for tc in out.tool_calls:
-                args = tc.function.arguments or {}
-                self.get_logger().info(f'Tool call: {tc.function.name}({args})')
-                result = self._dispatch_tool(tc.function.name, args)
-                tool_msg = {'role': 'tool', 'content': json.dumps(result, ensure_ascii=False)}
-                messages.append(tool_msg)
-                turn.append(tool_msg)
-
-            try:
-                resp2 = ollama.chat(model=self.model, messages=messages,
-                                     options={'temperature': 0.3}, think=False,
-                                     keep_alive=self.keep_alive)
-                reply = (resp2.message.content or '').strip()
-            except Exception as e:
-                self.get_logger().error(f'LLM follow-up call failed: {e}')
-                reply = ''
-        else:
-            reply = (out.content or '').strip()
-
-        reply = _strip_emoji(reply)
-        if not reply:
-            return
-
-        turn.append({'role': 'assistant', 'content': reply})
-        self._history.append(turn)
-        del self._history[:-self.history_turns]
-
-        self.get_logger().info(f'Max: {reply}')
-        self.response_pub.publish(String(data=reply))
+    # ── lemonade backend ───────────────────────────────────────────────────
 
     def _handle_text_lemonade(self, text):
         messages = [{'role': 'system', 'content': SYSTEM_PROMPT}]
@@ -421,6 +409,18 @@ class LLMBridgeNode(Node):
             messages.append({'role': 'system', 'content': sit_msg})
         for turn in self._history:
             messages.extend(turn)
+
+        # Vision: Gemini Flash Lite describes the frame (~2s), injected as context.
+        # Qwen3 NPU then answers with that description — no image sent to NPU.
+        if _needs_vision(text):
+            frame_jpg = self._get_frame_jpg()
+            if frame_jpg is not None:
+                vision_desc = self._vision_describe(text, frame_jpg)
+                if vision_desc:
+                    self.get_logger().info(f'Vision (Gemini): {vision_desc}')
+                    messages.append({'role': 'system',
+                                     'content': f'Η κάμερα βλέπει αυτή τη στιγμή: {vision_desc}'})
+
         user_msg = {'role': 'user', 'content': text}
         messages.append(user_msg)
 
@@ -474,6 +474,77 @@ class LLMBridgeNode(Node):
         self.get_logger().info(f'Max: {reply}')
         self.response_pub.publish(String(data=reply))
 
+    # ── ollama backend ─────────────────────────────────────────────────────
+
+    def _handle_text_ollama(self, text):
+        messages = [{'role': 'system', 'content': SYSTEM_PROMPT}]
+        memory_msg = self._memory_system_message(self._retrieve_memories(text))
+        if memory_msg:
+            messages.append({'role': 'system', 'content': memory_msg})
+        sit_msg = self._situation_system_message()
+        if sit_msg:
+            messages.append({'role': 'system', 'content': sit_msg})
+        for turn in self._history:
+            messages.extend(turn)
+
+        if _needs_vision(text):
+            frame_jpg = self._get_frame_jpg()
+            if frame_jpg is not None:
+                vision_desc = self._vision_describe(text, frame_jpg)
+                if vision_desc:
+                    self.get_logger().info(f'Vision (Gemini): {vision_desc}')
+                    messages.append({'role': 'system',
+                                     'content': f'Η κάμερα βλέπει αυτή τη στιγμή: {vision_desc}'})
+
+        user_msg = {'role': 'user', 'content': text}
+        messages.append(user_msg)
+
+        try:
+            resp = ollama.chat(model=self.model, messages=messages, tools=TOOLS,
+                                options={'temperature': self.temperature}, think=False,
+                                keep_alive=self.keep_alive)
+        except Exception as e:
+            self.get_logger().error(f'LLM call failed: {e}')
+            return
+
+        out = resp.message
+        turn = [user_msg]
+
+        if out.tool_calls:
+            messages.append(out)
+            turn.append(out)
+            for tc in out.tool_calls:
+                args = tc.function.arguments or {}
+                self.get_logger().info(f'Tool call: {tc.function.name}({args})')
+                result = self._dispatch_tool(tc.function.name, args)
+                tool_msg = {'role': 'tool', 'content': json.dumps(result, ensure_ascii=False)}
+                messages.append(tool_msg)
+                turn.append(tool_msg)
+
+            try:
+                resp2 = ollama.chat(model=self.model, messages=messages,
+                                     options={'temperature': 0.3}, think=False,
+                                     keep_alive=self.keep_alive)
+                reply = (resp2.message.content or '').strip()
+            except Exception as e:
+                self.get_logger().error(f'LLM follow-up call failed: {e}')
+                reply = ''
+        else:
+            reply = (out.content or '').strip()
+
+        reply = _strip_emoji(reply)
+        if not reply:
+            return
+
+        turn.append({'role': 'assistant', 'content': reply})
+        self._history.append(turn)
+        del self._history[:-self.history_turns]
+
+        self.get_logger().info(f'Max: {reply}')
+        self.response_pub.publish(String(data=reply))
+
+    # ── gemini backend ─────────────────────────────────────────────────────
+
     def _handle_text_gemini(self, text):
         from google.genai import types
 
@@ -489,9 +560,18 @@ class LLMBridgeNode(Node):
         contents = []
         for turn in self._history:
             contents.extend(turn)
-        user_content = types.Content(role='user', parts=[types.Part(text=text)])
+
+        frame_jpg = self._get_frame_jpg() if _needs_vision(text) else None
+        history_user_msg = types.Content(role='user', parts=[types.Part(text=text)])
+        if frame_jpg is not None:
+            user_content = types.Content(role='user', parts=[
+                types.Part.from_bytes(data=frame_jpg, mime_type='image/jpeg'),
+                types.Part(text=text),
+            ])
+        else:
+            user_content = history_user_msg
         contents.append(user_content)
-        turn = [user_content]
+        turn = [history_user_msg]  # text-only in history
 
         try:
             resp = self._gemini_client.models.generate_content(
@@ -540,6 +620,8 @@ class LLMBridgeNode(Node):
         self.get_logger().info(f'Max: {reply}')
         self.response_pub.publish(String(data=reply))
 
+    # ── navigation ─────────────────────────────────────────────────────────
+
     def _navigate(self, loc):
         if not self.nav_client.wait_for_server(timeout_sec=5.0):
             return False, 'το Nav2 δεν είναι έτοιμο'
@@ -551,20 +633,39 @@ class LLMBridgeNode(Node):
         goal.pose.pose.position.y = float(loc['y'])
         goal.pose.pose.orientation = _yaw_to_quaternion(float(loc['yaw']))
 
-        send_future = self.nav_client.send_goal_async(goal)
-        goal_handle = send_future.result(timeout=10.0)
-        if goal_handle is None:
+        accepted_ev = threading.Event()
+        done_ev = threading.Event()
+        goal_handle_box = [None]
+        result_box = [None]
+
+        def _on_accepted(fut):
+            goal_handle_box[0] = fut.result()
+            accepted_ev.set()
+
+        def _on_result(fut):
+            result_box[0] = fut.result()
+            done_ev.set()
+
+        self.nav_client.send_goal_async(goal).add_done_callback(_on_accepted)
+
+        if not accepted_ev.wait(timeout=10.0):
             return False, 'καμία απάντηση από το Nav2'
-        if not goal_handle.accepted:
+
+        gh = goal_handle_box[0]
+        if gh is None or not gh.accepted:
             return False, 'ο στόχος απορρίφθηκε'
 
-        result_future = goal_handle.get_result_async()
-        result = result_future.result(timeout=self.nav_timeout)
-        if result is None:
+        gh.get_result_async().add_done_callback(_on_result)
+
+        if not done_ev.wait(timeout=self.nav_timeout):
             return False, 'λήξη χρόνου πλοήγησης'
-        if result.status != GoalStatus.STATUS_SUCCEEDED:
+
+        result = result_box[0]
+        if result is None or result.status != GoalStatus.STATUS_SUCCEEDED:
             return False, 'η πλοήγηση απέτυχε'
         return True, None
+
+    # ── tool dispatch ──────────────────────────────────────────────────────
 
     def _dispatch_tool(self, name, args):
         if name == 'tidy':
@@ -623,20 +724,19 @@ class LLMBridgeNode(Node):
             self.patrol_pub.publish(Bool(data=True))
             return {'status': 'started', 'action': 'patrol'}
 
+        elif name == 'explore':
+            self.explore_pub.publish(Bool(data=True))
+            return {'status': 'started', 'action': 'explore'}
+
+        elif name == 'stop_explore':
+            self.explore_pub.publish(Bool(data=False))
+            return {'status': 'stopped', 'action': 'explore'}
+
         elif name == 'report_clutter':
             if self._latest_objects is None:
                 return {'status': 'ok', 'objects': [], 'note': 'no detections yet'}
             clutter = [o for o in self._latest_objects if o.get('clutter')]
             return {'status': 'ok', 'objects': clutter}
-
-        elif name == 'look':
-            question = args.get('question') or 'Περίγραψε τι βλέπεις.'
-            self._vision_answer = None
-            self._vision_event.clear()
-            self.vision_query_pub.publish(String(data=question))
-            if not self._vision_event.wait(timeout=self.vision_timeout):
-                return {'status': 'error', 'reason': 'vision_node did not respond (timeout)'}
-            return {'status': 'ok', 'description': self._vision_answer}
 
         elif name == 'remember':
             fact = (args.get('fact') or '').strip()

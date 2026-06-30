@@ -19,6 +19,7 @@ import json
 import math
 import os
 
+import numpy as np
 import psutil
 import yaml
 import rclpy
@@ -27,6 +28,11 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import BatteryState
 from std_msgs.msg import String
 from ament_index_python.packages import get_package_share_directory
+
+# kela.yaml map params — used to convert world (x,y) → mask pixel
+_MAP_ORIGIN_X  = -3.854
+_MAP_ORIGIN_Y  = -7.894
+_MAP_RESOLUTION = 0.050
 
 
 def _load_locations() -> dict:
@@ -40,12 +46,44 @@ def _load_locations() -> dict:
         return {}
 
 
-def _nearest_room(x: float, y: float, locations: dict) -> str:
+def _load_room_mask():
+    """Load room_mask.png + room_colors.yaml. Returns (mask_arr, color_map) or (None, None)."""
+    pkg = get_package_share_directory('home_robot')
+    mask_path   = os.path.join(pkg, 'maps', 'room_mask.png')
+    colors_path = os.path.join(pkg, 'maps', 'room_colors.yaml')
+    try:
+        from PIL import Image
+        arr = np.array(Image.open(mask_path).convert('RGBA'))
+        with open(colors_path) as f:
+            color_map = yaml.safe_load(f)  # {room_name: [R, G, B]}
+        return arr, color_map
+    except Exception:
+        return None, None
+
+
+def _nearest_room(x: float, y: float, locations: dict,
+                  mask_arr=None, color_map=None) -> str:
+    # ── Pixel lookup in painted mask (preferred) ──────────────────────
+    if mask_arr is not None and color_map:
+        h, w = mask_arr.shape[:2]
+        col = int((x - _MAP_ORIGIN_X) / _MAP_RESOLUTION)
+        # mask saved in original PGM orientation: row 0 = top = max y
+        row = int((y - _MAP_ORIGIN_Y) / _MAP_RESOLUTION)
+        if 0 <= col < w and 0 <= row < h:
+            r, g, b, a = mask_arr[row, col]
+            if a > 50:
+                # Find closest room color
+                best_name, best_dist = 'άγνωστο', float('inf')
+                for name, rgb in color_map.items():
+                    d = (int(r)-rgb[0])**2 + (int(g)-rgb[1])**2 + (int(b)-rgb[2])**2
+                    if d < best_dist:
+                        best_dist, best_name = d, name
+                return best_name
+
+    # ── Fallback: nearest center (no mask or out of bounds) ───────────
     best_name, best_dist = 'άγνωστο', float('inf')
     for name, pose in locations.items():
-        lx = pose.get('x', 0.)
-        ly = pose.get('y', 0.)
-        # Skip placeholder coordinates (all zeros = location not set)
+        lx, ly = pose.get('x', 0.), pose.get('y', 0.)
         if lx == 0. and ly == 0.:
             continue
         d = math.sqrt((x - lx)**2 + (y - ly)**2)
@@ -55,9 +93,12 @@ def _nearest_room(x: float, y: float, locations: dict) -> str:
 
 
 ROOM_NAMES_EL = {
-    'living_room': 'σαλόνι',
-    'bedroom':     'κρεβατοκάμαρα',
-    'kitchen':     'κουζίνα',
+    'saloni':              'σαλόνι',
+    'kouzina':             'κουζίνα',
+    'diadromos':           'διάδρομος',
+    'toualeta':            'τουαλέτα',
+    'domatio tou max':     'δωμάτιο του Μαξ',
+    'domatio tou mbamba':  'δωμάτιο του μπαμπά',
 }
 
 
@@ -74,6 +115,7 @@ class SituationalAwarenessNode(Node):
         hz               = self.get_parameter('update_hz').value
 
         self._locations  = _load_locations()
+        self._mask_arr, self._color_map = _load_room_mask()
         self._odom_x     = 0.
         self._odom_y     = 0.
         self._objects    = []
@@ -109,7 +151,8 @@ class SituationalAwarenessNode(Node):
 
     def _publish(self):
         # Room
-        room_key = _nearest_room(self._odom_x, self._odom_y, self._locations)
+        room_key = _nearest_room(self._odom_x, self._odom_y, self._locations,
+                                  self._mask_arr, self._color_map)
         room_el  = ROOM_NAMES_EL.get(room_key, room_key)
 
         # Nearby objects (sorted by distance, capped)

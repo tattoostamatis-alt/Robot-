@@ -1,0 +1,41 @@
+# Keepout zones — areas where the robot must NOT navigate.
+# Edit this file, then run:  python3 scripts/draw_keepout.py
+#
+# Coordinates are in the MAP frame (same as what you see in RViz).
+# Use RViz → "Publish Point" (click on map) to get exact x,y values,
+# or estimate from locations.yaml room centres.
+#
+# Room centres for reference:
+#   saloni:           x=-0.03  y=-0.92
+#   kouzina:          x= 5.04  y= 1.10
+#   diadromos:        x= 1.64  y= 1.92
+#   toualeta:         x= 3.62  y= 3.03
+#   domatio tou max:  x= 5.86  y=-2.02
+#   domatio tou mbamba: x=2.68 y=-2.97
+#
+# Shape types:
+#   circle:  x, y, radius          (all metres)
+#   rect:    x, y, width, height   (centre + size in metres)
+
+zones:
+  # --- Examples: uncomment and adjust coordinates ---
+
+  # kanapes_saloni:
+  #   shape: rect
+  #   x: -0.5
+  #   y: -1.8
+  #   width: 1.8
+  #   height: 0.9
+
+  # trapezi_kouzinas:
+  #   shape: rect
+  #   x: 4.8
+  #   y: 0.5
+  #   width: 1.2
+  #   height: 0.8
+
+  # kratiras_mpanieras:
+  #   shape: circle
+  #   x: 3.6
+  #   y: 3.5
+  #   radius: 0.5

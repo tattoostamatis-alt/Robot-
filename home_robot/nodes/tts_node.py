@@ -33,7 +33,7 @@ class TTSNode(Node):
         self.declare_parameter('voice', 'el-GR-NestorasNeural')
         self.declare_parameter('rate', '+0%')
         self.declare_parameter('volume', '+0%')
-        self.declare_parameter('device_index', 6)  # pulse (hw:2,0 ALC269VC is input-only)
+        self.declare_parameter('device_index', 7)  # pulse — works with any PulseAudio output
 
         self.voice = self.get_parameter('voice').value
         self.rate = self.get_parameter('rate').value

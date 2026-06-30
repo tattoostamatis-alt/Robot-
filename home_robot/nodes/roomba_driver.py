@@ -86,12 +86,15 @@ class RoombaDriver(Node):
         self.add_on_set_parameters_callback(self._on_set_parameters)
 
         self.bot = pycreate2.Create2(port, baud)
-        self.bot.wake()
-        self.bot.start()
-        time.sleep(0.5)
-        self.bot.full()
-        time.sleep(0.3)
-        self.get_logger().info(f'Roomba connected on {port}')
+        # Connection health, used by the keep-awake watchdog (_keep_awake) to
+        # auto-recover if the Roomba falls asleep. The one-shot init below is
+        # NOT enough on its own: if the robot is already asleep at boot it
+        # ignores these commands, and without re-trying the driver would stay
+        # stuck reading 0 bytes forever (only a wake + re-init fixes it).
+        self._last_ok_time = 0.0
+        self._last_brc_pulse = 0.0
+        self._connect_oi()
+        self.get_logger().info(f'Roomba driver started on {port}')
 
         self._idle = False
         self._stopped = True
@@ -112,6 +115,7 @@ class RoombaDriver(Node):
         self.create_timer(0.05, self._motor_control)     # 20 Hz ramped output + watchdog
         self.create_timer(2.0,  self._publish_battery)  # 0.5 Hz
         self.create_timer(5.0,  self._check_idle)       # idle watchdog
+        self.create_timer(2.0,  self._keep_awake)        # auto-reconnect + BRC keep-alive
 
         self._x = 0.0
         self._y = 0.0
@@ -177,8 +181,6 @@ class RoombaDriver(Node):
         self._cur_left  += max(-step, min(step, target_left  - self._cur_left))
         self._cur_right += max(-step, min(step, target_right - self._cur_right))
 
-        if self._idle:
-            return
         self.bot.drive_direct(round(self._cur_right), round(self._cur_left))
 
     def _check_idle(self):
@@ -192,6 +194,40 @@ class RoombaDriver(Node):
                 f'Roomba: idle {self.idle_timeout:.0f}s → passive mode (low power)'
             )
 
+    def _connect_oi(self):
+        """(Re)initialise the Open Interface: wake → Passive → Full. Safe to
+        call repeatedly. Called at startup and by _keep_awake to recover
+        automatically after the Roomba has gone to sleep (it ignores serial
+        while asleep, so a single boot-time init is not enough)."""
+        try:
+            self.bot.wake()      # pulse BRC low — wakes the robot from sleep
+            self.bot.start()     # enter OI (Passive)
+            time.sleep(0.3)
+            self.bot.full()      # Full mode: the OI never auto-sleeps in Full
+            time.sleep(0.2)
+            self._last_brc_pulse = time.monotonic()
+        except Exception as e:
+            self.get_logger().warn(f'OI (re)connect failed: {e!r}')
+
+    def _keep_awake(self):
+        """Never let the Roomba sleep. Two jobs:
+          1. If there has been no good sensor/encoder read for >2s the robot
+             is asleep or dropped out of OI — re-run wake/start/full so it
+             recovers on its own (e.g. right after the user presses CLEAN),
+             with no driver restart needed.
+          2. While healthy, pulse BRC at least once a minute so the OI's
+             5-minute inactivity sleep timer never expires."""
+        now = time.monotonic()
+        if (now - self._last_ok_time) > 2.0:
+            self._connect_oi()
+            return
+        if (now - self._last_brc_pulse) > 60.0:
+            try:
+                self.bot.wake()
+                self._last_brc_pulse = now
+            except Exception as e:
+                self.get_logger().warn(f'keep-awake BRC pulse failed: {e!r}')
+
     def _safe_get_sensors(self):
         """get_sensors() με retry — το Roomba μερικές φορές επιστρέφει 0 bytes."""
         for attempt in range(3):
@@ -200,7 +236,9 @@ class RoombaDriver(Node):
                 # the response of the query we're about to send — otherwise a
                 # backlog from a delayed previous cycle desyncs every field.
                 self.bot.SCI.ser.reset_input_buffer()
-                return self.bot.get_sensors()
+                val = self.bot.get_sensors()
+                self._last_ok_time = time.monotonic()
+                return val
             except Exception as e:
                 self.get_logger().warn(f'get_sensors() attempt {attempt}: {e!r}')
                 time.sleep(0.05)
@@ -232,7 +270,9 @@ class RoombaDriver(Node):
                 data = self.bot.SCI.read(4)
                 if len(data) != 4:
                     raise Exception(f'Encoder data not 4 bytes long, it is: {len(data)}')
-                return struct.unpack('>hh', data)
+                result = struct.unpack('>hh', data)
+                self._last_ok_time = time.monotonic()
+                return result
             except Exception as e:
                 self.get_logger().warn(f'get_encoders() attempt {attempt}: {e!r}')
                 time.sleep(0.05)

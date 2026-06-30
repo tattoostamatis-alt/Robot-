@@ -1,20 +1,25 @@
-# Named navigation goals for the LLM bridge's "goto" tool.
-# Each entry is a 2D pose (frame_id: map) — x/y in meters, yaw in radians.
-#
-# Placeholder coordinates (all 0,0,0) — SLAM mapping is not yet functional
-# (see project memory: roomba odometry/get_sensors() blocker). Once a real
-# map exists, update these to actual coordinates, e.g. by driving the robot
-# to each room and reading /amcl_pose, or by using RViz's "Publish Point"
-# tool and reading /clicked_point.
-living_room:
-  x: 0.0
-  y: 0.0
+# Named navigation goals (map frame).
+diadromos:
+  x: 1.639
+  y: 1.924
   yaw: 0.0
-bedroom:
-  x: 0.0
-  y: 0.0
+domatio tou max:
+  x: 5.861
+  y: -2.019
   yaw: 0.0
-kitchen:
-  x: 0.0
-  y: 0.0
+domatio tou mbamba:
+  x: 2.678
+  y: -2.965
+  yaw: 0.0
+kouzina:
+  x: 5.042
+  y: 1.104
+  yaw: 0.0
+saloni:
+  x: -0.032
+  y: -0.915
+  yaw: 0.0
+toualeta:
+  x: 3.624
+  y: 3.029
   yaw: 0.0

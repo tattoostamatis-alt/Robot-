@@ -33,6 +33,20 @@ install(PROGRAMS
   home_robot/nodes/semantic_costmap_node.py
   home_robot/nodes/face_detection_node.py
   home_robot/nodes/pose_node.py
+  home_robot/nodes/goto_room.py
+  home_robot/nodes/pose_saver_node.py
+  home_robot/nodes/room_markers_node.py
+  home_robot/nodes/global_localizer_node.py
+  home_robot/nodes/explore_manager_node.py
+  home_robot/nodes/web_dashboard_node.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+install(FILES
+  home_robot/nodes/yolo11n_int8.onnx
+  home_robot/nodes/yolo11n_pose_int8.onnx
+  home_robot/nodes/yolo11n_seg_int8.onnx
+  home_robot/nodes/yunet_int8.onnx
   DESTINATION lib/${PROJECT_NAME}
 )
 

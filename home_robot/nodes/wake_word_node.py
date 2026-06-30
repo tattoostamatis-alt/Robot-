@@ -42,10 +42,7 @@ _VAIP_CONFIG = '/home/dimi/ryzenai_venv/voe-4.0-linux_x86_64/vaip_config.json'
 _orig_IS = _ort.InferenceSession
 
 def _npu_session(path, sess_options=None, providers=None, provider_options=None, **kw):
-    if os.path.isfile(_VAIP_CONFIG):
-        return _orig_IS(path, sess_options=sess_options,
-                        providers=['VitisAIExecutionProvider', 'CPUExecutionProvider'],
-                        provider_options=[{'config_file': _VAIP_CONFIG}, {}], **kw)
+    # CPU-only: VAIP compiler crashes on this graph (same pattern as YOLO NPU bug)
     return _orig_IS(path, sess_options=sess_options,
                     providers=['CPUExecutionProvider'], **kw)
 
@@ -84,14 +81,21 @@ SAMPLE_RATE = 16000
 CHUNK_SIZE = 1280  # 80ms @ 16kHz — openWakeWord's expected frame size
 
 
-def _play_beep(freq=880, duration=0.15, sample_rate=16000):
+def _play_beep(freq=880, duration=0.35, sample_rate=44100):
     try:
         import sounddevice as sd
         t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
-        tone = (0.3 * np.sin(2 * np.pi * freq * t)).astype(np.float32)
-        sd.play(tone, samplerate=sample_rate)
-    except Exception:
-        pass
+        tone = (0.6 * np.sin(2 * np.pi * freq * t)).astype(np.float32)
+        # Use pulse (index 7) — works with any PulseAudio output device
+        sd.play(tone, samplerate=sample_rate, device=7)
+        sd.wait()
+    except Exception as e:
+        try:
+            import subprocess
+            subprocess.Popen(['paplay', '/usr/share/sounds/freedesktop/stereo/bell.oga'],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
 
 
 class WakeWordNode(Node):
@@ -99,12 +103,12 @@ class WakeWordNode(Node):
         super().__init__('wake_word_node')
 
         self.declare_parameter('device_index', -1)
-        self.declare_parameter('device_name', 'reSpeaker')
-        self.declare_parameter('mic_channels', 6)
-        self.declare_parameter('mic_channel', 4)
+        self.declare_parameter('device_name', '')
+        self.declare_parameter('mic_channels', 3)
+        self.declare_parameter('mic_channel', 0)
         self.declare_parameter('model_name', 'max')
         self.declare_parameter('model_path', '')
-        self.declare_parameter('threshold', 0.75)
+        self.declare_parameter('threshold', 0.50)
         self.declare_parameter('cooldown', 1.5)
         self.declare_parameter('beep_on_wake', True)
 

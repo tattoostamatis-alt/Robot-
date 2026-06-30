@@ -1,31 +1,7 @@
 #!/usr/bin/env python3
-"""Object detector — RealSense → YOLO11n (NPU via VitisAI EP) → 3D positions."""
+"""Object detector — RealSense → YOLO11n (CPU) → 3D positions."""
 
-# Inject VitisAI EP and XRT environment before any onnxruntime import.
 import os
-import sys
-
-_VENV_SITE = '/home/dimi/ryzenai_venv/lib/python3.12/site-packages'
-_XRT_LIB   = '/opt/xilinx/xrt/lib'
-
-# Libraries the VitisAI EP needs at load time (mirrors venv activate script).
-_VENV_LD_PATHS = [
-    f'{_VENV_SITE}/flexml/flexml_extras/lib',
-    f'{_VENV_SITE}/onnxruntime/capi',
-    f'{_VENV_SITE}/voe/lib',
-    _XRT_LIB,
-]
-
-if os.path.isdir(_VENV_SITE):
-    sys.path.insert(0, _VENV_SITE)
-
-ld = os.environ.get('LD_LIBRARY_PATH', '')
-extra = ':'.join(p for p in _VENV_LD_PATHS if p not in ld)
-if extra:
-    os.environ['LD_LIBRARY_PATH'] = f'{extra}:{ld}' if ld else extra
-os.environ.setdefault('XILINX_XRT', '/opt/xilinx/xrt')
-os.environ.setdefault('RYZEN_AI_INSTALLATION_PATH', '/home/dimi/ryzenai_venv')
-
 import cv2
 import json
 import threading
@@ -62,7 +38,6 @@ CLUTTER_CLASSES = {
     'tie', 'suitcase', 'umbrella', 'shoe',
 }
 
-_VAIP_CONFIG  = '/home/dimi/ryzenai_venv/voe-4.0-linux_x86_64/vaip_config.json'
 _MODEL_PATH   = os.path.join(os.path.dirname(__file__), 'yolo11n_int8.onnx')
 _INPUT_SIZE   = 640
 
@@ -151,13 +126,7 @@ def _postprocess(output, scale, pad_w, pad_h, conf_thr, img_w, img_h):
 
 
 def _build_session():
-    providers = ort.get_available_providers()
-    if 'VitisAIExecutionProvider' in providers and os.path.isfile(_VAIP_CONFIG):
-        return ort.InferenceSession(
-            _MODEL_PATH,
-            providers=['VitisAIExecutionProvider', 'CPUExecutionProvider'],
-            provider_options=[{'config_file': _VAIP_CONFIG}, {}],
-        ), 'NPU'
+    # CPU-only: keeps NPU free for Qwen3 (XRT context-switch adds ~6s to LLM latency)
     return ort.InferenceSession(
         _MODEL_PATH,
         providers=['CPUExecutionProvider'],
@@ -169,7 +138,7 @@ class ObjectDetector(Node):
         super().__init__('object_detector')
 
         self.declare_parameter('confidence',     0.5)
-        self.declare_parameter('process_every_n', 2)
+        self.declare_parameter('process_every_n', 6)
 
         self.conf            = self.get_parameter('confidence').value
         self.process_every_n = self.get_parameter('process_every_n').value

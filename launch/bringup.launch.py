@@ -2,7 +2,7 @@
 
 from launch import LaunchDescription
 from launch.actions import (DeclareLaunchArgument, IncludeLaunchDescription, GroupAction,
-                            EmitEvent, RegisterEventHandler)
+                            EmitEvent, RegisterEventHandler, TimerAction, ExecuteProcess)
 from launch.conditions import IfCondition
 from launch.events import matches_action
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -20,6 +20,8 @@ def generate_launch_description():
     nav2_pkg = FindPackageShare('nav2_bringup')
 
     use_slam      = LaunchConfiguration('use_slam',      default='true')
+    use_localization = LaunchConfiguration('use_localization', default='false')
+    localization_map = LaunchConfiguration('localization_map', default='')
     use_camera    = LaunchConfiguration('use_camera',    default='true')
     use_arm       = LaunchConfiguration('use_arm',       default='false')
     # Placeholder drop-off pose (arm_base frame) — no tray/bin measured yet.
@@ -111,10 +113,14 @@ def generate_launch_description():
         condition=IfCondition(use_obstacle_safety),
     )
 
-    # odom -> base_link is published dynamically by ekf_node (below, only
-    # when use_slam:=true), which fuses roomba_node's wheel velocity with
-    # the IMU's absolute yaw — roomba_node itself no longer broadcasts this
-    # TF. When use_rtabmap:=true instead, rgbd_odometry_node provides it.
+    # odom -> base_link is published dynamically by ekf_node (below). The
+    # EKF runs UNCONDITIONALLY (no launch condition) — it is required in
+    # every mode that needs odom: SLAM mapping AND AMCL localization
+    # (use_localization:=true, where use_slam:=false). roomba_node itself no
+    # longer broadcasts this TF. CAVEAT: when use_rtabmap:=true,
+    # rgbd_odometry_node ALSO publishes odom->base_link — running both would
+    # double-publish the same TF edge, so don't combine use_rtabmap with the
+    # EKF path until one is gated off.
     # Do NOT add a static fallback here — a static odom->base_link identity
     # TF alongside the dynamic one makes slam_toolbox think the robot never
     # moves, so the map never grows past the first scan.
@@ -141,16 +147,16 @@ def generate_launch_description():
     )
 
     # Fuses roomba_node's wheel velocity (vx) with the IMU's absolute yaw
-    # (config/ekf.yaml) — only meaningful alongside slam_toolbox's wheel-
-    # odometry-based SLAM, not rtabmap's vision-based odometry, hence the
-    # use_slam condition (same as slam_toolbox_node below).
+    # (config/ekf.yaml). Runs in ALL modes (no condition) — both SLAM and
+    # AMCL localization consume this odom->base_link TF. (Earlier comment
+    # claimed a use_slam condition; that condition does not exist and must
+    # not be added, or AMCL localize mode loses its odom source.)
     ekf_node = Node(
         package='robot_localization',
         executable='ekf_node',
         name='ekf_filter_node',
         output='screen',
         parameters=[PathJoinSubstitution([pkg, 'config', 'ekf.yaml'])],
-        condition=IfCondition(use_slam),
     )
 
     # ── Static TF: base_link → laser ──────────────────────────────
@@ -176,12 +182,9 @@ def generate_launch_description():
         executable='static_transform_publisher',
         name='tf_base_laser',
         # Lidar remounted 2026-06-21: 120mm forward of the wheel axle,
-        # 220mm above it. yaw=pi: previous mount (2026-06-17) had it
-        # physically flipped front/back — without this, a wall actually
-        # in front of the robot gets drawn behind it in the map (confirmed
-        # live 2026-06-18: robot position/heading moves correctly forward,
-        # but the scanned walls appear to recede backward instead of
-        # approaching).
+        # 220mm above it. yaw=pi: the unit is mounted rotated 180 degrees in
+        # the horizontal plane (connector facing back), so the laser frame is
+        # rotated 180 degrees about Z to align scans with base_link.
         arguments=['--x', '0.12', '--y', '0.0', '--z', '0.22',
                    '--roll', '0', '--pitch', '0', '--yaw', '3.14159265',
                    '--frame-id', 'base_link', '--child-frame-id', 'laser'],
@@ -248,11 +251,14 @@ def generate_launch_description():
         condition=IfCondition(use_slam),
     )
 
-    slam_configure_event = EmitEvent(
-        event=ChangeState(
-            lifecycle_node_matcher=matches_action(slam_toolbox_node),
-            transition_id=Transition.TRANSITION_CONFIGURE,
-        ),
+    slam_configure_event = TimerAction(
+        period=5.0,
+        actions=[EmitEvent(
+            event=ChangeState(
+                lifecycle_node_matcher=matches_action(slam_toolbox_node),
+                transition_id=Transition.TRANSITION_CONFIGURE,
+            ),
+        )],
         condition=IfCondition(use_slam),
     )
 
@@ -350,6 +356,74 @@ def generate_launch_description():
             ('scan', 'scan'),
         ],
         condition=IfCondition(use_rtabmap),
+    )
+
+    # ── AMCL localization (use_localization, default false) ──────
+    # Loads a saved pgm/yaml map via map_server and localizes using AMCL
+    # particle filter + LiDAR scan matching + EKF odometry (wheel+IMU).
+    # AMCL publishes map->odom TF; slam_toolbox must be OFF (use_slam:=false).
+    # NOTE: do NOT run use_slam:=true and use_localization:=true together —
+    # both publish map->odom TF and will conflict.
+    _localization_map_resolved = localization_map
+    localization_node = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource([nav2_pkg, '/launch/localization_launch.py']),
+        launch_arguments={
+            'map': _localization_map_resolved,
+            'params_file': PathJoinSubstitution([pkg, 'config', 'nav2_params.yaml']),
+            'use_sim_time': 'false',
+        }.items(),
+        condition=IfCondition(use_localization),
+    )
+
+    room_markers_node = Node(
+        package='home_robot',
+        executable='room_markers_node.py',
+        name='room_markers_node',
+        output='screen',
+        condition=IfCondition(use_localization),
+    )
+
+    # Restores the last saved AMCL pose on startup (polls until AMCL is
+    # active, then publishes to /initialpose).  Falls back to global_localizer
+    # if no saved pose file exists.
+    pose_saver_node = Node(
+        package='home_robot',
+        executable='pose_saver_node.py',
+        name='pose_saver_node',
+        output='screen',
+        parameters=[{'save_interval': 10.0, 'map_yaml': localization_map}],
+        condition=IfCondition(use_localization),
+    )
+
+    # FFT scan-matching global localizer: finds the robot on the map by
+    # correlating the LiDAR scan + D435 depth virtual scan against the
+    # occupancy map likelihood field.  Auto-triggers when no saved pose
+    # exists; also callable via /localize_globally service at any time.
+    global_localizer_node = Node(
+        package='home_robot',
+        executable='global_localizer_node.py',
+        name='global_localizer',
+        output='screen',
+        parameters=[{'auto_localize': True, 'depth_weight': 0.5}],
+        condition=IfCondition(use_localization),
+    )
+
+    # Last-resort fallback: if global_localizer_node fails AND no saved pose
+    # appeared within 35s, scatter AMCL particles across the whole map.
+    global_localization_init = TimerAction(
+        period=35.0,
+        actions=[
+            ExecuteProcess(
+                cmd=['bash', '-c',
+                     '[ -f ~/.ros/last_amcl_pose.yaml ] && exit 0; '
+                     'until ros2 service list 2>/dev/null | '
+                     'grep -q reinitialize_global_localization; do sleep 1; done; '
+                     'ros2 service call /reinitialize_global_localization '
+                     'std_srvs/srv/Empty "{}"'],
+                output='screen',
+            )
+        ],
+        condition=IfCondition(use_localization),
     )
 
     # ── Nav2 ──────────────────────────────────────────────────────
@@ -611,6 +685,13 @@ def generate_launch_description():
         condition=IfCondition(use_memory),
     )
 
+    explore_manager_node = Node(
+        package='home_robot',
+        executable='explore_manager_node.py',
+        name='explore_manager',
+        output='screen',
+    )
+
     # ── Task planner (executes tidy/patrol via Nav2 + YOLO clutter check) ─
     # Consumes llm_bridge_node's tidy_command/patrol_command and narrates
     # progress on speech_response. Needs Nav2 (always on) + use_camera:=true
@@ -709,6 +790,9 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument('use_slam',      default_value='true'),
+        DeclareLaunchArgument('use_localization', default_value='false'),
+        DeclareLaunchArgument('localization_map',
+            default_value=PathJoinSubstitution([pkg, 'maps', 'kela.yaml'])),
         DeclareLaunchArgument('use_camera',    default_value='true'),
         DeclareLaunchArgument('use_arm',       default_value='false'),
         DeclareLaunchArgument('pick_drop_x',          default_value='0.15'),
@@ -769,6 +853,11 @@ def generate_launch_description():
         slam_activate_event,
         rgbd_odometry_node,
         rtabmap_node,
+        localization_node,
+        room_markers_node,
+        pose_saver_node,
+        global_localizer_node,
+        global_localization_init,
         nav2_node,
         filter_mask_server_node,
         costmap_filter_info_server_node,
@@ -791,6 +880,7 @@ def generate_launch_description():
         person_follower_node,
         llm_bridge_node,
         memory_node,
+        explore_manager_node,
         planner_node,
         vision_node,
         tts_node,

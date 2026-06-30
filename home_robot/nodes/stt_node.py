@@ -18,6 +18,7 @@ import threading
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rcl_interfaces.msg import SetParametersResult
 from std_msgs.msg import String, Int16MultiArray
 
 
@@ -29,9 +30,9 @@ class STTNode(Node):
     def __init__(self):
         super().__init__('stt_node')
 
-        self.declare_parameter('model_size',        'medium')
+        self.declare_parameter('model_size',        'large-v3')
         self.declare_parameter('language',          'el')
-        self.declare_parameter('energy_thresh',     0.01)
+        self.declare_parameter('energy_thresh',     0.065)
         self.declare_parameter('start_timeout',     5.0)
         self.declare_parameter('silence_limit',     1.5)
         self.declare_parameter('max_record_seconds', 12.0)
@@ -67,11 +68,20 @@ class STTNode(Node):
         self._whisper = None
         threading.Thread(target=self._load_whisper, args=(model_size,), daemon=True).start()
 
+        self.add_on_set_parameters_callback(self._on_param_change)
+
         self.text_pub = self.create_publisher(String, 'speech_text', 10)
         self.create_subscription(String,         'wake_word', self._on_wake_word, 10)
         self.create_subscription(Int16MultiArray, 'mic/audio', self._on_audio,    200)
 
         self.get_logger().info('STT node started — waiting for wake_word')
+
+    def _on_param_change(self, params):
+        for p in params:
+            if p.name == 'energy_thresh':
+                self.energy_thresh = p.value
+                self.get_logger().info(f'energy_thresh updated to {p.value:.4f}')
+        return SetParametersResult(successful=True)
 
     def _load_whisper(self, model_size):
         from faster_whisper import WhisperModel
@@ -81,36 +91,31 @@ class STTNode(Node):
             self._calibrate_energy_thresh()
 
     def _calibrate_energy_thresh(self):
-        # Measure ambient RMS over 2 seconds, set threshold = max(0.005, rms * 4)
-        import sounddevice as sd
-        try:
-            chunks = []
-            def cb(indata, frames, t, status):
-                chunks.append(indata[:, 0].copy())  # channel 0 = raw mic (good enough for noise floor)
+        # Measure ambient RMS from /mic/audio topic over ~2s, set threshold = max(0.05, rms*3)
+        import time
+        chunks = []
+        deadline = time.monotonic() + 2.5
+        orig_state = self._state
 
-            # Find ReSpeaker device
-            dev_idx = None
-            for i, d in enumerate(sd.query_devices()):
-                if d['max_input_channels'] > 0 and 'respeaker' in d['name'].lower():
-                    dev_idx = i
-                    break
+        def _collect(msg):
+            if time.monotonic() < deadline:
+                chunks.append(
+                    np.array(msg.data, dtype=np.int16).astype(np.float32) / 32768.0
+                )
 
-            with sd.InputStream(samplerate=16000, channels=6, dtype='float32',
-                               blocksize=1280, device=dev_idx, callback=cb):
-                import time
-                time.sleep(2.0)
+        sub = self.create_subscription(Int16MultiArray, 'mic/audio', _collect, 200)
+        time.sleep(2.5)
+        self.destroy_subscription(sub)
 
-            if chunks:
-                all_audio = np.concatenate(chunks)
-                ambient_rms = float(np.sqrt(np.mean(all_audio ** 2)))
-                new_thresh = max(0.005, ambient_rms * 4.0)
-                self.energy_thresh = new_thresh
-                self.get_logger().info(
-                    f'Ambient noise RMS={ambient_rms:.4f} → energy_thresh={new_thresh:.4f}')
-            else:
-                self.get_logger().warn('Calibration got no audio, keeping default threshold')
-        except Exception as e:
-            self.get_logger().warn(f'Energy calibration failed: {e}')
+        if chunks:
+            all_audio = np.concatenate(chunks)
+            ambient_rms = float(np.sqrt(np.mean(all_audio ** 2)))
+            new_thresh = max(0.05, ambient_rms * 1.4)
+            self.energy_thresh = new_thresh
+            self.get_logger().info(
+                f'Ambient noise RMS={ambient_rms:.4f} → energy_thresh={new_thresh:.4f}')
+        else:
+            self.get_logger().warn('Calibration got no audio from /mic/audio, keeping default')
 
     def _on_wake_word(self, msg: String):
         if self._whisper is None:
@@ -171,7 +176,16 @@ class STTNode(Node):
 
     def _transcribe(self, audio: np.ndarray):
         try:
-            segments, _ = self._whisper.transcribe(audio, language=self.lang, beam_size=1)
+            self.get_logger().info(f'Transcribing {len(audio)/SAMPLE_RATE:.1f}s rms={float(np.sqrt(np.mean(audio**2))):.4f}')
+            # beam_size=5 + a domain initial_prompt biases the decoder toward
+            # the command vocabulary (room names / "πήγαινε στο…"), which
+            # markedly improves Greek accuracy over greedy beam_size=1.
+            segments, _ = self._whisper.transcribe(
+                audio, language=self.lang, beam_size=5,
+                no_speech_threshold=0.3, vad_filter=True,
+                initial_prompt='Εντολές προς το ρομπότ Μαξ: πήγαινε στην κουζίνα, '
+                               'στο σαλόνι, στον διάδρομο, στην τουαλέτα, στο δωμάτιο '
+                               'του Μαξ, στο δωμάτιο του μπαμπά, πήγαινε στη βάση.')
             text = ' '.join(s.text for s in segments).strip()
             if text:
                 self.get_logger().info(f'Heard: {text}')
