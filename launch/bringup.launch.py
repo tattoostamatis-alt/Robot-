@@ -397,14 +397,17 @@ def generate_launch_description():
 
     # FFT scan-matching global localizer: finds the robot on the map by
     # correlating the LiDAR scan + D435 depth virtual scan against the
-    # occupancy map likelihood field.  Auto-triggers when no saved pose
-    # exists; also callable via /localize_globally service at any time.
+    # occupancy map likelihood field.  auto_localize=False: it does NOT run
+    # on every boot — pose_saver restores the last saved pose instead (in an
+    # ambiguous/symmetric home the FFT auto-guess would override the good
+    # saved pose with a wrong one every startup).  Call /localize_globally
+    # manually when the robot is actually lost.
     global_localizer_node = Node(
         package='home_robot',
         executable='global_localizer_node.py',
         name='global_localizer',
         output='screen',
-        parameters=[{'auto_localize': True, 'depth_weight': 0.5}],
+        parameters=[{'auto_localize': False, 'depth_weight': 0.5}],
         condition=IfCondition(use_localization),
     )
 
