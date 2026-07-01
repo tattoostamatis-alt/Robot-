@@ -134,15 +134,20 @@ def generate_launch_description():
         output='screen',
     )
 
-    # TODO: measure once the IMU is permanently mounted on the chassis
-    # (currently breadboard-prototyped) — identity assumes it sits flat and
-    # aligned with base_link (x forward, y left, z up).
+    # IMU mounting orientation, measured 2026-07-01 from the BNO085's own
+    # gravity-referenced reading while the robot sat level: the board is
+    # mounted UPSIDE-DOWN (roll ~= -177.3 deg) with a slight -2.8 deg pitch.
+    # These rotations bring imu_link into base_link so the fused orientation
+    # reads level (verified: base_link roll/pitch -> 0.0 deg over 448 samples).
+    # Yaw is left 0 -- the game rotation vector yaw is arbitrary each boot and
+    # AMCL absorbs it via map->odom.
+    # TODO: translation still 0,0,0 -- measure the IMU's x/y/z on the chassis.
     tf_base_imu = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
         name='tf_base_imu',
         arguments=['--x', '0', '--y', '0', '--z', '0',
-                   '--roll', '0', '--pitch', '0', '--yaw', '0',
+                   '--roll', '-3.0952', '--pitch', '-0.0490', '--yaw', '0',
                    '--frame-id', 'base_link', '--child-frame-id', 'imu_link'],
     )
 
@@ -191,17 +196,19 @@ def generate_launch_description():
     )
 
     # ── Static TF: base_link → camera_link ───────────────────────
-    # Measured: x=0.10m forward, z=0.021m above the wheel axle (same
-    # mount/bracket as laser, centered left/right, level, facing
-    # straight ahead — so y=0, roll=pitch=yaw=0, same as
-    # tf_base_laser). Matters for RTAB-Map RGBD odometry
-    # (use_rtabmap:=true) and for object_detector's detections being
-    # placed correctly in the map/costmap.
+    # Measured 2026-07-01 (permanent mount): the D435 sits directly BELOW
+    # the lidar, both centered left/right over the wheel axle. So it shares
+    # the lidar's x=0.12 and y=0, just a little lower — z=0.20 (2cm under
+    # the lidar's 0.22). Faces straight ahead (roll=pitch=yaw=0). Matters
+    # for RTAB-Map RGBD odometry (use_rtabmap:=true) and for object_detector's
+    # detections being placed correctly in the map/costmap.
+    # NOTE: the camera is NOT rotated like the lidar (lidar has yaw=pi because
+    # its connector faces back); the D435 faces forward, so yaw=0 here.
     tf_base_camera = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
         name='tf_base_camera',
-        arguments=['--x', '0.10', '--y', '0.0', '--z', '0.021',
+        arguments=['--x', '0.12', '--y', '0.0', '--z', '0.20',
                    '--roll', '0', '--pitch', '0', '--yaw', '0',
                    '--frame-id', 'base_link', '--child-frame-id', 'camera_link'],
     )

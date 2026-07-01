@@ -53,15 +53,20 @@ def generate_launch_description():
                    '--frame-id', 'base_link', '--child-frame-id', 'laser'],
     )
 
-    # TODO: measure once the IMU is permanently mounted on the chassis
-    # (currently breadboard-prototyped) — identity assumes it sits flat and
-    # aligned with base_link (x forward, y left, z up).
+    # IMU mounting orientation, measured 2026-07-01 from the BNO085's own
+    # gravity-referenced reading while the robot sat level: the board is
+    # mounted UPSIDE-DOWN (roll ~= -177.3 deg) with a slight -2.8 deg pitch.
+    # These rotations bring imu_link into base_link so the fused orientation
+    # reads level (verified: base_link roll/pitch -> 0.0 deg over 448 samples).
+    # Yaw is left 0 -- the game rotation vector yaw is arbitrary each boot and
+    # AMCL absorbs it via map->odom.
+    # TODO: translation still 0,0,0 -- measure the IMU's x/y/z on the chassis.
     tf_base_imu = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
         name='tf_base_imu',
         arguments=['--x', '0', '--y', '0', '--z', '0',
-                   '--roll', '0', '--pitch', '0', '--yaw', '0',
+                   '--roll', '-3.0952', '--pitch', '-0.0490', '--yaw', '0',
                    '--frame-id', 'base_link', '--child-frame-id', 'imu_link'],
     )
 
