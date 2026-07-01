@@ -27,10 +27,15 @@ from geometry_msgs.msg import Pose
 PLANNING_FRAME = "world"
 
 # (id, size xyz [m], position xyz [m] in PLANNING_FRAME). Sizes include a small
-# safety margin over the real parts.
+# safety margin over the real parts. `world` sits 0.17 m above the ground (the
+# arm mount), so ground is at world z=-0.17.
+#   robot_body: the Roomba disc, ground (z=-0.17) up to its ~90mm top (z=-0.08).
+#     Left with a gap below the arm base (world z=0) so the arm's own base_link
+#     is never reported in collision (which would block all planning).
 OBSTACLES = [
-    ("lidar_c1",  (0.09, 0.09, 0.07), (0.15, 0.0,  0.05)),
+    ("lidar_c1",    (0.09, 0.09, 0.07), (0.15, 0.0,  0.05)),
     ("camera_d435", (0.05, 0.13, 0.05), (0.15, 0.0, -0.02)),
+    ("robot_body",  (0.36, 0.36, 0.09), (0.0,  0.0, -0.125)),
 ]
 
 
