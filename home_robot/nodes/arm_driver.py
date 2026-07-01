@@ -49,6 +49,16 @@ import serial
 
 JOINT_NAMES = ['base', 'shoulder', 'elbow', 'wrist', 'roll', 'hand']
 
+# The RoArm-M3 T:102 command takes the full joint names above, but its T:105
+# feedback reports the same joints under abbreviated single-letter keys
+# (confirmed against the real hardware 2026-07-01: feedback carries
+# x/y/z/tit/b/s/e/t/r/g/... ). Map joint name -> feedback key so
+# _parse_feedback() can read the current pose.
+FEEDBACK_JOINT_KEYS = {
+    'base': 'b', 'shoulder': 's', 'elbow': 'e',
+    'wrist': 't', 'roll': 'r', 'hand': 'g',
+}
+
 JOINT_LIMITS = {
     'base':     (-3.14, 3.14),
     'shoulder': (-1.57, 1.57),
@@ -174,16 +184,21 @@ class ArmDriver(Node):
             self._parse_feedback(data)
 
     def _parse_feedback(self, data: dict):
-        if not all(name in data for name in self.joint_names):
+        # Feedback keys are abbreviated (see FEEDBACK_JOINT_KEYS); fall back to
+        # the full name so a custom joint_names param still works.
+        def fb_key(name):
+            return FEEDBACK_JOINT_KEYS.get(name, name)
+
+        if not all(fb_key(name) in data for name in self.joint_names):
             if not self._feedback_format_warned:
                 self.get_logger().warn(
                     f'CMD_SERVO_RAD_FEEDBACK (T:105): unrecognized keys {list(data.keys())} — '
-                    f'update _parse_feedback() to match the real field names'
+                    f'update _parse_feedback()/FEEDBACK_JOINT_KEYS to match the real field names'
                 )
                 self._feedback_format_warned = True
             return
 
-        self._current_joints = {name: float(data[name]) for name in self.joint_names}
+        self._current_joints = {name: float(data[fb_key(name)]) for name in self.joint_names}
 
         msg = JointState()
         msg.header.stamp = self.get_clock().now().to_msg()
