@@ -23,7 +23,8 @@ import os
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -48,6 +49,7 @@ def _launch_setup(context, *args, **kwargs):
     share_dir = FindPackageShare('home_robot').perform(context)
     map_yaml = _resolve_map(LaunchConfiguration('map').perform(context), share_dir)
     use_depth = LaunchConfiguration('use_depth_camera').perform(context).lower() in ('true', '1')
+    use_joy = LaunchConfiguration('use_joy').perform(context).lower() in ('true', '1')
 
     pkg = FindPackageShare('home_robot')
     actions = []
@@ -67,6 +69,11 @@ def _launch_setup(context, *args, **kwargs):
             'use_recovery':        'false',
             'use_obstacle_safety': 'false',
             'use_rviz':            'true',
+            # We start joy/teleop ourselves below (correct device-by-name +
+            # cmd_vel_safe remap). Force bringup's own joy OFF so it doesn't
+            # also spawn one — our 'use_joy' arg is inherited into bringup
+            # otherwise and would double-launch it with the wrong settings.
+            'use_joy':             'false',
         }.items(),
     ))
 
@@ -88,6 +95,36 @@ def _launch_setup(context, *args, **kwargs):
             }.items(),
         ))
 
+    # PS5 DualSense teleop, started here (NOT via bringup's use_joy) for two
+    # reasons specific to localize mode:
+    #   1. bringup's joy_node uses the ROS1 'dev' param, ignored on Jazzy —
+    #      it would open device_id 0 (the wrong pad). We select the DualSense
+    #      by name so it works regardless of which /dev/input/jsN it landed on.
+    #   2. localize runs with use_obstacle_safety:=false, so nothing relays
+    #      cmd_vel -> cmd_vel_safe. The Roomba obeys only cmd_vel_safe (the
+    #      collision_monitor's output topic), so teleop must publish straight
+    #      to cmd_vel_safe or the robot won't move.
+    # R1 is the dead-man's switch (see teleop_twist_joy_ps5.yaml); left stick
+    # drives. autorepeat_rate keeps cmd_vel flowing while a stick is held.
+    if use_joy:
+        actions.append(Node(
+            package='joy',
+            executable='joy_node',
+            name='joy_node',
+            parameters=[{
+                'device_name': 'DualSense Wireless Controller',
+                'deadzone': 0.05,
+                'autorepeat_rate': 20.0,
+            }],
+        ))
+        actions.append(Node(
+            package='teleop_twist_joy',
+            executable='teleop_node',
+            name='teleop_twist_joy_node',
+            parameters=[PathJoinSubstitution([pkg, 'config', 'teleop_twist_joy_ps5.yaml'])],
+            remappings=[('cmd_vel', 'cmd_vel_safe')],
+        ))
+
     return actions
 
 
@@ -100,5 +137,9 @@ def generate_launch_description():
             'use_depth_camera', default_value='true',
             description='Start the D435 depth stream so global_localizer fuses it '
                         'with the LiDAR (set false for LiDAR-only)'),
+        DeclareLaunchArgument(
+            'use_joy', default_value='true',
+            description='Start PS5 DualSense teleop (R1 = dead-man, left stick) '
+                        'wired straight to cmd_vel_safe for localize mode'),
         OpaqueFunction(function=_launch_setup),
     ])

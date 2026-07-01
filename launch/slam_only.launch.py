@@ -44,11 +44,11 @@ def generate_launch_description():
         package='tf2_ros',
         executable='static_transform_publisher',
         name='tf_base_laser',
-        # Lidar remounted 2026-06-21: 120mm forward of the wheel axle,
-        # 220mm above it. yaw=pi: the unit is mounted rotated 180 degrees in
-        # the horizontal plane (connector facing back), so the laser frame is
-        # rotated 180 degrees about Z to align scans with base_link.
-        arguments=['--x', '0.12', '--y', '0', '--z', '0.22',
+        # Remeasured 2026-07-01: 150mm forward of the wheel axle, 220mm above
+        # it, centered left/right. yaw=pi: the unit is mounted rotated 180
+        # degrees in the horizontal plane (connector facing back), so the laser
+        # frame is rotated 180 degrees about Z to align scans with base_link.
+        arguments=['--x', '0.15', '--y', '0', '--z', '0.22',
                    '--roll', '0', '--pitch', '0', '--yaw', '3.14159265',
                    '--frame-id', 'base_link', '--child-frame-id', 'laser'],
     )

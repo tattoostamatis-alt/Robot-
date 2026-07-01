@@ -186,29 +186,29 @@ def generate_launch_description():
         package='tf2_ros',
         executable='static_transform_publisher',
         name='tf_base_laser',
-        # Lidar remounted 2026-06-21: 120mm forward of the wheel axle,
-        # 220mm above it. yaw=pi: the unit is mounted rotated 180 degrees in
-        # the horizontal plane (connector facing back), so the laser frame is
-        # rotated 180 degrees about Z to align scans with base_link.
-        arguments=['--x', '0.12', '--y', '0.0', '--z', '0.22',
+        # Remeasured 2026-07-01: 150mm forward of the wheel axle, 220mm above
+        # it, centered left/right. yaw=pi: the unit is mounted rotated 180
+        # degrees in the horizontal plane (connector facing back), so the laser
+        # frame is rotated 180 degrees about Z to align scans with base_link.
+        arguments=['--x', '0.15', '--y', '0.0', '--z', '0.22',
                    '--roll', '0', '--pitch', '0', '--yaw', '3.14159265',
                    '--frame-id', 'base_link', '--child-frame-id', 'laser'],
     )
 
     # ── Static TF: base_link → camera_link ───────────────────────
-    # Measured 2026-07-01 (permanent mount): the D435 sits directly BELOW
-    # the lidar, both centered left/right over the wheel axle. So it shares
-    # the lidar's x=0.12 and y=0, just a little lower — z=0.20 (2cm under
-    # the lidar's 0.22). Faces straight ahead (roll=pitch=yaw=0). Matters
-    # for RTAB-Map RGBD odometry (use_rtabmap:=true) and for object_detector's
-    # detections being placed correctly in the map/costmap.
+    # Remeasured 2026-07-01 (permanent mount): the D435 is centered left/right
+    # over the wheel axle, 150mm forward of the axle (same x as the lidar) and
+    # 150mm above it (z=0.15, i.e. 70mm below the lidar's 0.22). Faces straight
+    # ahead (roll=pitch=yaw=0). Matters for RTAB-Map RGBD odometry
+    # (use_rtabmap:=true) and for object_detector's detections being placed
+    # correctly in the map/costmap.
     # NOTE: the camera is NOT rotated like the lidar (lidar has yaw=pi because
     # its connector faces back); the D435 faces forward, so yaw=0 here.
     tf_base_camera = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
         name='tf_base_camera',
-        arguments=['--x', '0.12', '--y', '0.0', '--z', '0.20',
+        arguments=['--x', '0.15', '--y', '0.0', '--z', '0.15',
                    '--roll', '0', '--pitch', '0', '--yaw', '0',
                    '--frame-id', 'base_link', '--child-frame-id', 'camera_link'],
     )

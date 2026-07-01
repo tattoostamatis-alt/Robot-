@@ -339,7 +339,7 @@ html,body{{height:100%;overflow:hidden;background:#1a1a1a;color:#e0e0e0;
 // ── constants ──────────────────────────────────────────────────────────────
 const ROOMS = {rooms_json};
 const LIN = 0.10, ANG = 0.10;
-const LASER_X = 0.12, LASER_YAW_OFFSET = Math.PI; // laser TF
+const LASER_X = 0.00, LASER_YAW_OFFSET = 0.0; // laser TF
 
 // ── state ──────────────────────────────────────────────────────────────────
 let ws=null, mapInfo=null, mapImg=null, pose=null, scan=null, goal=null;

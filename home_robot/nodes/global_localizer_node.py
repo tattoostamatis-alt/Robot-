@@ -139,6 +139,7 @@ class GlobalLocalizerNode(Node):
 
         self._map:   OccupancyGrid | None = None
         self._lf:    np.ndarray | None    = None   # likelihood field cache
+        self._dist:  np.ndarray | None    = None   # distance-to-wall field [m] cache
         self._scan:  LaserScan | None     = None
         self._depth: np.ndarray | None    = None
         self._depth_frame: str            = 'camera_depth_optical_frame'
@@ -186,7 +187,8 @@ class GlobalLocalizerNode(Node):
     def _cb_map(self, msg: OccupancyGrid):
         with self._lock:
             self._map = msg
-            self._lf  = None          # invalidate cached field
+            self._lf   = None         # invalidate cached fields
+            self._dist = None
         self.get_logger().info(
             f'Map received: {msg.info.width}×{msg.info.height} '
             f'{msg.info.resolution:.3f} m/px')
@@ -302,6 +304,55 @@ class GlobalLocalizerNode(Node):
         base_y = ly + math.sin(lyaw) * t_lb_x + math.cos(lyaw) * t_lb_y
         return base_x, base_y, base_yaw
 
+    def _refine(self, lidar: np.ndarray, lx: float, ly: float, lyaw: float,
+                map_msg: OccupancyGrid) -> tuple[float, float, float]:
+        """Local grid search that minimises median scan->wall distance.
+
+        Refines a laser-frame pose (lx, ly, lyaw) over ±0.4 m / ±8° using a
+        distance-to-wall field, so the published pose is metric-accurate
+        rather than just FFT-pixel-accurate."""
+        if lidar.shape[0] < 50:
+            return lx, ly, lyaw
+        if self._dist is None:
+            from scipy.ndimage import distance_transform_edt
+            grid = np.array(map_msg.data, dtype=np.int8).reshape(
+                map_msg.info.height, map_msg.info.width)
+            # distance from every free cell to the nearest occupied (wall) cell
+            self._dist = (distance_transform_edt(grid < 65)
+                          * map_msg.info.resolution).astype(np.float32)
+        dist = self._dist
+        res = map_msg.info.resolution
+        ox  = map_msg.info.origin.position.x
+        oy  = map_msg.info.origin.position.y
+        H, W = dist.shape
+        px = lidar[:, 0]
+        py = lidar[:, 1]
+
+        def median_err(x: float, y: float, yaw: float) -> float:
+            c, s = math.cos(yaw), math.sin(yaw)
+            mx = c * px - s * py + x
+            my = s * px + c * py + y
+            gx = np.round((mx - ox) / res).astype(np.int32)
+            gy = np.round((my - oy) / res).astype(np.int32)
+            ib = (gx >= 0) & (gx < W) & (gy >= 0) & (gy < H)
+            if int(ib.sum()) < 50:
+                return 9.9
+            return float(np.median(dist[gy[ib], gx[ib]]))
+
+        best = (median_err(lx, ly, lyaw), lx, ly, lyaw)
+        for dx in np.arange(-0.4, 0.41, 0.04):
+            for dy in np.arange(-0.4, 0.41, 0.04):
+                for dth in range(-8, 9):
+                    yaw = lyaw + math.radians(dth)
+                    err = median_err(lx + dx, ly + dy, yaw)
+                    if err < best[0]:
+                        best = (err, lx + dx, ly + dy, yaw)
+        self.get_logger().info(
+            f'  refined: median scan->wall {best[0]:.3f} m '
+            f'(shifted {math.hypot(best[1] - lx, best[2] - ly):.2f} m, '
+            f'{math.degrees(best[3] - lyaw):+.0f}°)')
+        return best[1], best[2], best[3]
+
     def _run(self):
         if self._running:
             return
@@ -385,6 +436,19 @@ class GlobalLocalizerNode(Node):
             # pose 180° out, which AMCL then locked onto (the "flip").
             laser_x = ox + (W // 2 + best_dx) * res
             laser_y = oy + (H // 2 + best_dy) * res
+
+            # ── Fine refinement ────────────────────────────────────
+            # The FFT peak is only pixel-accurate and, worse, the correlation
+            # maximum can sit ~0.5 m off the geometric best fit. Published as
+            # /initialpose that leaves AMCL ~0.5 m out, and since AMCL is a
+            # particle filter that only converges WITH MOTION, the scan looks
+            # off the walls until the robot drives. Polish the laser pose here
+            # by minimising median scan->wall distance over a small local grid
+            # (LiDAR only — 360°, more reliable than the forward depth for
+            # alignment) so the scan lands on the walls even while stationary.
+            laser_x, laser_y, best_theta = self._refine(
+                lidar, laser_x, laser_y, best_theta, map_msg)
+
             robot_x, robot_y, best_theta = self._laser_to_base(
                 laser_x, laser_y, best_theta)
 
