@@ -141,12 +141,16 @@ def generate_launch_description():
     # reads level (verified: base_link roll/pitch -> 0.0 deg over 448 samples).
     # Yaw is left 0 -- the game rotation vector yaw is arbitrary each boot and
     # AMCL absorbs it via map->odom.
-    # TODO: translation still 0,0,0 -- measure the IMU's x/y/z on the chassis.
+    # Translation set 2026-07-01 to sit on the same centered sensor stack as the
+    # lidar/camera (x=0.15 forward of the wheel axle, y=0 centered, z=0.15 at the
+    # stack height). NOTE: ekf.yaml fuses ONLY yaw + yaw-rate from this IMU (no
+    # linear acceleration), so the exact translation has no effect on the fused
+    # output -- it is set purely so the TF tree matches the physical layout.
     tf_base_imu = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
         name='tf_base_imu',
-        arguments=['--x', '0', '--y', '0', '--z', '0',
+        arguments=['--x', '0.15', '--y', '0.0', '--z', '0.15',
                    '--roll', '-3.0952', '--pitch', '-0.0490', '--yaw', '0',
                    '--frame-id', 'base_link', '--child-frame-id', 'imu_link'],
     )
