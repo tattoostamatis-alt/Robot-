@@ -63,6 +63,13 @@ def generate_launch_description():
         output="screen",
     )
 
+    # Adds the camera + lidar mast as collision objects so plans avoid them.
+    arm_scene_obstacles = Node(
+        package="home_robot",
+        executable="arm_scene_obstacles.py",
+        output="screen",
+    )
+
     rviz_config = os.path.join(
         get_package_share_directory("roarm_moveit"), "rviz", "interact.rviz")
     rviz = Node(
@@ -83,5 +90,6 @@ def generate_launch_description():
         robot_state_publisher,
         move_group,
         arm_moveit_bridge,
+        arm_scene_obstacles,
         rviz,
     ])
