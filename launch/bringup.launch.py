@@ -218,19 +218,18 @@ def generate_launch_description():
     )
 
     # ── Static TF: base_link → arm_base ───────────────────────────
-    # TODO: measure once the RoArm-M3 is physically mounted — placeholder
-    # only (arm not connected yet). Guessed at roughly centered left/right,
-    # behind the camera mount, at chassis-top height, facing forward (no
-    # rotation). pick_place_node.py uses this TF to convert object
+    # Measured 2026-07-01 once the RoArm-M3 was physically mounted: the arm
+    # base sits exactly at the robot's centre (x=0 over the wheel axle, y=0
+    # centred left/right) at 170mm above the ground, facing straight forward
+    # (roll=pitch=yaw=0). pick_place_node.py uses this TF to convert object
     # positions from object_detector.py (camera_color_optical_frame) into
-    # the arm_base frame that arm_driver.py's T:104 cartesian command
-    # expects — wrong values here mean wrong reach/grasp targets, so this
-    # MUST be corrected with a tape measure before trusting any pick.
+    # the arm_base frame that arm_driver.py's T:104 cartesian command expects —
+    # wrong values here mean wrong reach/grasp targets.
     tf_base_arm = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
         name='tf_base_arm',
-        arguments=['--x', '0.05', '--y', '0.0', '--z', '0.05',
+        arguments=['--x', '0.0', '--y', '0.0', '--z', '0.17',
                    '--roll', '0', '--pitch', '0', '--yaw', '0',
                    '--frame-id', 'base_link', '--child-frame-id', 'arm_base'],
         condition=IfCondition(use_arm),
