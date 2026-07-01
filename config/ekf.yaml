@@ -40,17 +40,17 @@ ekf_filter_node:
     odom0_queue_size: 10
 
     imu0: imu/data
-    # vyaw (index 11) DISABLED 2026-07-01: the BNO085 firmware enables
-    # SH2_GYROSCOPE_CALIBRATED but the chip never emits gyro events, so
-    # gx/gy/gz stream a constant 0.0 (verified: 304 samples, Δ=0). Fusing
-    # that as a low-covariance "yaw-rate = 0" fought every real turn. Only
-    # the absolute yaw (index 5, game rotation vector) is used now; it
-    # tracks rotation correctly (+71 deg measured for a ~90 deg left turn).
-    # Re-enable once the firmware actually delivers gyro data.
+    # Fuses absolute yaw (index 5, game rotation vector) + yaw-rate (index 11,
+    # gyro). vyaw was briefly disabled 2026-07-01 because the BNO085 firmware
+    # never streamed gyro (gx/gy/gz stuck at 0). Root cause: enabling several
+    # BNO08x reports back-to-back silently dropped the gyro report over I2C.
+    # Firmware now enables reports one-at-a-time with a settle delay, so gyro
+    # streams correctly (verified: gz up to ~0.77 rad/s during a turn), and
+    # vyaw is re-enabled.
     imu0_config: [false, false, false,
                   false, false, true,
                   false, false, false,
-                  false, false, false,
+                  false, false, true,
                   false, false, false]
     imu0_differential: false
     imu0_relative: false

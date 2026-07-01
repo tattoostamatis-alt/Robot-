@@ -32,9 +32,26 @@ void setReports() {
   // AMCL corrects the slow gyro yaw drift via scan matching. The game
   // rotation vector yaw=0 is an arbitrary direction each boot, which is fine
   // because AMCL computes map->odom anyway.
-  bno08x.enableReport(SH2_GAME_ROTATION_VECTOR, 10000);   // 100Hz
-  bno08x.enableReport(SH2_GYROSCOPE_CALIBRATED, 10000);
-  bno08x.enableReport(SH2_LINEAR_ACCELERATION, 10000);
+  //
+  // Enable reports ONE AT A TIME with a settle delay and verify the return
+  // value. Enabling several reports back-to-back silently drops some of them
+  // over the flaky I2C bus -- that is why SH2_GYROSCOPE_CALIBRATED never
+  // streamed (gx/gy/gz stuck at 0, so the EKF's yaw-rate input was a constant
+  // 0 that fought every turn). We now request only the two reports the EKF
+  // consumes: absolute yaw (game rotation vector) + yaw-rate (gyro).
+  // SH2_LINEAR_ACCELERATION is dropped -- imu0_config leaves ax/ay/az off, so
+  // it was pure bus/serial load; ax/ay/az are just streamed as 0.
+  bool okRot = false, okGyro = false;
+  for (int i = 0; i < 5 && !okRot; i++) {
+    okRot = bno08x.enableReport(SH2_GAME_ROTATION_VECTOR, 10000);   // 100Hz
+    delay(50);
+  }
+  for (int i = 0; i < 5 && !okGyro; i++) {
+    okGyro = bno08x.enableReport(SH2_GYROSCOPE_CALIBRATED, 10000);  // 100Hz
+    delay(50);
+  }
+  Serial.print("Reports enabled: rot="); Serial.print(okRot);
+  Serial.print(" gyro="); Serial.println(okGyro);
 }
 
 void setup() {
