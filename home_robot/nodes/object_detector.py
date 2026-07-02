@@ -1,13 +1,22 @@
 #!/usr/bin/env python3
-"""Object detector — RealSense → YOLO11n (CPU) → 3D positions."""
+"""Object detector — RealSense → YOLO11n (iGPU/ROCm) → 3D positions.
 
+Inference runs on the AMD Radeon 860M iGPU via Ultralytics + torch-ROCm
+(device='cuda:0'), which keeps the NPU 100% free for Qwen3 and offloads the
+CPU (freeing it for the faster-whisper STT). ~93 FPS on the iGPU vs ~46 on CPU.
+fp16 is NOT used — it aborts with HSA_STATUS_ERROR_INVALID_ISA on this arch.
+Falls back to CPU automatically if the iGPU is unavailable.
+"""
+
+# Must be set BEFORE torch is imported (via ultralytics) so ROCm accepts the
+# gfx1150 iGPU. setdefault: a launch-file env override still wins.
 import os
-import cv2
+os.environ.setdefault('HSA_OVERRIDE_GFX_VERSION', '11.0.0')
+
 import json
 import threading
 
 import numpy as np
-import onnxruntime as ort
 
 import rclpy
 from rclpy.node import Node
@@ -38,99 +47,8 @@ CLUTTER_CLASSES = {
     'tie', 'suitcase', 'umbrella', 'shoe',
 }
 
-_MODEL_PATH   = os.path.join(os.path.dirname(__file__), 'yolo11n_int8.onnx')
+_MODEL_PATH   = os.path.join(os.path.dirname(__file__), 'yolo11n.pt')
 _INPUT_SIZE   = 640
-
-
-def _letterbox(img, size=640):
-    """Resize + pad to square, return (padded_img, scale, pad_w, pad_h)."""
-    h, w = img.shape[:2]
-    scale = size / max(h, w)
-    nh, nw = int(h * scale), int(w * scale)
-    img_r = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_LINEAR)
-    pad_h = (size - nh) // 2
-    pad_w = (size - nw) // 2
-    padded = np.full((size, size, 3), 114, dtype=np.uint8)
-    padded[pad_h:pad_h + nh, pad_w:pad_w + nw] = img_r
-    return padded, scale, pad_w, pad_h
-
-
-def _preprocess(bgr):
-    padded, scale, pad_w, pad_h = _letterbox(bgr, _INPUT_SIZE)
-    rgb = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB)
-    tensor = rgb.astype(np.float32) / 255.0
-    tensor = np.transpose(tensor, (2, 0, 1))[np.newaxis]  # NCHW
-    return tensor, scale, pad_w, pad_h
-
-
-def _nms(boxes, scores, iou_thr=0.45):
-    """Simple NMS; boxes = (N,4) x1y1x2y2, scores = (N,)."""
-    x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
-    areas = (x2 - x1) * (y2 - y1)
-    order = scores.argsort()[::-1]
-    keep = []
-    while order.size:
-        i = order[0]
-        keep.append(i)
-        xx1 = np.maximum(x1[i], x1[order[1:]])
-        yy1 = np.maximum(y1[i], y1[order[1:]])
-        xx2 = np.minimum(x2[i], x2[order[1:]])
-        yy2 = np.minimum(y2[i], y2[order[1:]])
-        inter = np.maximum(0, xx2 - xx1) * np.maximum(0, yy2 - yy1)
-        iou = inter / (areas[i] + areas[order[1:]] - inter + 1e-6)
-        order = order[1:][iou <= iou_thr]
-    return keep
-
-
-def _postprocess(output, scale, pad_w, pad_h, conf_thr, img_w, img_h):
-    """Decode YOLO11 output (1,84,8400) → list of (x1,y1,x2,y2,conf,cls_id)."""
-    pred = output[0].T  # (8400, 84)
-    cx, cy, w, h = pred[:, 0], pred[:, 1], pred[:, 2], pred[:, 3]
-    class_scores = pred[:, 4:]              # (8400, 80)
-    cls_ids = class_scores.argmax(axis=1)
-    confs   = class_scores[np.arange(len(cls_ids)), cls_ids]
-
-    mask = confs >= conf_thr
-    if not mask.any():
-        return []
-
-    cx, cy, w, h = cx[mask], cy[mask], w[mask], h[mask]
-    confs   = confs[mask]
-    cls_ids = cls_ids[mask]
-
-    # cx/cy/w/h are in 640×640 letterbox space → original pixels
-    x1 = ((cx - w / 2) - pad_w) / scale
-    y1 = ((cy - h / 2) - pad_h) / scale
-    x2 = ((cx + w / 2) - pad_w) / scale
-    y2 = ((cy + h / 2) - pad_h) / scale
-
-    x1 = np.clip(x1, 0, img_w - 1)
-    y1 = np.clip(y1, 0, img_h - 1)
-    x2 = np.clip(x2, 0, img_w - 1)
-    y2 = np.clip(y2, 0, img_h - 1)
-
-    boxes = np.stack([x1, y1, x2, y2], axis=1)
-
-    results = []
-    for cls in np.unique(cls_ids):
-        m = cls_ids == cls
-        keep = _nms(boxes[m], confs[m])
-        for k in keep:
-            idx = np.where(m)[0][k]
-            results.append((
-                int(boxes[idx, 0]), int(boxes[idx, 1]),
-                int(boxes[idx, 2]), int(boxes[idx, 3]),
-                float(confs[idx]), int(cls_ids[idx]),
-            ))
-    return results
-
-
-def _build_session():
-    # CPU-only: keeps NPU free for Qwen3 (XRT context-switch adds ~6s to LLM latency)
-    return ort.InferenceSession(
-        _MODEL_PATH,
-        providers=['CPUExecutionProvider'],
-    ), 'CPU'
 
 
 class ObjectDetector(Node):
@@ -139,11 +57,15 @@ class ObjectDetector(Node):
 
         self.declare_parameter('confidence',     0.5)
         self.declare_parameter('process_every_n', 6)
+        # 'cuda:0' = Radeon 860M iGPU via ROCm; 'cpu' to force CPU fallback.
+        self.declare_parameter('device',          'cuda:0')
 
         self.conf            = self.get_parameter('confidence').value
         self.process_every_n = self.get_parameter('process_every_n').value
+        self._device_req     = self.get_parameter('device').value
         self.bridge          = CvBridge()
-        self._session        = None
+        self._model          = None
+        self._device         = None
         self._backend        = 'loading'
         self._fx = self._fy = self._cx = self._cy = None
         self._frame_count    = 0
@@ -165,13 +87,31 @@ class ObjectDetector(Node):
         self.get_logger().info('Object detector ready — waiting for camera topics...')
 
     def _load_model(self):
-        sess, backend = _build_session()
-        self._session = sess
-        self._backend = backend
-        self.get_logger().info(f'YOLO11n loaded on {backend} ({_MODEL_PATH})')
+        # Import here (background thread) so torch/ROCm init never blocks node startup.
+        import torch
+        from ultralytics import YOLO
+
+        device = self._device_req
+        if device.startswith('cuda') and not torch.cuda.is_available():
+            self.get_logger().warn(
+                f'iGPU/ROCm not available (HSA_OVERRIDE_GFX_VERSION='
+                f'{os.environ.get("HSA_OVERRIDE_GFX_VERSION")}); falling back to CPU.')
+            device = 'cpu'
+
+        model = YOLO(_MODEL_PATH)
+        model.to(device)
+        # Warm up off the callback path: pays the first-call JIT/alloc cost now.
+        warm = np.zeros((_INPUT_SIZE, _INPUT_SIZE, 3), dtype=np.uint8)
+        model.predict(warm, device=device, imgsz=_INPUT_SIZE,
+                      half=False, verbose=False)
+
+        self._model   = model
+        self._device  = device
+        self._backend = ('iGPU/ROCm' if device.startswith('cuda') else 'CPU')
+        self.get_logger().info(f'YOLO11n loaded on {self._backend} ({_MODEL_PATH})')
 
     def _detect_cb(self, color_msg: Image, depth_msg: Image, info_msg: CameraInfo):
-        if self._session is None:
+        if self._model is None:
             return
         self._frame_count += 1
         if self._frame_count % self.process_every_n != 0:
@@ -186,9 +126,22 @@ class ObjectDetector(Node):
         depth_img = self.bridge.imgmsg_to_cv2(depth_msg, '16UC1').astype(np.float32) / 1000.0
         img_h, img_w = depth_img.shape[:2]
 
-        tensor, scale, pad_w, pad_h = _preprocess(color_img)
-        raw = self._session.run(None, {'images': tensor})
-        detections = _postprocess(raw[0], scale, pad_w, pad_h, self.conf, img_w, img_h)
+        # Ultralytics accepts a BGR ndarray and returns boxes already scaled back
+        # to original-image pixels (it handles letterbox + NMS internally).
+        res = self._model.predict(color_img, device=self._device, imgsz=_INPUT_SIZE,
+                                  conf=self.conf, half=False, verbose=False)[0]
+        b = res.boxes
+        detections = []
+        if b is not None and len(b):
+            xyxy = b.xyxy.cpu().numpy()
+            confs = b.conf.cpu().numpy()
+            clss  = b.cls.cpu().numpy().astype(int)
+            for (x1, y1, x2, y2), cf, cl in zip(xyxy, confs, clss):
+                detections.append((
+                    int(max(0, min(x1, img_w - 1))), int(max(0, min(y1, img_h - 1))),
+                    int(max(0, min(x2, img_w - 1))), int(max(0, min(y2, img_h - 1))),
+                    float(cf), int(cl),
+                ))
 
         detected = []
         markers  = MarkerArray()
