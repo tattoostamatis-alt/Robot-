@@ -2,19 +2,22 @@
 """Person follower node — follows a person using RealSense D435 depth and DoA angle.
 
 Subscribes:
-  /doa/wake                    (std_msgs/Float32)  — wake angle [0-359°], clockwise from front
+  /follow_command              (std_msgs/Bool)     — True = start following, False = stop
+  /doa/wake                    (std_msgs/Float32)  — wake angle [0-359°]; only updates the
+                                                     target direction, does NOT activate
   /camera/depth/image_rect_raw (sensor_msgs/Image, 16UC1) — depth in mm
-  /speech_text                 (std_msgs/String)   — user command; stops following immediately
 
 Publishes:
   /cmd_vel                     (geometry_msgs/Twist) — velocity commands
 
 Following logic:
-  - Activates on DoA wake event; stays active for up to follow_timeout seconds.
-  - Projects the DoA angle onto the depth image column (D435 87° HFOV).
+  - Activates ONLY on an explicit follow_command=True (the llm_bridge 'follow' tool,
+    i.e. the user said "ακολούθησέ με"). Stays active up to follow_timeout seconds.
+  - Uses the latest DoA wake angle to aim at the speaker (projected onto the depth
+    image column, D435 87° HFOV) — a fresh wake fired just before the command.
   - Reads median depth in a vertical strip around that column.
   - Moves forward when person is too far, stops when too close, holds in range.
-  - Deactivates on speech command or timeout; publishes a zero-velocity stop.
+  - Deactivates on follow_command=False or timeout; publishes a zero-velocity stop.
 
 Note: chmod +x this file after creation.
 """
@@ -25,7 +28,7 @@ import time
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float32, String
+from std_msgs.msg import Float32, String, Bool
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import Twist
 from cv_bridge import CvBridge
@@ -67,10 +70,10 @@ class PersonFollowerNode(Node):
         self._cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
         # --- Subscribers --------------------------------------------------
+        self.create_subscription(Bool, 'follow_command',
+                                 self._follow_cmd_cb, 10)
         self.create_subscription(Float32, '/doa/wake',
                                  self._doa_cb, 10)
-        self.create_subscription(String, 'speech_text',
-                                 self._speech_cb, 10)
         self.create_subscription(Image, '/camera/depth/image_rect_raw',
                                  self._depth_cb, 10)
 
@@ -84,7 +87,8 @@ class PersonFollowerNode(Node):
     # DoA callback — activates following mode
     # ------------------------------------------------------------------
     def _doa_cb(self, msg: Float32):
-        """Convert DoA wake angle to an image column and activate following."""
+        """Update the target direction from the DoA wake angle. Does NOT activate
+        following — that only happens on an explicit follow_command=True."""
         angle_deg = float(msg.data)
 
         # Convert clockwise 0-359° to signed angle: positive = right, negative = left
@@ -96,29 +100,27 @@ class PersonFollowerNode(Node):
         col = max(0, min(_IMAGE_WIDTH - 1, col))
 
         with self._lock:
-            self._active       = True
-            self._active_until = time.monotonic() + self._timeout
-            self._doa_col      = col
-
-        self.get_logger().info(
-            f'Following activated: DoA={angle_deg:.1f}° (signed={signed_angle:.1f}°) '
-            f'→ col={col}, timeout={self._timeout:.0f}s'
-        )
+            self._doa_col = col
 
     # ------------------------------------------------------------------
-    # Speech callback — deactivates following mode
+    # Follow command callback — activates / deactivates following mode
     # ------------------------------------------------------------------
-    def _speech_cb(self, msg: String):
-        """Stop following immediately when the user issues a voice command."""
-        with self._lock:
-            was_active    = self._active
-            self._active  = False
-
-        if was_active:
-            self._publish_stop()
+    def _follow_cmd_cb(self, msg: Bool):
+        """Start/stop following on the llm_bridge 'follow'/'stop_follow' tools."""
+        if msg.data:
+            with self._lock:
+                self._active       = True
+                self._active_until = time.monotonic() + self._timeout
+                col = self._doa_col
             self.get_logger().info(
-                f'Following stopped: speech command received ("{msg.data}")'
-            )
+                f'Following activated (target col={col}, timeout={self._timeout:.0f}s)')
+        else:
+            with self._lock:
+                was_active   = self._active
+                self._active = False
+            if was_active:
+                self._publish_stop()
+                self.get_logger().info('Following stopped: stop command received')
 
     # ------------------------------------------------------------------
     # Depth image callback — main control loop

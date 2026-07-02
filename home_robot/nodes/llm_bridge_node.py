@@ -73,27 +73,30 @@ def _needs_vision(text: str) -> bool:
 
 SYSTEM_PROMPT = """Είσαι ο "Max", βοηθός ρομπότ καθαρισμού σπιτιού. Απάντα σύντομα, φιλικά, στα Ελληνικά, χωρίς emoji.
 
-Κάλεσε tool όταν ο χρήστης ζητάει ενέργεια (κίνηση, καθαρισμό, docking, εξερεύνηση, αναφορά αντικειμένων) ή ρωτάει κατάσταση/μπαταρία. Αν απλώς συζητά, απάντα χωρίς tool.
+Κάλεσε tool όταν ο χρήστης ζητάει ενέργεια (κίνηση, καθαρισμό, docking, εξερεύνηση, αναφορά αντικειμένων, πιάσιμο αντικειμένου με τον βραχίονα, να σε ακολουθήσει) ή ρωτάει κατάσταση/μπαταρία. Αν απλώς συζητά, απάντα χωρίς tool.
 
 Αν ζητήσει να θυμηθείς κάτι ("θυμήσου...", "να θυμάσαι..."), ΠΑΝΤΑ κάλεσε 'remember' — αλλιώς χάνεται.
 
 Αν η ερώτηση αφορά την εικόνα, η περιγραφή της κάμερας συνοδεύει ήδη το μήνυμα."""
 
+# NOTE: keep descriptions terse. FastFlowLM (NPU) has max_prefill_len=4096 and the
+# whole TOOLS schema is serialized into every prefill — verbose descriptions overflow
+# it ("Max length reached!" 400). This concise set fits with room to spare.
+_ROOMS = ['saloni', 'kouzina', 'diadromos', 'toualeta', 'domatio tou max', 'domatio tou mbamba']
+
 TOOLS = [
     {'type': 'function', 'function': {
         'name': 'tidy',
-        'description': 'Ξεκίνα να τακτοποιείς/καθαρίζεις ένα δωμάτιο',
+        'description': 'Τακτοποίησε/καθάρισε ένα δωμάτιο',
         'parameters': {'type': 'object', 'properties': {
-            'room': {'type': 'string', 'enum': ['saloni', 'kouzina', 'diadromos', 'toualeta', 'domatio tou max', 'domatio tou mbamba', 'all'],
-                     'description': 'Το δωμάτιο προς καθαρισμό'},
+            'room': {'type': 'string', 'enum': _ROOMS + ['all']},
         }, 'required': ['room']},
     }},
     {'type': 'function', 'function': {
         'name': 'goto',
-        'description': 'Πήγαινε σε μια συγκεκριμένη τοποθεσία',
+        'description': 'Πήγαινε σε μια τοποθεσία',
         'parameters': {'type': 'object', 'properties': {
-            'location': {'type': 'string', 'enum': ['saloni', 'kouzina', 'diadromos', 'toualeta', 'domatio tou max', 'domatio tou mbamba', 'dock'],
-                          'description': 'Η τοποθεσία προορισμού'},
+            'location': {'type': 'string', 'enum': _ROOMS + ['dock']},
         }, 'required': ['location']},
     }},
     {'type': 'function', 'function': {
@@ -103,63 +106,65 @@ TOOLS = [
     }},
     {'type': 'function', 'function': {
         'name': 'stop',
-        'description': 'Σταμάτα αμέσως κάθε κίνηση',
+        'description': 'Σταμάτα κάθε κίνηση αμέσως',
         'parameters': {'type': 'object', 'properties': {}},
     }},
     {'type': 'function', 'function': {
         'name': 'move',
-        'description': 'Κάνε μια μικρή χειροκίνητη κίνηση για λίγα δευτερόλεπτα — '
-                        'π.χ. "κάνε λίγο μπροστά", "πήγαινε λίγο πίσω", "γύρνα δεξιά". '
-                        'ΟΧΙ για μετάβαση σε δωμάτιο (χρήση goto) ή καθαρισμό/περιπολία.',
+        'description': 'Μικρή χειροκίνητη κίνηση λίγων δευτ. (μπρος/πίσω/στροφή). '
+                       'ΟΧΙ για μετάβαση σε δωμάτιο — γι αυτό goto.',
         'parameters': {'type': 'object', 'properties': {
-            'direction': {'type': 'string', 'enum': ['forward', 'backward', 'left', 'right'],
-                          'description': 'Κατεύθυνση κίνησης (left/right = στροφή επί τόπου)'},
-            'duration': {'type': 'number',
-                         'description': 'Διάρκεια κίνησης σε δευτερόλεπτα (0.3-3, default 1)'},
+            'direction': {'type': 'string', 'enum': ['forward', 'backward', 'left', 'right']},
+            'duration': {'type': 'number', 'description': 'δευτερόλεπτα 0.3-3 (default 1)'},
         }, 'required': ['direction']},
     }},
     {'type': 'function', 'function': {
         'name': 'patrol',
-        'description': 'Ξεκίνα περιπολία/εξερεύνηση του χώρου',
+        'description': 'Ξεκίνα περιπολία του χώρου',
         'parameters': {'type': 'object', 'properties': {}},
     }},
     {'type': 'function', 'function': {
         'name': 'explore',
-        'description': 'Ξεκίνα αυτόνομη εξερεύνηση — κινείσαι μόνος σου και χαρτογραφείς '
-                        'άγνωστες περιοχές του σπιτιού (frontier exploration). '
-                        'Χρήσιμο για: "εξερεύνησε", "χαρτογράφησε", "δες τι υπάρχει γύρω".',
+        'description': 'Αυτόνομη εξερεύνηση & χαρτογράφηση αγνώστων περιοχών',
         'parameters': {'type': 'object', 'properties': {}},
     }},
     {'type': 'function', 'function': {
         'name': 'stop_explore',
-        'description': 'Σταμάτα την αυτόνομη εξερεύνηση.',
+        'description': 'Σταμάτα την εξερεύνηση',
         'parameters': {'type': 'object', 'properties': {}},
     }},
     {'type': 'function', 'function': {
         'name': 'report_clutter',
-        'description': 'Αναφορά ακαταστασίας για καθαρισμό/τακτοποίηση — επιστρέφει '
-                        'λίστα αντικειμένων που εντόπισε το YOLO ως clutter (π.χ. '
-                        '"πόσα αντικείμενα έχουν μείνει σκόρπια;", "υπάρχει ακαταστασία;"). '
-                        'ΟΧΙ για γενικές ερωτήσεις "τι βλέπεις" — αυτές απαντώνται '
-                        'από το vision context που ήδη έχεις.',
+        'description': 'Λίστα σκόρπιων αντικειμένων (clutter) από το YOLO. ΟΧΙ για "τι βλέπεις".',
         'parameters': {'type': 'object', 'properties': {}},
     }},
     {'type': 'function', 'function': {
         'name': 'remember',
-        'description': 'Θυμήσου μόνιμα ένα γεγονός/πληροφορία για μελλοντική χρήση '
-                        '(π.χ. "θυμήσου ότι το κλειδί είναι στο συρτάρι της κουζίνας"). '
-                        'Χρησιμοποίησέ το ΜΟΝΟ όταν ο χρήστης ζητάει ρητά να θυμηθείς κάτι.',
+        'description': 'Θυμήσου μόνιμα ένα γεγονός. Μόνο όταν το ζητά ρητά ο χρήστης.',
         'parameters': {'type': 'object', 'properties': {
-            'fact': {'type': 'string', 'description': 'Το γεγονός/πληροφορία προς απομνημόνευση'},
+            'fact': {'type': 'string', 'description': 'το γεγονός προς απομνημόνευση'},
         }, 'required': ['fact']},
     }},
     {'type': 'function', 'function': {
         'name': 'system_status',
-        'description': 'Έλεγξε την κατάσταση του υπολογιστή/ρομπότ — CPU (χρήση, '
-                        'πυρήνες, φόρτος), ελεύθερη/χρησιμοποιούμενη μνήμη RAM, '
-                        'δίσκος, θερμοκρασία, χρόνος λειτουργίας, μπαταρία '
-                        '(π.χ. "πώς είσαι;", "όλα καλά;", "πόση μνήμη/RAM σου έχει '
-                        'μείνει ελεύθερη;", "πόση μπαταρία έχεις;")',
+        'description': 'Κατάσταση ρομπότ: CPU, RAM, δίσκος, θερμοκρασία, uptime, μπαταρία',
+        'parameters': {'type': 'object', 'properties': {}},
+    }},
+    {'type': 'function', 'function': {
+        'name': 'pick',
+        'description': 'Πιάσε ένα ορατό αντικείμενο με τον βραχίονα και άφησέ το στο σημείο εναπόθεσης',
+        'parameters': {'type': 'object', 'properties': {
+            'object': {'type': 'string', 'description': 'αγγλικό COCO label, π.χ. cup, bottle, book'},
+        }, 'required': ['object']},
+    }},
+    {'type': 'function', 'function': {
+        'name': 'follow',
+        'description': 'Ακολούθησε τον χρήστη ("ακολούθησέ με")',
+        'parameters': {'type': 'object', 'properties': {}},
+    }},
+    {'type': 'function', 'function': {
+        'name': 'stop_follow',
+        'description': 'Σταμάτα να ακολουθείς τον χρήστη',
         'parameters': {'type': 'object', 'properties': {}},
     }},
 ]
@@ -250,6 +255,8 @@ class LLMBridgeNode(Node):
         self.explore_pub = self.create_publisher(Bool, 'explore_command', 10)
         self.memory_store_pub = self.create_publisher(String, 'memory/store', 10)
         self.memory_query_pub = self.create_publisher(String, 'memory/query', 10)
+        self.pick_pub = self.create_publisher(String, 'pick_command', 10)
+        self.follow_pub = self.create_publisher(Bool, 'follow_command', 10)
 
         self._history = []
         self._busy = threading.Lock()
@@ -744,6 +751,21 @@ class LLMBridgeNode(Node):
                 return {'status': 'error', 'reason': 'empty fact'}
             self.memory_store_pub.publish(String(data=fact))
             return {'status': 'ok', 'action': 'remember', 'fact': fact}
+
+        elif name == 'pick':
+            obj = (args.get('object') or '').strip().lower()
+            if not obj:
+                return {'status': 'error', 'reason': 'no object specified'}
+            self.pick_pub.publish(String(data=json.dumps({'label': obj})))
+            return {'status': 'started', 'action': 'pick', 'object': obj}
+
+        elif name == 'follow':
+            self.follow_pub.publish(Bool(data=True))
+            return {'status': 'started', 'action': 'follow'}
+
+        elif name == 'stop_follow':
+            self.follow_pub.publish(Bool(data=False))
+            return {'status': 'stopped', 'action': 'follow'}
 
         elif name == 'system_status':
             mem = psutil.virtual_memory()
