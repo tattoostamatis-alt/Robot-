@@ -1,0 +1,30 @@
+# AprilTag detector config for the single "saloni" reference tag.
+# Detects tag36h11 ID 0 and publishes TF: camera_color_optical_frame -> saloni_tag
+# (child = tag). The apriltag_relocalizer node turns that into an /initialpose fix.
+#
+# IMPORTANT: measure the ACTUAL printed black-square edge with a ruler and set
+# `size` (and the per-tag `sizes` entry) to it in METERS. A wrong size scales the
+# distance estimate linearly and ruins the relocalization.
+/apriltag_node:
+    ros__parameters:
+        image_transport: raw
+        family: 36h11
+        size: 0.13              # measured black-square edge = 130 mm
+        max_hamming: 0
+        qos_profile: default    # RELIABLE — matches RealSense pub; best_effort dropped
+                                # large color frames over CycloneDDS (0 images received)
+        pose_estimation_method: "pnp"
+
+        detector:
+            threads: 2
+            decimate: 2.0
+            blur: 0.0
+            refine: True
+            sharpening: 0.25
+            debug: False
+
+        # Only the one reference tag; give it a stable frame name.
+        tag:
+            ids: [0]
+            frames: [saloni_tag]
+            sizes: [0.13]        # same measured value as `size` above
