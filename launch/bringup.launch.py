@@ -655,10 +655,12 @@ def generate_launch_description():
         executable='wake_word_node.py',
         name='wake_word_node',
         output='screen',
-        # threshold raised 0.50 -> 0.72: at 0.50 random noise/speech kept
-        # false-triggering "Max", so the beep fired continuously. 0.65 still
-        # let some through; 0.72 only fires on a genuine wake-word detection.
-        parameters=[{'threshold': 0.72}],
+        # threshold raised 0.50 -> 0.72 -> 0.80: the synthetic-only "max" model
+        # (no real recordings yet, see training/wake_word_max/README) still
+        # false-triggered on phonetically-similar words at 0.72. 0.80 tightens
+        # it further. Proper fix pending: retrain with real mic recordings +
+        # the specific false-triggering words as hard negatives.
+        parameters=[{'threshold': 0.80}],
         condition=IfCondition(use_wake_word),
     )
 
