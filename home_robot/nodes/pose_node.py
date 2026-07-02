@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
-"""Pose estimation — YOLO11n-pose on NPU (VitisAI EP) → 17 COCO keypoints per person."""
+"""Pose estimation — YOLO11n-pose on the iGPU (ROCm) → 17 COCO keypoints per person.
 
+Runs on the AMD Radeon 860M via Ultralytics + torch-ROCm (device='cuda:0'),
+keeping the NPU free for Qwen3 and offloading the CPU. fp16 is NOT used (aborts
+with HSA_STATUS_ERROR_INVALID_ISA on this arch). Falls back to CPU automatically.
+"""
+
+# Must be set BEFORE torch is imported (via ultralytics) so ROCm accepts the
+# gfx1150 iGPU. setdefault: a launch-file env override still wins.
 import os
-import sys
+os.environ.setdefault('HSA_OVERRIDE_GFX_VERSION', '11.0.0')
 
-_VENV_SITE = '/home/dimi/ryzenai_venv/lib/python3.12/site-packages'
-if os.path.isdir(_VENV_SITE):
-    sys.path.insert(0, _VENV_SITE)
-os.environ.setdefault('XILINX_XRT', '/opt/xilinx/xrt')
-os.environ.setdefault('RYZEN_AI_INSTALLATION_PATH', '/home/dimi/ryzenai_venv')
-
-import cv2
 import json
 import threading
 
 import numpy as np
-import onnxruntime as ort
 
 import rclpy
 from rclpy.node import Node
@@ -25,8 +24,7 @@ from std_msgs.msg import String
 from message_filters import ApproximateTimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
 
-_VAIP_CONFIG = '/home/dimi/ryzenai_venv/voe-4.0-linux_x86_64/vaip_config.json'
-_MODEL_PATH  = os.path.join(os.path.dirname(__file__), 'yolo11n_pose_int8.onnx')
+_MODEL_PATH  = os.path.join(os.path.dirname(__file__), 'yolo11n-pose.pt')
 _INPUT_SIZE  = 640
 
 COCO_KP_NAMES = [
@@ -42,99 +40,20 @@ COCO_KP_EDGES = [
 ]
 
 
-def _letterbox(img, size=640):
-    h, w = img.shape[:2]
-    scale = size / max(h, w)
-    nh, nw = int(h * scale), int(w * scale)
-    img_r = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_LINEAR)
-    pad_h, pad_w = (size - nh) // 2, (size - nw) // 2
-    padded = np.full((size, size, 3), 114, dtype=np.uint8)
-    padded[pad_h:pad_h+nh, pad_w:pad_w+nw] = img_r
-    return padded, scale, pad_w, pad_h
-
-
-def _preprocess(bgr):
-    padded, scale, pad_w, pad_h = _letterbox(bgr)
-    rgb = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB)
-    t = rgb.astype(np.float32) / 255.0
-    return np.transpose(t, (2,0,1))[np.newaxis], scale, pad_w, pad_h
-
-
-def _nms(boxes, scores, iou_thr=0.45):
-    x1,y1,x2,y2 = boxes[:,0],boxes[:,1],boxes[:,2],boxes[:,3]
-    areas = (x2-x1)*(y2-y1)
-    order = scores.argsort()[::-1]
-    keep = []
-    while order.size:
-        i = order[0]; keep.append(i)
-        xx1=np.maximum(x1[i],x1[order[1:]]); yy1=np.maximum(y1[i],y1[order[1:]])
-        xx2=np.minimum(x2[i],x2[order[1:]]); yy2=np.minimum(y2[i],y2[order[1:]])
-        inter=np.maximum(0,xx2-xx1)*np.maximum(0,yy2-yy1)
-        iou=inter/(areas[i]+areas[order[1:]]-inter+1e-6)
-        order=order[1:][iou<=iou_thr]
-    return keep
-
-
-def _postprocess(output, scale, pad_w, pad_h, conf_thr, img_w, img_h):
-    """Decode YOLO11n-pose output (1,56,8400) → list of person dicts."""
-    pred = output[0].T  # (8400, 56)
-    # 4 box + 1 conf + 51 keypoints (17×3)
-    cx, cy, w, h = pred[:,0], pred[:,1], pred[:,2], pred[:,3]
-    confs = pred[:,4]
-    kps   = pred[:,5:]  # (8400, 51)
-
-    mask = confs >= conf_thr
-    if not mask.any():
-        return []
-
-    cx,cy,w,h = cx[mask],cy[mask],w[mask],h[mask]
-    confs = confs[mask]
-    kps   = kps[mask]
-
-    x1 = np.clip(((cx-w/2)-pad_w)/scale, 0, img_w-1).astype(int)
-    y1 = np.clip(((cy-h/2)-pad_h)/scale, 0, img_h-1).astype(int)
-    x2 = np.clip(((cx+w/2)-pad_w)/scale, 0, img_w-1).astype(int)
-    y2 = np.clip(((cy+h/2)-pad_h)/scale, 0, img_h-1).astype(int)
-
-    boxes = np.stack([x1,y1,x2,y2], axis=1).astype(float)
-    keep  = _nms(boxes, confs)
-
-    results = []
-    for k in keep:
-        raw_kp = kps[k].reshape(17, 3)
-        keypoints = []
-        for j, (kx, ky, kv) in enumerate(raw_kp):
-            px = int(np.clip((kx - pad_w) / scale, 0, img_w-1))
-            py = int(np.clip((ky - pad_h) / scale, 0, img_h-1))
-            keypoints.append({'name': COCO_KP_NAMES[j], 'x': px, 'y': py, 'v': float(kv)})
-        results.append({
-            'x1': int(x1[k]), 'y1': int(y1[k]), 'x2': int(x2[k]), 'y2': int(y2[k]),
-            'conf': round(float(confs[k]), 2),
-            'keypoints': keypoints,
-        })
-    return results
-
-
-def _build_session():
-    providers = ort.get_available_providers()
-    if 'VitisAIExecutionProvider' in providers and os.path.isfile(_VAIP_CONFIG):
-        return ort.InferenceSession(
-            _MODEL_PATH,
-            providers=['VitisAIExecutionProvider', 'CPUExecutionProvider'],
-            provider_options=[{'config_file': _VAIP_CONFIG}, {}]), 'NPU'
-    return ort.InferenceSession(_MODEL_PATH, providers=['CPUExecutionProvider']), 'CPU'
-
-
 class PoseNode(Node):
     def __init__(self):
         super().__init__('pose_node')
         self.declare_parameter('confidence',      0.5)
         self.declare_parameter('process_every_n', 2)
+        # 'cuda:0' = Radeon 860M iGPU via ROCm; 'cpu' to force CPU fallback.
+        self.declare_parameter('device',          'cuda:0')
 
         self.conf            = self.get_parameter('confidence').value
         self.process_every_n = self.get_parameter('process_every_n').value
+        self._device_req     = self.get_parameter('device').value
         self.bridge          = CvBridge()
-        self._session        = None
+        self._model          = None
+        self._device         = None
         self._frame_count    = 0
 
         threading.Thread(target=self._load_model, daemon=True).start()
@@ -151,15 +70,31 @@ class PoseNode(Node):
 
     def _load_model(self):
         if not os.path.isfile(_MODEL_PATH):
-            self.get_logger().warn(
-                f'Pose model not found: {_MODEL_PATH} — run scripts/quantize_npu_models.sh first')
+            self.get_logger().warn(f'Pose model not found: {_MODEL_PATH}')
             return
-        sess, backend = _build_session()
-        self._session = sess
-        self.get_logger().info(f'YOLO11n-pose loaded on {backend}')
+        # Import here (background thread) so torch/ROCm init never blocks startup.
+        import torch
+        from ultralytics import YOLO
+
+        device = self._device_req
+        if device.startswith('cuda') and not torch.cuda.is_available():
+            self.get_logger().warn(
+                f'iGPU/ROCm not available (HSA_OVERRIDE_GFX_VERSION='
+                f'{os.environ.get("HSA_OVERRIDE_GFX_VERSION")}); falling back to CPU.')
+            device = 'cpu'
+
+        model = YOLO(_MODEL_PATH)
+        model.to(device)
+        warm = np.zeros((_INPUT_SIZE, _INPUT_SIZE, 3), dtype=np.uint8)
+        model.predict(warm, device=device, imgsz=_INPUT_SIZE, half=False, verbose=False)
+
+        self._model  = model
+        self._device = device
+        backend = 'iGPU/ROCm' if device.startswith('cuda') else 'CPU'
+        self.get_logger().info(f'YOLO11n-pose loaded on {backend} ({_MODEL_PATH})')
 
     def _cb(self, color_msg: Image, info_msg: CameraInfo):
-        if self._session is None:
+        if self._model is None:
             return
         self._frame_count += 1
         if self._frame_count % self.process_every_n != 0:
@@ -168,9 +103,28 @@ class PoseNode(Node):
         color_img = self.bridge.imgmsg_to_cv2(color_msg, 'bgr8')
         img_h, img_w = color_img.shape[:2]
 
-        tensor, scale, pad_w, pad_h = _preprocess(color_img)
-        raw = self._session.run(None, {'images': tensor})
-        persons = _postprocess(raw[0], scale, pad_w, pad_h, self.conf, img_w, img_h)
+        # Ultralytics returns boxes + keypoints already scaled to original pixels.
+        res = self._model.predict(color_img, device=self._device, imgsz=_INPUT_SIZE,
+                                  conf=self.conf, half=False, verbose=False)[0]
+        persons = []
+        if res.boxes is not None and len(res.boxes) and res.keypoints is not None:
+            xyxy = res.boxes.xyxy.cpu().numpy()
+            confs = res.boxes.conf.cpu().numpy()
+            kpts  = res.keypoints.data.cpu().numpy()  # (N, 17, 3): x, y, v
+            for (x1, y1, x2, y2), cf, kp in zip(xyxy, confs, kpts):
+                keypoints = [
+                    {'name': COCO_KP_NAMES[j],
+                     'x': int(max(0, min(kx, img_w - 1))),
+                     'y': int(max(0, min(ky, img_h - 1))),
+                     'v': float(kv)}
+                    for j, (kx, ky, kv) in enumerate(kp)
+                ]
+                persons.append({
+                    'x1': int(max(0, min(x1, img_w - 1))), 'y1': int(max(0, min(y1, img_h - 1))),
+                    'x2': int(max(0, min(x2, img_w - 1))), 'y2': int(max(0, min(y2, img_h - 1))),
+                    'conf': round(float(cf), 2),
+                    'keypoints': keypoints,
+                })
 
         markers = MarkerArray()
         for i, p in enumerate(persons):
