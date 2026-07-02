@@ -31,6 +31,10 @@ class STTNode(Node):
         super().__init__('stt_node')
 
         self.declare_parameter('model_size',        'large-v3')
+        # 8 threads is the sweet spot on this 16-core CPU (~25% faster than the
+        # ctranslate2 default of ~4; 12+ regresses from oversubscription). YOLO
+        # moved off the CPU to the iGPU, so these cores are free during STT.
+        self.declare_parameter('cpu_threads',       8)
         self.declare_parameter('language',          'el')
         self.declare_parameter('energy_thresh',     0.065)
         self.declare_parameter('start_timeout',     5.0)
@@ -65,8 +69,11 @@ class STTNode(Node):
         self._lock       = threading.Lock()
         self._busy       = threading.Lock()
 
+        cpu_threads = int(self.get_parameter('cpu_threads').value)
+
         self._whisper = None
-        threading.Thread(target=self._load_whisper, args=(model_size,), daemon=True).start()
+        threading.Thread(target=self._load_whisper, args=(model_size, cpu_threads),
+                         daemon=True).start()
 
         self.add_on_set_parameters_callback(self._on_param_change)
 
@@ -83,10 +90,12 @@ class STTNode(Node):
                 self.get_logger().info(f'energy_thresh updated to {p.value:.4f}')
         return SetParametersResult(successful=True)
 
-    def _load_whisper(self, model_size):
+    def _load_whisper(self, model_size, cpu_threads):
         from faster_whisper import WhisperModel
-        self._whisper = WhisperModel(model_size, device='cpu', compute_type='int8')
-        self.get_logger().info(f'Whisper model "{model_size}" loaded')
+        self._whisper = WhisperModel(model_size, device='cpu', compute_type='int8',
+                                     cpu_threads=cpu_threads)
+        self.get_logger().info(
+            f'Whisper model "{model_size}" loaded (cpu_threads={cpu_threads})')
         if self.calibrate_on_start:
             self._calibrate_energy_thresh()
 

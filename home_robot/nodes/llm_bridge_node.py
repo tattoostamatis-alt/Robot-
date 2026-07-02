@@ -286,6 +286,24 @@ class LLMBridgeNode(Node):
             active_model = self.model
         self.get_logger().info(f'LLM bridge started — backend={self.backend} model={active_model} | vision=Gemini Flash Lite')
 
+        # Warm up the NPU model at boot so the first real voice command isn't a
+        # ~cold-load stall (FastFlowLM loads the 4B from disk on first use; this
+        # also primes the OS page cache so later qwen<->embed-gemma swaps are fast).
+        if self.backend == 'lemonade':
+            threading.Thread(target=self._warmup_lemonade, daemon=True).start()
+
+    def _warmup_lemonade(self):
+        try:
+            requests.post(
+                f'{self.lemonade_url}/chat/completions',
+                json={'model': self.lemonade_model,
+                      'messages': [{'role': 'user', 'content': 'γεια'}],
+                      'max_tokens': 1, 'temperature': 0.0},
+                timeout=180)
+            self.get_logger().info('Qwen warmed up on NPU (first command will be fast)')
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().warn(f'Qwen warm-up failed (non-fatal): {e}')
+
     # ── callbacks ──────────────────────────────────────────────────────────
 
     def _on_image(self, msg: Image):
