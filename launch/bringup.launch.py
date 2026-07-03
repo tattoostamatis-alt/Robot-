@@ -662,7 +662,17 @@ def generate_launch_description():
         # (which existed only to tame the synthetic-only model's false triggers)
         # to 0.60 for better sensitivity to distant/quiet "Μαξ". Raise again if
         # real-world talking false-triggers (real hard-negatives not yet recorded).
-        parameters=[{'threshold': 0.60}],
+        # Listen on the XVF3800 ASR-beam channel (ch4) — the exact signal the
+        # "max" model was recorded/trained on (training/wake_word_max/record_real.py).
+        # Without these the node falls back to defaults (default device, ch0/3ch),
+        # which is NOT what the model was trained on. Verified live 2026-07-03:
+        # real "Μαξ" scores 1.00 on ch4 at threshold 0.60, 6/6 detections.
+        parameters=[{
+            'threshold': 0.60,
+            'device_name': 'XVF3800',
+            'mic_channels': 6,
+            'mic_channel': 4,
+        }],
         condition=IfCondition(use_wake_word),
     )
 
