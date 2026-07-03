@@ -284,8 +284,7 @@ class LLMBridgeNode(Node):
             active_model = self.lemonade_model
         else:
             active_model = self.model
-        vision_src = 'Qwen3-VL (NPU, local)' if self.backend == 'lemonade' else 'Gemini Flash Lite'
-        self.get_logger().info(f'LLM bridge started — backend={self.backend} model={active_model} | vision={vision_src}')
+        self.get_logger().info(f'LLM bridge started — backend={self.backend} model={active_model} | vision=Gemini Flash Lite')
 
         # Warm up the NPU model at boot so the first real voice command isn't a
         # ~cold-load stall (FastFlowLM loads the 4B from disk on first use; this
