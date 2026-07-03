@@ -655,12 +655,14 @@ def generate_launch_description():
         executable='wake_word_node.py',
         name='wake_word_node',
         output='screen',
-        # threshold raised 0.50 -> 0.72 -> 0.80: the synthetic-only "max" model
-        # (no real recordings yet, see training/wake_word_max/README) still
-        # false-triggered on phonetically-similar words at 0.72. 0.80 tightens
-        # it further. Proper fix pending: retrain with real mic recordings +
-        # the specific false-triggering words as hard negatives.
-        parameters=[{'threshold': 0.80}],
+        # 2026-07-03: retrained "max" model with 30 real XVF3800 (ch4/ASR-beam)
+        # "Μαξ" recordings added as positives (training/wake_word_max/record_real.py).
+        # Real positives now score min 0.975 / mean 0.998; clean negatives max
+        # 0.245, pure noise 0.006 — huge separation. Dropped the interim 0.80
+        # (which existed only to tame the synthetic-only model's false triggers)
+        # to 0.60 for better sensitivity to distant/quiet "Μαξ". Raise again if
+        # real-world talking false-triggers (real hard-negatives not yet recorded).
+        parameters=[{'threshold': 0.60}],
         condition=IfCondition(use_wake_word),
     )
 
