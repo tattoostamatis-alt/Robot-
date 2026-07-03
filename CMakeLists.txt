@@ -26,6 +26,7 @@ install(PROGRAMS
   home_robot/nodes/rag_memory_node.py
   home_robot/nodes/doa_node.py
   home_robot/nodes/person_follower_node.py
+  home_robot/nodes/apriltag_relocalizer.py
   home_robot/nodes/tracker_node.py
   home_robot/nodes/diarization_node.py
   home_robot/nodes/recovery_manager_node.py

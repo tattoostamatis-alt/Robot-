@@ -50,6 +50,7 @@ def _launch_setup(context, *args, **kwargs):
     map_yaml = _resolve_map(LaunchConfiguration('map').perform(context), share_dir)
     use_depth = LaunchConfiguration('use_depth_camera').perform(context).lower() in ('true', '1')
     use_joy = LaunchConfiguration('use_joy').perform(context).lower() in ('true', '1')
+    use_apriltag = LaunchConfiguration('use_apriltag').perform(context).lower() in ('true', '1')
 
     pkg = FindPackageShare('home_robot')
     actions = []
@@ -86,7 +87,7 @@ def _launch_setup(context, *args, **kwargs):
                 FindPackageShare('realsense2_camera'), '/launch/rs_launch.py'
             ]),
             launch_arguments={
-                'enable_color':       'false',
+                'enable_color':       'true',    # needed for AprilTag reference-tag relocalization
                 'enable_depth':       'true',
                 'enable_infra1':      'false',
                 'enable_infra2':      'false',
@@ -125,6 +126,35 @@ def _launch_setup(context, *args, **kwargs):
             remappings=[('cmd_vel', 'cmd_vel_safe')],
         ))
 
+    # AprilTag reference-tag relocalization: detect the single saloni tag off the
+    # D435 color stream (publishes TF camera_color_optical_frame -> saloni_tag),
+    # then apriltag_relocalizer turns a sighting into a one-shot /initialpose fix
+    # (no manual 2D Pose Estimate, no wrong-room scan-match). Needs use_depth_camera
+    # (the color stream) to be on.
+    if use_apriltag:
+        actions.append(Node(
+            package='apriltag_ros',
+            executable='apriltag_node',
+            name='apriltag_node',
+            output='screen',
+            parameters=[PathJoinSubstitution([pkg, 'config', 'apriltag.yaml'])],
+            remappings=[
+                ('image_rect', '/camera/camera/color/image_raw'),
+                ('camera_info', '/camera/camera/color/camera_info'),
+            ],
+        ))
+        actions.append(Node(
+            package='home_robot',
+            executable='apriltag_relocalizer.py',
+            name='apriltag_relocalizer',
+            output='screen',
+            parameters=[{
+                'tag_frame': 'saloni_tag',
+                'base_frame': 'base_link',
+                'map_frame': 'map',
+            }],
+        ))
+
     return actions
 
 
@@ -141,5 +171,9 @@ def generate_launch_description():
             'use_joy', default_value='true',
             description='Start PS5 DualSense teleop (R1 = dead-man, left stick) '
                         'wired straight to cmd_vel_safe for localize mode'),
+        DeclareLaunchArgument(
+            'use_apriltag', default_value='true',
+            description='Detect the saloni reference AprilTag off the D435 color '
+                        'stream and relocalize from a sighting (needs use_depth_camera)'),
         OpaqueFunction(function=_launch_setup),
     ])
