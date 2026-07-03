@@ -15,11 +15,13 @@ Publishes: recovery/status (std_msgs/String: idle/stuck/recovering/recovered/fai
 
 import math
 import threading
+import time
 from collections import deque
+from action_msgs.srv import CancelGoal
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import Point, Twist
 from nav_msgs.msg import Odometry
-from nav2_msgs.action import BackUp, Spin, NavigateToPose
+from nav2_msgs.action import BackUp, Spin
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from std_msgs.msg import String, Bool
@@ -64,7 +66,11 @@ class RecoveryManagerNode(Node):
         # Action clients
         self._backup_ac = ActionClient(self, BackUp, 'backup')
         self._spin_ac   = ActionClient(self, Spin,   'spin')
-        self._nav_ac    = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+        # Cancel any in-flight NavigateToPose via the action's cancel service.
+        # An empty CancelGoal request (zero id + zero stamp) cancels all goals;
+        # recovery didn't send the goal itself so it has no goal handle to use.
+        self._nav_cancel_cli = self.create_client(
+            CancelGoal, 'navigate_to_pose/_action/cancel_goal')
 
         # Publishers
         self._status_pub   = self.create_publisher(String, 'recovery/status',  10)
@@ -165,7 +171,7 @@ class RecoveryManagerNode(Node):
 
         # Check if we can move now
         self.get_logger().info('Recovery actions done — monitoring for 2s')
-        import time; time.sleep(2.0)
+        time.sleep(2.0)
 
         if self._has_moved_recently(window=2.0, threshold=0.01):
             self._status = STATUS_RECOVERED
@@ -173,7 +179,7 @@ class RecoveryManagerNode(Node):
             self._speak('Ξεκόλλησα!')
             self.get_logger().info('Recovery succeeded')
             # Reset to IDLE after a pause
-            import time; time.sleep(2.0)
+            time.sleep(2.0)
             self._status = STATUS_IDLE
             self._cmd_active = False
             self._cmd_active_since = None
@@ -181,15 +187,24 @@ class RecoveryManagerNode(Node):
             self.get_logger().warn(f'Still stuck, {attempts_left - 1} attempt(s) left')
             self._run_recovery(attempts_left - 1)
 
+    def _await_future(self, future, timeout_sec):
+        """Wait for an async future from this worker thread WITHOUT spinning —
+        the node's main executor (rclpy.spin in main) services the callbacks
+        that complete it. Spinning here would attach the node to a second
+        executor and the future would never complete. Returns None on timeout."""
+        deadline = time.monotonic() + timeout_sec
+        while rclpy.ok() and not future.done():
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.02)
+        return future.result() if future.done() else None
+
     def _cancel_navigation(self):
-        if not self._nav_ac.wait_for_server(timeout_sec=2.0):
+        if not self._nav_cancel_cli.wait_for_service(timeout_sec=2.0):
             return
-        future = self._nav_ac._cancel_all_goals()
-        if future:
-            try:
-                rclpy.spin_until_future_complete(self, future, timeout_sec=3.0)
-            except Exception:
-                pass
+        # Empty request → cancel all active goals on navigate_to_pose.
+        future = self._nav_cancel_cli.call_async(CancelGoal.Request())
+        self._await_future(future, 3.0)
 
     def _do_backup(self) -> bool:
         if not self._backup_ac.wait_for_server(timeout_sec=5.0):
@@ -200,13 +215,12 @@ class RecoveryManagerNode(Node):
         goal.speed  = float(self._backup_speed)
         goal.time_allowance = Duration(sec=int(self._backup_dist / self._backup_speed) + 5)
         future = self._backup_ac.send_goal_async(goal)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
-        gh = future.result()
+        gh = self._await_future(future, 10.0)
         if gh is None or not gh.accepted:
             self.get_logger().warn('BackUp goal rejected')
             return False
         result_future = gh.get_result_async()
-        rclpy.spin_until_future_complete(self, result_future, timeout_sec=15.0)
+        self._await_future(result_future, 15.0)
         self.get_logger().info('BackUp done')
         return True
 
@@ -218,13 +232,12 @@ class RecoveryManagerNode(Node):
         goal.target_yaw      = float(self._spin_angle)
         goal.time_allowance  = Duration(sec=10)
         future = self._spin_ac.send_goal_async(goal)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
-        gh = future.result()
+        gh = self._await_future(future, 10.0)
         if gh is None or not gh.accepted:
             self.get_logger().warn('Spin goal rejected')
             return False
         result_future = gh.get_result_async()
-        rclpy.spin_until_future_complete(self, result_future, timeout_sec=15.0)
+        self._await_future(result_future, 15.0)
         self.get_logger().info('Spin done')
         return True
 

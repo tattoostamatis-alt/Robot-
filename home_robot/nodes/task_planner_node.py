@@ -176,6 +176,19 @@ class TaskPlannerNode(Node):
         if self._pick_result and self._pick_result.get('status') != 'ok':
             self._say(f'Δεν κατάφερα να σηκώσω το {label}.')
 
+    def _await_future(self, future, timeout_sec):
+        """Wait for an async future from this worker thread WITHOUT spinning —
+        the node's main executor (rclpy.spin in main) services the callbacks
+        that complete it. Spinning here would attach the node to a second
+        executor and the future would never complete. Returns None on timeout.
+        (Note: rclpy Future.result() takes no timeout argument.)"""
+        deadline = time.monotonic() + timeout_sec
+        while rclpy.ok() and not future.done():
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.02)
+        return future.result() if future.done() else None
+
     def _navigate(self, loc):
         if not self.nav_client.wait_for_server(timeout_sec=5.0):
             return False, 'το Nav2 δεν είναι έτοιμο'
@@ -188,14 +201,14 @@ class TaskPlannerNode(Node):
         goal.pose.pose.orientation = _yaw_to_quaternion(float(loc['yaw']))
 
         send_future = self.nav_client.send_goal_async(goal)
-        goal_handle = send_future.result(timeout=10.0)
+        goal_handle = self._await_future(send_future, 10.0)
         if goal_handle is None:
             return False, 'καμία απάντηση από το Nav2'
         if not goal_handle.accepted:
             return False, 'ο στόχος απορρίφθηκε'
 
         result_future = goal_handle.get_result_async()
-        result = result_future.result(timeout=self.nav_timeout)
+        result = self._await_future(result_future, self.nav_timeout)
         if result is None:
             return False, 'λήξη χρόνου πλοήγησης'
         if result.status != GoalStatus.STATUS_SUCCEEDED:

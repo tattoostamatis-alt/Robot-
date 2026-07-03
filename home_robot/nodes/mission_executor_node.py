@@ -259,6 +259,18 @@ class MissionExecutorNode(Node):
 
     # ── Navigation ───────────────────────────────────────────────────
 
+    def _await_future(self, future, timeout_sec):
+        """Wait for an async future from this worker thread WITHOUT spinning —
+        the node's main executor (rclpy.spin in main) services the callbacks
+        that complete it. Spinning here would attach the node to a second
+        executor and the future would never complete. Returns None on timeout."""
+        deadline = time.monotonic() + timeout_sec
+        while rclpy.ok() and not future.done():
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.02)
+        return future.result() if future.done() else None
+
     def _navigate_to(self, location_name: str) -> bool:
         pose_data = self._locations.get(location_name)
         if not pose_data:
@@ -280,19 +292,20 @@ class MissionExecutorNode(Node):
         goal.pose.pose.orientation.w = math.cos(yaw / 2.)
 
         future = self._nav_ac.send_goal_async(goal)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=10.)
-        gh = future.result()
+        gh = self._await_future(future, 10.)
         if gh is None or not gh.accepted:
             return False
 
-        # Poll until done or cancelled
+        # Poll until done or cancelled. Do NOT spin here — the node's main
+        # executor (rclpy.spin in main) services the action callbacks that
+        # complete result_future; spinning from this worker thread would
+        # attach the node to a second executor and stall the future.
         result_future = gh.get_result_async()
         while not result_future.done():
             if self._cancel_flag.is_set():
                 gh.cancel_goal_async()
                 return False
-            time.sleep(0.2)
-            rclpy.spin_until_future_complete(self, result_future, timeout_sec=0.1)
+            time.sleep(0.1)
 
         result = result_future.result()
         return result is not None and result.status == GoalStatus.STATUS_SUCCEEDED
