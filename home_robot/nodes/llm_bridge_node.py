@@ -284,7 +284,8 @@ class LLMBridgeNode(Node):
             active_model = self.lemonade_model
         else:
             active_model = self.model
-        self.get_logger().info(f'LLM bridge started — backend={self.backend} model={active_model} | vision=Gemini Flash Lite')
+        vision_src = 'Qwen3-VL (NPU, local)' if self.backend == 'lemonade' else 'Gemini Flash Lite'
+        self.get_logger().info(f'LLM bridge started — backend={self.backend} model={active_model} | vision={vision_src}')
 
         # Warm up the NPU model at boot so the first real voice command isn't a
         # ~cold-load stall (FastFlowLM loads the 4B from disk on first use; this
@@ -316,6 +317,34 @@ class LLMBridgeNode(Node):
     def _get_frame_jpg(self) -> bytes | None:
         with self._frame_lock:
             return self._latest_frame_jpg
+
+    def _vision_describe_npu(self, question: str, frame_jpg: bytes) -> str | None:
+        """Visual description via the local Qwen3-VL on the NPU (Lemonade) — no
+        cloud. Sends the frame + question as one multimodal chat message (no
+        tools, so it never touches the tool-calling prefill limit)."""
+        try:
+            b64 = base64.b64encode(frame_jpg).decode('ascii')
+            prompt = (
+                'Κοίτα την εικόνα από την κάμερα του ρομπότ και απάντησε στην '
+                'ερώτηση στα Ελληνικά, σε 1-3 σύντομες προτάσεις, μόνο με βάση '
+                f'ό,τι φαίνεται.\nΕρώτηση: {question}'
+            )
+            payload = {
+                'model': self.lemonade_model,
+                'temperature': 0.2,
+                'messages': [{'role': 'user', 'content': [
+                    {'type': 'text', 'text': prompt},
+                    {'type': 'image_url',
+                     'image_url': {'url': f'data:image/jpeg;base64,{b64}'}},
+                ]}],
+            }
+            r = requests.post(f'{self.lemonade_url}/chat/completions',
+                              json=payload, timeout=120)
+            r.raise_for_status()
+            return (r.json()['choices'][0]['message'].get('content') or '').strip()
+        except Exception as e:
+            self.get_logger().warn(f'NPU vision failed: {e}')
+            return None
 
     def _vision_describe(self, question: str, frame_jpg: bytes) -> str | None:
         """Fast visual description via Gemini Flash Lite (~2s)."""
@@ -435,14 +464,16 @@ class LLMBridgeNode(Node):
         for turn in self._history:
             messages.extend(turn)
 
-        # Vision: Gemini Flash Lite describes the frame (~2s), injected as context.
-        # Qwen3 NPU then answers with that description — no image sent to NPU.
+        # Vision: the local Qwen3-VL on the NPU describes the frame (no cloud),
+        # injected as context. Qwen3 then answers with that description — the
+        # image goes only to the tool-free describe call, keeping the main
+        # tool-calling prefill small.
         if _needs_vision(text):
             frame_jpg = self._get_frame_jpg()
             if frame_jpg is not None:
-                vision_desc = self._vision_describe(text, frame_jpg)
+                vision_desc = self._vision_describe_npu(text, frame_jpg)
                 if vision_desc:
-                    self.get_logger().info(f'Vision (Gemini): {vision_desc}')
+                    self.get_logger().info(f'Vision (NPU): {vision_desc}')
                     messages.append({'role': 'system',
                                      'content': f'Η κάμερα βλέπει αυτή τη στιγμή: {vision_desc}'})
 
