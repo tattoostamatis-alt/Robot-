@@ -7,7 +7,7 @@ from launch.conditions import IfCondition
 from launch.events import matches_action
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
-from launch_ros.actions import Node, PushRosNamespace, LifecycleNode
+from launch_ros.actions import Node, PushRosNamespace, LifecycleNode, SetParameter
 from launch_ros.event_handlers import OnStateTransition
 from launch_ros.events.lifecycle import ChangeState
 from launch_ros.substitutions import FindPackageShare
@@ -456,12 +456,34 @@ def generate_launch_description():
     )
 
     # ── Nav2 ──────────────────────────────────────────────────────
-    nav2_node = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource([nav2_pkg, '/launch/navigation_launch.py']),
-        launch_arguments={
-            'params_file':  PathJoinSubstitution([pkg, 'config', 'nav2_params.yaml']),
-            'use_sim_time': 'false',
-        }.items(),
+    # bond_timeout:=0.0 disables the lifecycle manager's bond watchdog: a
+    # transient machine stall (>4s, seen under full-stack boot load and again
+    # 2026-07-04) breaks the heartbeats and the manager tears the whole nav
+    # chain down, leaving parts of it inactive — goals then silently go
+    # nowhere. Crash recovery is handled by ensure_nav_active.sh below
+    # instead. (Servers also set bond_heartbeat_period: 0.0 in
+    # nav2_params.yaml so they don't create their side of the bond.)
+    nav2_node = GroupAction([
+        SetParameter('bond_timeout', 0.0),
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource([nav2_pkg, '/launch/navigation_launch.py']),
+            launch_arguments={
+                'params_file':  PathJoinSubstitution([pkg, 'config', 'nav2_params.yaml']),
+                'use_sim_time': 'false',
+                'autostart':    'true',
+            }.items(),
+        ),
+    ])
+
+    # Self-heal: 60s after launch, configure+activate any nav server that is
+    # not active (see 2026-07-03 incident: behavior_server/velocity_smoother/
+    # collision_monitor came up inactive under boot load). No-op when healthy.
+    nav2_ensure_active = TimerAction(
+        period=60.0,
+        actions=[ExecuteProcess(
+            cmd=['bash', PathJoinSubstitution([pkg, 'scripts', 'ensure_nav_active.sh'])],
+            output='screen',
+        )],
     )
 
     # ── Keepout zones (use_keepout, default false) ──────────────────
@@ -906,6 +928,7 @@ def generate_launch_description():
         global_localizer_node,
         global_localization_init,
         nav2_node,
+        nav2_ensure_active,
         filter_mask_server_node,
         costmap_filter_info_server_node,
         keepout_lifecycle_manager,

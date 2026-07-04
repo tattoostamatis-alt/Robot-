@@ -47,6 +47,8 @@ amcl:
 
 bt_navigator:
   ros__parameters:
+    # Disable node-side lifecycle bond — see bringup.launch.py nav2 section.
+    bond_heartbeat_period: 0.0
     use_sim_time: false
     global_frame: map
     robot_base_frame: base_link
@@ -61,6 +63,8 @@ bt_navigator:
 
 controller_server:
   ros__parameters:
+    # Disable node-side lifecycle bond — see bringup.launch.py nav2 section.
+    bond_heartbeat_period: 0.0
     use_sim_time: false
     controller_frequency: 20.0
     min_x_velocity_threshold: 0.001
@@ -178,6 +182,8 @@ controller_server:
 # behavior_server (spin/backup) request.
 velocity_smoother:
   ros__parameters:
+    # Disable node-side lifecycle bond — see bringup.launch.py nav2 section.
+    bond_heartbeat_period: 0.0
     smoothing_frequency: 20.0
     scale_velocities: false
     feedback: "OPEN_LOOP"
@@ -212,12 +218,18 @@ local_costmap:
       plugins: ["voxel_layer", "keepout_filter", "inflation_layer"]
       keepout_filter:
         plugin: "nav2_costmap_2d::KeepoutFilter"
-        enabled: True
+        # Off until keepout zones are redrawn for the kela3 frame AND
+        # use_keepout:=true runs the mask servers — enabled without them it
+        # WARNs "Filter mask was not received" every costmap update, forever.
+        enabled: False
         filter_info_topic: "/costmap_filter_info"
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        inflation_radius: 0.30
+        # >= circumscribed footprint radius (0.43 for this 0.6x0.5 footprint):
+        # Nav2 logs an ERROR below that and MPPI CostCritic
+        # (consider_footprint: true) loses its potential-field shortcut.
+        inflation_radius: 0.45
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
         enabled: true
@@ -290,7 +302,10 @@ global_costmap:
       plugins: ["static_layer", "obstacle_layer", "keepout_filter", "inflation_layer"]
       keepout_filter:
         plugin: "nav2_costmap_2d::KeepoutFilter"
-        enabled: True
+        # Off until keepout zones are redrawn for the kela3 frame AND
+        # use_keepout:=true runs the mask servers — enabled without them it
+        # WARNs "Filter mask was not received" every costmap update, forever.
+        enabled: False
         filter_info_topic: "/costmap_filter_info"
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
@@ -312,11 +327,16 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        inflation_radius: 0.30
+        # >= circumscribed footprint radius (0.43 for this 0.6x0.5 footprint):
+        # Nav2 logs an ERROR below that and MPPI CostCritic
+        # (consider_footprint: true) loses its potential-field shortcut.
+        inflation_radius: 0.45
       always_send_full_costmap: true
 
 planner_server:
   ros__parameters:
+    # Disable node-side lifecycle bond — see bringup.launch.py nav2 section.
+    bond_heartbeat_period: 0.0
     expected_planner_frequency: 20.0
     use_sim_time: false
     planner_plugins: ["GridBased"]
@@ -328,6 +348,8 @@ planner_server:
 
 behavior_server:
   ros__parameters:
+    # Disable node-side lifecycle bond — see bringup.launch.py nav2 section.
+    bond_heartbeat_period: 0.0
     local_costmap_topic: local_costmap/costmap_raw
     local_footprint_topic: local_costmap/published_footprint
     cycle_frequency: 10.0
@@ -348,6 +370,8 @@ behavior_server:
 
 collision_monitor:
   ros__parameters:
+    # Disable node-side lifecycle bond — see bringup.launch.py nav2 section.
+    bond_heartbeat_period: 0.0
     use_sim_time: false
     base_frame_id: "base_link"
     odom_frame_id: "odom"
@@ -434,6 +458,8 @@ collision_monitor:
 
 docking_server:
   ros__parameters:
+    # Disable node-side lifecycle bond — see bringup.launch.py nav2 section.
+    bond_heartbeat_period: 0.0
     use_sim_time: false
     controller_frequency: 50.0
     initial_perception_timeout: 5.0
@@ -570,3 +596,15 @@ costmap_filter_info_server:
     type: 0
     base: 0.0
     multiplier: 1.0
+
+# The three servers below run with stock defaults; sections exist only to
+# disable their lifecycle bonds (see bringup.launch.py nav2 section).
+smoother_server:
+  ros__parameters:
+    bond_heartbeat_period: 0.0
+route_server:
+  ros__parameters:
+    bond_heartbeat_period: 0.0
+waypoint_follower:
+  ros__parameters:
+    bond_heartbeat_period: 0.0
