@@ -226,10 +226,12 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        # >= circumscribed footprint radius (0.43 for this 0.6x0.5 footprint):
-        # Nav2 logs an ERROR below that and MPPI CostCritic
-        # (consider_footprint: true) loses its potential-field shortcut.
-        inflation_radius: 0.45
+        # Deliberately below the 0.428 circumscribed footprint radius: Nav2
+        # logs an ERROR and MPPI CostCritic loses its potential-field shortcut,
+        # but consider_footprint: true compensates (full-footprint checks),
+        # and >=0.40 risks sealing the ~0.78 m doorways (see 2026-06-30 nav
+        # notes). Don't raise without re-testing doorway plans on the map.
+        inflation_radius: 0.30
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
         enabled: true
@@ -327,10 +329,12 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        # >= circumscribed footprint radius (0.43 for this 0.6x0.5 footprint):
-        # Nav2 logs an ERROR below that and MPPI CostCritic
-        # (consider_footprint: true) loses its potential-field shortcut.
-        inflation_radius: 0.45
+        # Deliberately below the 0.428 circumscribed footprint radius: Nav2
+        # logs an ERROR and MPPI CostCritic loses its potential-field shortcut,
+        # but consider_footprint: true compensates (full-footprint checks),
+        # and >=0.40 risks sealing the ~0.78 m doorways (see 2026-06-30 nav
+        # notes). Don't raise without re-testing doorway plans on the map.
+        inflation_radius: 0.30
       always_send_full_costmap: true
 
 planner_server:
