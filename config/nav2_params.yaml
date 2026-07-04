@@ -110,15 +110,20 @@ controller_server:
       vx_min: -0.10             # allow reversing during avoidance
       vy_max: 0.0
       wz_max: 0.6
-      # 2026-07-04: MUST match velocity_smoother max_accel/max_decel. They
-      # were 0.5 here vs 0.05 in the smoother (10x tighter) — MPPI planned
-      # accelerations the robot never executed: v lagged ~4s behind the
-      # plan while w tracked fine, so every replan started from an
-      # unexpected slow state → heading flip-flop → the "spins in place,
-      # v≈0, w pinned ±0.6" oscillation seen on RViz goals 2026-07-03.
-      ax_max: 0.25
-      ax_min: -0.5
-      az_max: 1.0
+      # 2026-07-05 ROOT-CAUSE FIX for the "spins in place, v≈0" bug. These are
+      # the accel limits MPPI integrates its candidate trajectories with — the
+      # FIRST commanded velocity can be at most ax_max*model_dt. The 2026-07-04
+      # attempt to "match the velocity_smoother" set ax_max:0.25, which capped
+      # the first command at 0.25*0.05 = 0.0125 m/s; the robot never ramped past
+      # ~0.011 m/s, failed the progress checker, and fell into rotate/backup
+      # recovery loops — THAT was the spin/oscillation, not a smoother mismatch.
+      # MPPI's ax_* must be the robot's real accel capability; the
+      # velocity_smoother below does the separate gentle output ramp. Verified in
+      # the Gazebo sim (launch/sim.launch.py): robot now drives to goal at
+      # 0.20 m/s and stops cleanly. (nav2 defaults are ax_max 2.5 / az_max 3.2.)
+      ax_max: 2.0
+      ax_min: -2.0
+      az_max: 3.0
       iteration_count: 1
       prune_distance: 1.7
       transform_tolerance: 0.1
