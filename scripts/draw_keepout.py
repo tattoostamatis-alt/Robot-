@@ -2,8 +2,10 @@
 """Draw keepout zones onto keepout_mask.pgm from keepout_zones.yaml.
 
 Usage:
-    python3 scripts/draw_keepout.py
+    python3 scripts/draw_keepout.py [map_name]    # default: kela3
 
+The mask copies the given map's size/origin, so REGENERATE after a remap —
+and re-click the zones too, since they are map-frame coordinates.
 After running, restart nav2 (or full bringup) for the new mask to take effect.
 No ROS or build step needed — the config files are symlinked.
 """
@@ -20,7 +22,9 @@ PKG_DIR     = os.path.dirname(SCRIPT_DIR)
 ZONES_FILE  = os.path.join(PKG_DIR, 'config', 'keepout_zones.yaml')
 MASK_PGM    = os.path.join(PKG_DIR, 'config', 'keepout_mask.pgm')
 MASK_YAML   = os.path.join(PKG_DIR, 'config', 'keepout_mask.yaml')
-MAP_YAML    = os.path.join(PKG_DIR, 'maps', 'home.yaml')
+MAP_NAME    = sys.argv[1] if len(sys.argv) > 1 else 'kela3'
+MAP_YAML    = os.path.join(PKG_DIR, 'maps', f'{MAP_NAME}.yaml')
+MAP_PGM     = os.path.join(PKG_DIR, 'maps', f'{MAP_NAME}.pgm')
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -58,7 +62,7 @@ def write_pgm(path: str, pixels, width: int, height: int, maxval: int = 255):
 def world_to_pixel(wx: float, wy: float,
                    ox: float, oy: float, res: float,
                    height: int) -> tuple[int, int]:
-    """Map-frame (x, y) → pixel (col, row).  Row 0 = bottom of map."""
+    """Map-frame (x, y) → pixel (col, row).  Row 0 = top of PGM = max y."""
     col = int(round((wx - ox) / res))
     row = height - 1 - int(round((wy - oy) / res))
     return col, row
@@ -103,10 +107,8 @@ def main():
     if not zones:
         print('No zones defined in keepout_zones.yaml — clearing mask to all-free.')
 
-    # Determine mask size from home.pgm
-    # We read the PGM header to get width/height without PIL
-    home_pgm = os.path.join(PKG_DIR, 'maps', 'home.pgm')
-    _, map_w, map_h, _ = read_pgm(home_pgm)
+    # Mask must match the map's dimensions — read them from its PGM header
+    _, map_w, map_h, _ = read_pgm(MAP_PGM)
 
     # Start with all-free mask (254 = passable)
     FREE    = 254

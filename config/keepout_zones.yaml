@@ -1,41 +1,36 @@
-# Keepout zones — areas where the robot must NOT navigate.
-# Edit this file, then run:  python3 scripts/draw_keepout.py
+# Keepout zones — areas the robot must NOT navigate (map frame,
+# clicked on the ACTIVE map: kela3, 2026-07-04). Recreate after a remap:
+#   ros2 run home_robot collect_keepout_clicks.py   (RViz Publish Point)
+#   python3 scripts/draw_keepout.py
+# Shapes: rect (x,y=centre, width,height) | circle (x,y,radius), metres.
+# To USE the zones: bringup with use_keepout:=true AND set the two
+# keepout_filter layers to enabled: True in nav2_params.yaml.
 #
-# Coordinates are in the MAP frame (same as what you see in RViz).
-# Use RViz → "Publish Point" (click on map) to get exact x,y values,
-# or estimate from locations.yaml room centres.
-#
-# Room centres for reference:
-#   saloni:           x=-0.03  y=-0.92
-#   kouzina:          x= 5.04  y= 1.10
-#   diadromos:        x= 1.64  y= 1.92
-#   toualeta:         x= 3.62  y= 3.03
-#   domatio tou max:  x= 5.86  y=-2.02
-#   domatio tou mbamba: x=2.68 y=-2.97
-#
-# Shape types:
-#   circle:  x, y, radius          (all metres)
-#   rect:    x, y, width, height   (centre + size in metres)
-
+# ⚠ zone_4 currently CONTAINS the taught "diadromos" location (-1.98, -4.79)
+#   — before enabling keepout, either shrink zone_4 or re-teach diadromos,
+#   or "πήγαινε στον διάδρομο" will target a forbidden spot.
 zones:
-  # --- Examples: uncomment and adjust coordinates ---
-
-  # kanapes_saloni:
-  #   shape: rect
-  #   x: -0.5
-  #   y: -1.8
-  #   width: 1.8
-  #   height: 0.9
-
-  # trapezi_kouzinas:
-  #   shape: rect
-  #   x: 4.8
-  #   y: 0.5
-  #   width: 1.2
-  #   height: 0.8
-
-  # kratiras_mpanieras:
-  #   shape: circle
-  #   x: 3.6
-  #   y: 3.5
-  #   radius: 0.5
+  zone_1:
+    shape: rect
+    x: 1.403
+    y: -0.848
+    width: 0.17
+    height: 0.86
+  zone_2:
+    shape: rect
+    x: 1.214
+    y: -0.623
+    width: 0.36
+    height: 1.16
+  zone_3:
+    shape: rect
+    x: 0.132
+    y: -2.934
+    width: 0.65
+    height: 1.27
+  zone_4:
+    shape: rect
+    x: -2.67
+    y: -4.377
+    width: 3.79
+    height: 1.79

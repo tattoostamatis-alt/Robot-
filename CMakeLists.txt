@@ -38,6 +38,7 @@ install(PROGRAMS
   home_robot/nodes/pose_node.py
   home_robot/nodes/goto_room.py
   home_robot/nodes/record_location.py
+  scripts/collect_keepout_clicks.py
   home_robot/nodes/pose_saver_node.py
   home_robot/nodes/room_markers_node.py
   home_robot/nodes/global_localizer_node.py
