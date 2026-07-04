@@ -98,6 +98,7 @@ def generate_launch_description():
         parameters=[{'port': roomba_port}],
         remappings=[('cmd_vel', 'cmd_vel_safe')],
         output='screen',
+        condition=IfCondition(use_roomba),
     )
 
     # ── YOLO/D435 forward obstacle safety stop ───────────────────
@@ -248,7 +249,7 @@ def generate_launch_description():
         parameters=[
             PathJoinSubstitution([pkg, 'config', 'nav2_params.yaml']),
             {
-                'use_sim_time': False,
+                'use_sim_time': use_sim_time,
                 'mode': slam_mode,
                 'map_file_name': slam_map_file,
             },
@@ -380,7 +381,7 @@ def generate_launch_description():
         launch_arguments={
             'map': _localization_map_resolved,
             'params_file': PathJoinSubstitution([pkg, 'config', 'nav2_params.yaml']),
-            'use_sim_time': 'false',
+            'use_sim_time': use_sim_time,
         }.items(),
         condition=IfCondition(use_localization),
     )
@@ -469,7 +470,7 @@ def generate_launch_description():
             PythonLaunchDescriptionSource([nav2_pkg, '/launch/navigation_launch.py']),
             launch_arguments={
                 'params_file':  PathJoinSubstitution([pkg, 'config', 'nav2_params.yaml']),
-                'use_sim_time': 'false',
+                'use_sim_time': use_sim_time,
                 'autostart':    'true',
             }.items(),
         ),
@@ -824,6 +825,17 @@ def generate_launch_description():
         condition=IfCondition(use_arm),
     )
 
+    # Forward RViz "2D Goal Pose" (/goal_pose) to the Nav2 action. Only useful
+    # once the nav stack is up, so gate it on localization (the mode that runs
+    # the planner/controller) rather than the web dashboard.
+    goal_pose_bridge_node = Node(
+        package='home_robot',
+        executable='goal_pose_bridge.py',
+        name='goal_pose_bridge',
+        output='screen',
+        condition=IfCondition(use_localization),
+    )
+
     # ── PS5 DualSense teleop (manual mapping drive) ──────────────
     # joy_node reads the raw /dev/input/jsN device (already paired over
     # Bluetooth, see config/teleop_twist_joy_ps5.yaml header for the
@@ -903,6 +915,8 @@ def generate_launch_description():
         DeclareLaunchArgument('use_situational',        default_value='false'),
         DeclareLaunchArgument('use_mission',            default_value='true'),
         DeclareLaunchArgument('use_semantic_costmap',   default_value='false'),
+        DeclareLaunchArgument('use_sim_time',            default_value='false'),
+        DeclareLaunchArgument('use_roomba',              default_value='true'),
         DeclareLaunchArgument('rtabmap_db',
             default_value=os.path.expanduser('~/robot_ws/maps/rtabmap.db')),
         DeclareLaunchArgument('delete_db_on_start',  default_value='false'),
@@ -956,6 +970,7 @@ def generate_launch_description():
         tts_node,
         arm_node,
         pick_place_node,
+        goal_pose_bridge_node,
         joy_node,
         teleop_twist_joy_node,
         rviz_node,

@@ -51,6 +51,7 @@ def _launch_setup(context, *args, **kwargs):
     use_depth = LaunchConfiguration('use_depth_camera').perform(context).lower() in ('true', '1')
     use_joy = LaunchConfiguration('use_joy').perform(context).lower() in ('true', '1')
     use_apriltag = LaunchConfiguration('use_apriltag').perform(context).lower() in ('true', '1')
+    use_obstacle_safety = LaunchConfiguration('use_obstacle_safety').perform(context).lower() in ('true', '1')
 
     pkg = FindPackageShare('home_robot')
     actions = []
@@ -68,7 +69,7 @@ def _launch_setup(context, *args, **kwargs):
             'use_camera':          'false',   # detector off; depth started separately
             'use_mission':         'false',
             'use_recovery':        'false',
-            'use_obstacle_safety': 'false',
+            'use_obstacle_safety': 'true' if use_obstacle_safety else 'false',
             'use_rviz':            'true',
             # We start joy/teleop ourselves below (correct device-by-name +
             # cmd_vel_safe remap). Force bringup's own joy OFF so it doesn't
@@ -175,5 +176,10 @@ def generate_launch_description():
             'use_apriltag', default_value='true',
             description='Detect the saloni reference AprilTag off the D435 color '
                         'stream and relocalize from a sighting (needs use_depth_camera)'),
+        DeclareLaunchArgument(
+            'use_obstacle_safety', default_value='false',
+            description='Relay cmd_vel -> cmd_vel_safe through velocity_smoother + '
+                        'collision_monitor (needed for autonomous drive tests; teleop '
+                        'still bypasses via its direct cmd_vel_safe remap)'),
         OpaqueFunction(function=_launch_setup),
     ])

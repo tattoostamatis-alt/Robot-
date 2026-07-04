@@ -29,8 +29,15 @@ amcl:
     odom_frame_id: odom
     pf_err: 0.05
     pf_z: 0.99
-    recovery_alpha_fast: 0.1
-    recovery_alpha_slow: 0.001
+    # 2026-07-04: recovery injection DISABLED (was fast 0.1 / slow 0.001).
+    # When measurement likelihood dips (unmapped chair, clutter), recovery
+    # scatters random particles and in this symmetric apartment the pose
+    # can teleport to a mirrored hypothesis — matches the at-rest AMCL yaw
+    # jumps seen 2026-07-03 (51°→164° with the robot stationary). True
+    # kidnapping is handled by the AprilTag relocalizer / /localize_globally
+    # instead, so keep this off.
+    recovery_alpha_fast: 0.0
+    recovery_alpha_slow: 0.0
     resample_interval: 1
     robot_model_type: nav2_amcl::DifferentialMotionModel
     save_pose_rate: 0.5
@@ -103,7 +110,13 @@ controller_server:
       vx_min: -0.10             # allow reversing during avoidance
       vy_max: 0.0
       wz_max: 0.6
-      ax_max: 0.5
+      # 2026-07-04: MUST match velocity_smoother max_accel/max_decel. They
+      # were 0.5 here vs 0.05 in the smoother (10x tighter) — MPPI planned
+      # accelerations the robot never executed: v lagged ~4s behind the
+      # plan while w tracked fine, so every replan started from an
+      # unexpected slow state → heading flip-flop → the "spins in place,
+      # v≈0, w pinned ±0.6" oscillation seen on RViz goals 2026-07-03.
+      ax_max: 0.25
       ax_min: -0.5
       az_max: 1.0
       iteration_count: 1
@@ -142,7 +155,7 @@ controller_server:
         threshold_to_consider: 0.5
       # Obstacle avoidance. consider_footprint:true checks the real robot
       # rectangle (not just a circle) against the costmap — needed for
-      # threading doorways with this 0.6x0.5m footprint.
+      # threading doorways with this 0.5x0.4m footprint.
       CostCritic:
         enabled: true
         cost_power: 1
@@ -191,8 +204,14 @@ velocity_smoother:
     min_velocity: [-0.10, 0.0, -0.6]
     deadband_velocity: [0.0, 0.0, 0.0]
     velocity_timeout: 1.0
-    max_accel: [0.05, 0.0, 0.5]
-    max_decel: [-0.1, 0.0, -0.8]
+    # 2026-07-04: raised from [0.05,0,0.5]/[-0.1,0,-0.8]. 0.05 m/s² was 10x
+    # tighter than MPPI's ax_max — the controller's planned v never
+    # materialized (4s to reach 0.2 m/s) while w did, causing the
+    # spin-in-place oscillation. 0.25 still ramps gently (0.8s to full
+    # speed on a 0.2 m/s robot). MUST stay equal to MPPI ax_max/ax_min/
+    # az_max above — the controller assumes these are executable.
+    max_accel: [0.25, 0.0, 1.0]
+    max_decel: [-0.5, 0.0, -1.0]
     odom_topic: "odom"
     odom_duration: 0.1
 
@@ -208,7 +227,16 @@ local_costmap:
       width: 3
       height: 3
       resolution: 0.05
-      footprint: "[[0.27, 0.25], [0.27, -0.25], [-0.33, -0.25], [-0.33, 0.25]]"
+      # 2026-07-04: was 0.60x0.50 ([[0.27,0.25],[0.27,-0.25],[-0.33,-0.25],
+      # [-0.33,0.25]]) — 5cm wider on every side than even the collision
+      # monitor's user-measured Stop polygon (front 0.22 / rear -0.28 /
+      # sides ±0.20, which itself already includes clearance margins around
+      # the Ø0.34m Roomba). The padding raised the inscribed radius to 0.25,
+      # so every chair/table leg killed a Ø0.50 disc of costmap and whole
+      # regions (kouzina) went lethal — planner couldn't even start from a
+      # parked pose. Now matches the Stop polygon exactly: 0.50x0.40,
+      # inscribed 0.20, circumscribed 0.344.
+      footprint: "[[0.22, 0.20], [0.22, -0.20], [-0.28, -0.20], [-0.28, 0.20]]"
       # keepout_filter is harmless when use_keepout:=false (the default) —
       # filter_mask_server/costmap_filter_info_server just aren't running,
       # so this layer waits quietly for filter info and never applies
@@ -226,7 +254,7 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        # Deliberately below the 0.428 circumscribed footprint radius: Nav2
+        # Deliberately below the 0.344 circumscribed footprint radius: Nav2
         # logs an ERROR and MPPI CostCritic loses its potential-field shortcut,
         # but consider_footprint: true compensates (full-footprint checks),
         # and >=0.40 risks sealing the ~0.78 m doorways (see 2026-06-30 nav
@@ -298,7 +326,16 @@ global_costmap:
       global_frame: map
       robot_base_frame: base_link
       use_sim_time: false
-      footprint: "[[0.27, 0.25], [0.27, -0.25], [-0.33, -0.25], [-0.33, 0.25]]"
+      # 2026-07-04: was 0.60x0.50 ([[0.27,0.25],[0.27,-0.25],[-0.33,-0.25],
+      # [-0.33,0.25]]) — 5cm wider on every side than even the collision
+      # monitor's user-measured Stop polygon (front 0.22 / rear -0.28 /
+      # sides ±0.20, which itself already includes clearance margins around
+      # the Ø0.34m Roomba). The padding raised the inscribed radius to 0.25,
+      # so every chair/table leg killed a Ø0.50 disc of costmap and whole
+      # regions (kouzina) went lethal — planner couldn't even start from a
+      # parked pose. Now matches the Stop polygon exactly: 0.50x0.40,
+      # inscribed 0.20, circumscribed 0.344.
+      footprint: "[[0.22, 0.20], [0.22, -0.20], [-0.28, -0.20], [-0.28, 0.20]]"
       resolution: 0.05
       track_unknown_space: true
       plugins: ["static_layer", "obstacle_layer", "keepout_filter", "inflation_layer"]
@@ -329,7 +366,7 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        # Deliberately below the 0.428 circumscribed footprint radius: Nav2
+        # Deliberately below the 0.344 circumscribed footprint radius: Nav2
         # logs an ERROR and MPPI CostCritic loses its potential-field shortcut,
         # but consider_footprint: true compensates (full-footprint checks),
         # and >=0.40 risks sealing the ~0.78 m doorways (see 2026-06-30 nav

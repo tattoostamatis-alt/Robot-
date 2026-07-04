@@ -1,0 +1,120 @@
+<?xml version="1.0"?>
+<!-- Minimal diff-drive stand-in for the Roomba 692 + C1 lidar, for Gazebo sim.
+     Deliberately NOT the full hardware model: it exists only to exercise the
+     Nav2 stack (planner/MPPI/velocity_smoother/collision_monitor/AMCL) against
+     config/nav2_params.yaml without the real robot. It subscribes to the very
+     last topic in the real command chain — cmd_vel_safe — so the whole smoother
+     + collision-monitor path is under test, and publishes /scan + /odom + the
+     odom->base_link TF that the real EKF would otherwise provide. -->
+<robot name="robot_sim" xmlns:xacro="http://ros.org/wiki/xacro">
+
+  <xacro:property name="body_radius" value="0.17"/>   <!-- Ø0.34 Roomba -->
+  <xacro:property name="body_height" value="0.09"/>
+  <xacro:property name="wheel_radius" value="0.036"/>
+  <xacro:property name="wheel_width"  value="0.02"/>
+  <xacro:property name="wheel_sep"    value="0.235"/> <!-- Roomba track -->
+  <xacro:property name="lidar_z"      value="0.16"/>
+
+  <link name="base_link">
+    <inertial>
+      <mass value="3.0"/>
+      <inertia ixx="0.03" ixy="0" ixz="0" iyy="0.03" iyz="0" izz="0.05"/>
+    </inertial>
+    <collision>
+      <origin xyz="0 0 ${wheel_radius}"/>
+      <geometry><cylinder radius="${body_radius}" length="${body_height}"/></geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 0 ${wheel_radius}"/>
+      <geometry><cylinder radius="${body_radius}" length="${body_height}"/></geometry>
+      <material name="grey"><color rgba="0.2 0.2 0.22 1"/></material>
+    </visual>
+  </link>
+
+  <xacro:macro name="wheel" params="side reflect">
+    <link name="${side}_wheel">
+      <inertial>
+        <mass value="0.2"/>
+        <inertia ixx="0.0003" ixy="0" ixz="0" iyy="0.0003" iyz="0" izz="0.0005"/>
+      </inertial>
+      <collision>
+        <origin rpy="1.5708 0 0"/>
+        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
+      </collision>
+      <visual>
+        <origin rpy="1.5708 0 0"/>
+        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
+        <material name="black"><color rgba="0.05 0.05 0.05 1"/></material>
+      </visual>
+    </link>
+    <joint name="${side}_wheel_joint" type="continuous">
+      <parent link="base_link"/>
+      <child link="${side}_wheel"/>
+      <origin xyz="0 ${reflect * wheel_sep / 2} ${wheel_radius}"/>
+      <axis xyz="0 1 0"/>
+    </joint>
+  </xacro:macro>
+
+  <xacro:wheel side="left"  reflect="1"/>
+  <xacro:wheel side="right" reflect="-1"/>
+
+  <!-- Passive caster so the two driven wheels define the pose -->
+  <link name="caster">
+    <inertial><mass value="0.05"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/></inertial>
+    <collision><geometry><sphere radius="${wheel_radius/2}"/></geometry>
+      <surface><friction><ode><mu>0.0</mu><mu2>0.0</mu2></ode></friction></surface></collision>
+    <visual><geometry><sphere radius="${wheel_radius/2}"/></geometry></visual>
+  </link>
+  <joint name="caster_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="caster"/>
+    <origin xyz="${-body_radius*0.7} 0 ${wheel_radius/2}"/>
+  </joint>
+
+  <link name="lidar_link"/>
+  <joint name="lidar_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="lidar_link"/>
+    <origin xyz="0 0 ${lidar_z}"/>
+  </joint>
+
+  <!-- ── Gazebo: diff-drive + lidar sensor ───────────────────────── -->
+  <gazebo>
+    <plugin filename="gz-sim-diff-drive-system" name="gz::sim::systems::DiffDrive">
+      <left_joint>left_wheel_joint</left_joint>
+      <right_joint>right_wheel_joint</right_joint>
+      <wheel_separation>${wheel_sep}</wheel_separation>
+      <wheel_radius>${wheel_radius}</wheel_radius>
+      <topic>cmd_vel_safe</topic>
+      <odom_topic>odom</odom_topic>
+      <frame_id>odom</frame_id>
+      <child_frame_id>base_link</child_frame_id>
+      <odom_publish_frequency>30</odom_publish_frequency>
+      <tf_topic>/tf</tf_topic>
+      <max_linear_acceleration>1.0</max_linear_acceleration>
+    </plugin>
+    <plugin filename="gz-sim-joint-state-publisher-system"
+            name="gz::sim::systems::JointStatePublisher"/>
+  </gazebo>
+
+  <gazebo reference="lidar_link">
+    <sensor name="lidar" type="gpu_lidar">
+      <update_rate>10</update_rate>
+      <topic>scan</topic>
+      <gz_frame_id>lidar_link</gz_frame_id>
+      <lidar>
+        <scan><horizontal>
+          <samples>360</samples>
+          <resolution>1</resolution>
+          <min_angle>-3.14159</min_angle>
+          <max_angle>3.14159</max_angle>
+        </horizontal></scan>
+        <range><min>0.15</min><max>12.0</max><resolution>0.01</resolution></range>
+      </lidar>
+      <always_on>1</always_on>
+      <visualize>true</visualize>
+    </sensor>
+  </gazebo>
+
+</robot>

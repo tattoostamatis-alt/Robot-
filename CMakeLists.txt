@@ -44,6 +44,8 @@ install(PROGRAMS
   home_robot/nodes/global_localizer_node.py
   home_robot/nodes/explore_manager_node.py
   home_robot/nodes/web_dashboard_node.py
+  home_robot/nodes/goal_pose_bridge.py
+  home_robot/nodes/odom_tf_broadcaster.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -57,7 +59,7 @@ install(FILES
   DESTINATION lib/${PROJECT_NAME}
 )
 
-install(DIRECTORY launch config scripts firmware maps
+install(DIRECTORY launch config scripts firmware maps worlds description
   DESTINATION share/${PROJECT_NAME}
 )
 
