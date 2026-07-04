@@ -1,36 +1,20 @@
-# Keepout zones — areas the robot must NOT navigate (map frame,
-# clicked on the ACTIVE map: kela3, 2026-07-04). Recreate after a remap:
+# Keepout zones — clicked live on the ACTIVE map (kela3, 2026-07-04).
+# Recreate after a remap (zones are map-frame):
 #   ros2 run home_robot collect_keepout_clicks.py   (RViz Publish Point)
 #   python3 scripts/draw_keepout.py
 # Shapes: rect (x,y=centre, width,height) | circle (x,y,radius), metres.
 # To USE the zones: bringup with use_keepout:=true AND set the two
 # keepout_filter layers to enabled: True in nav2_params.yaml.
-#
-# ⚠ zone_4 currently CONTAINS the taught "diadromos" location (-1.98, -4.79)
-#   — before enabling keepout, either shrink zone_4 or re-teach diadromos,
-#   or "πήγαινε στον διάδρομο" will target a forbidden spot.
 zones:
   zone_1:
     shape: rect
-    x: 1.403
-    y: -0.848
-    width: 0.17
-    height: 0.86
-  zone_2:
-    shape: rect
-    x: 1.214
-    y: -0.623
-    width: 0.36
-    height: 1.16
+    x: 1.025
+    y: 0.074
+    width: 0.4
+    height: 0.37
   zone_3:
     shape: rect
-    x: 0.132
-    y: -2.934
-    width: 0.65
-    height: 1.27
-  zone_4:
-    shape: rect
-    x: -2.67
-    y: -4.377
-    width: 3.79
-    height: 1.79
+    x: 0.864
+    y: -0.865
+    width: 0.81
+    height: 1.06
