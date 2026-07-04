@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -eo pipefail
+source /opt/ros/jazzy/setup.bash
+source ~/ros2_robot_ws/install/setup.bash
+exec ros2 launch create_bringup create_2.launch config:=$HOME/ros2_robot_ws/config/roomba_692.yaml

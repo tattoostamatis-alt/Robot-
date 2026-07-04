@@ -1,0 +1,7 @@
+# Stable names for the robot serial devices seen on this machine.
+# Slamtec RPLIDAR C1 commonly enumerates as Silicon Labs CP210x. Matched by
+# serial: the RoArm-M3 is also a CP2102N (10c4:ea60) and would otherwise
+# collide on this "sllidar" symlink too.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{serial}=="2e1319083b70f011988594301045c30f", SYMLINK+="sllidar", MODE="0666", GROUP="dialout"
+# Roomba/Create serial cable commonly enumerates as FTDI FT232.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", SYMLINK+="roomba", MODE="0666", GROUP="dialout"

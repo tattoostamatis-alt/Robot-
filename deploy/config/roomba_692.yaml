@@ -1,0 +1,8 @@
+create_driver:
+  ros__parameters:
+    dev: "/dev/roomba"
+    base_frame: "base_footprint"
+    odom_frame: "odom"
+    latch_cmd_duration: 0.2
+    loop_hz: 10.0
+    publish_tf: true

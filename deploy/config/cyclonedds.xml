@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain id="any">
+    <Discovery>
+      <!-- default is 9 (10 participants/domain) — too low for a
+           bringup.launch.py that starts ~20+ ROS2 nodes at once. -->
+      <MaxAutoParticipantIndex>99</MaxAutoParticipantIndex>
+    </Discovery>
+  </Domain>
+</CycloneDDS>

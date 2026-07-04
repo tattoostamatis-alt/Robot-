@@ -1,0 +1,17 @@
+[Unit]
+Description=ROS 2 Foxglove Bridge
+After=network-online.target ros-sllidar-c1.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dimi
+Group=dimi
+Environment=HOME=/home/dimi
+Environment=ROS_DOMAIN_ID=0
+ExecStart=/home/dimi/bin/start_foxglove_bridge
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

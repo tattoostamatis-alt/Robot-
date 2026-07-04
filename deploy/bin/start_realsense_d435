@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -eo pipefail
+source /opt/ros/jazzy/setup.bash
+source ~/ros2_robot_ws/install/setup.bash
+exec ros2 launch realsense2_camera rs_launch.py camera_name:=camera camera_namespace:=realsense align_depth.enable:=true pointcloud.enable:=true
