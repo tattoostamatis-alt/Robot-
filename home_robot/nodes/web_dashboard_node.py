@@ -18,6 +18,7 @@ import numpy as np
 import yaml
 
 import rclpy
+from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
@@ -31,8 +32,10 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 PORT = 8080
-_HERE = os.path.dirname(os.path.abspath(__file__))
-LOCATIONS_FILE = os.path.join(_HERE, '..', 'config', 'locations.yaml')
+# Resolve via the installed share dir — a path relative to __file__ breaks
+# under `ros2 run` (lib/home_robot/../config does not exist).
+LOCATIONS_FILE = os.path.join(
+    get_package_share_directory('home_robot'), 'config', 'locations.yaml')
 
 # ── Locations ──────────────────────────────────────────────────────────────────
 

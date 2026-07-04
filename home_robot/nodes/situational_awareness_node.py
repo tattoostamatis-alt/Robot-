@@ -4,7 +4,8 @@ situational_awareness_node.py — Aggregates sensor state into a compact JSON
 context that llm_bridge_node prepends to every LLM turn automatically.
 
 Sources:
-  - /odom       → nearest named room (from config/locations.yaml)
+  - TF map→base_link (fallback /odom) → nearest named room (locations.yaml / room mask)
+  - /map        → origin/resolution for the world→mask-pixel conversion
   - detected_objects / tracked_objects → nearby objects summary
   - battery/state → charge percentage
   - psutil       → CPU / RAM
@@ -23,16 +24,13 @@ import numpy as np
 import psutil
 import yaml
 import rclpy
+import tf2_ros
 from rclpy.node import Node
-from nav_msgs.msg import Odometry
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
+from nav_msgs.msg import OccupancyGrid, Odometry
 from sensor_msgs.msg import BatteryState
 from std_msgs.msg import String
 from ament_index_python.packages import get_package_share_directory
-
-# kela.yaml map params — used to convert world (x,y) → mask pixel
-_MAP_ORIGIN_X  = -3.854
-_MAP_ORIGIN_Y  = -7.894
-_MAP_RESOLUTION = 0.050
 
 
 def _load_locations() -> dict:
@@ -62,13 +60,14 @@ def _load_room_mask():
 
 
 def _nearest_room(x: float, y: float, locations: dict,
-                  mask_arr=None, color_map=None) -> str:
+                  mask_arr=None, color_map=None, map_info=None) -> str:
     # ── Pixel lookup in painted mask (preferred) ──────────────────────
-    if mask_arr is not None and color_map:
+    if mask_arr is not None and color_map and map_info is not None:
+        origin_x, origin_y, resolution = map_info
         h, w = mask_arr.shape[:2]
-        col = int((x - _MAP_ORIGIN_X) / _MAP_RESOLUTION)
-        # mask saved in original PGM orientation: row 0 = top = max y
-        row = int((y - _MAP_ORIGIN_Y) / _MAP_RESOLUTION)
+        col = int((x - origin_x) / resolution)
+        # mask saved in image orientation: row 0 = top = max y
+        row = h - 1 - int((y - origin_y) / resolution)
         if 0 <= col < w and 0 <= row < h:
             r, g, b, a = mask_arr[row, col]
             if a > 50:
@@ -116,11 +115,19 @@ class SituationalAwarenessNode(Node):
 
         self._locations  = _load_locations()
         self._mask_arr, self._color_map = _load_room_mask()
+        self._map_info   = None   # (origin_x, origin_y, resolution) of the live map
         self._odom_x     = 0.
         self._odom_y     = 0.
         self._objects    = []
         self._battery    = None   # BatteryState
 
+        self._tf_buffer   = tf2_ros.Buffer()
+        self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
+
+        map_qos = QoSProfile(depth=1,
+                             reliability=ReliabilityPolicy.RELIABLE,
+                             durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(OccupancyGrid, '/map',            self._on_map,     map_qos)
         self.create_subscription(Odometry,     '/odom',           self._on_odom,    10)
         self.create_subscription(BatteryState, 'battery/state',   self._on_battery, 10)
         # Prefer tracked_objects (stable IDs) but fall back to detected_objects
@@ -134,9 +141,31 @@ class SituationalAwarenessNode(Node):
 
     # ── Subscriptions ────────────────────────────────────────────────
 
+    def _on_map(self, msg: OccupancyGrid):
+        info = msg.info
+        self._map_info = (info.origin.position.x, info.origin.position.y,
+                          info.resolution)
+        if self._mask_arr is not None:
+            h, w = self._mask_arr.shape[:2]
+            if (w, h) != (info.width, info.height):
+                self.get_logger().warning(
+                    f'room_mask.png is {w}x{h} but the active map is '
+                    f'{info.width}x{info.height} — the mask was painted on an '
+                    'older map. Falling back to nearest-location lookup; '
+                    'redraw maps/room_mask.png over the current map.')
+                self._mask_arr = None
+
     def _on_odom(self, msg: Odometry):
         self._odom_x = msg.pose.pose.position.x
         self._odom_y = msg.pose.pose.position.y
+
+    def _map_xy(self):
+        """Robot (x, y) in the map frame; falls back to raw odom if TF is down."""
+        try:
+            t = self._tf_buffer.lookup_transform('map', 'base_link', rclpy.time.Time())
+            return t.transform.translation.x, t.transform.translation.y
+        except Exception:
+            return self._odom_x, self._odom_y
 
     def _on_battery(self, msg: BatteryState):
         self._battery = msg
@@ -150,9 +179,10 @@ class SituationalAwarenessNode(Node):
     # ── Context assembly ─────────────────────────────────────────────
 
     def _publish(self):
-        # Room
-        room_key = _nearest_room(self._odom_x, self._odom_y, self._locations,
-                                  self._mask_arr, self._color_map)
+        # Room — mask and locations.yaml are in the map frame, not odom
+        x, y = self._map_xy()
+        room_key = _nearest_room(x, y, self._locations,
+                                  self._mask_arr, self._color_map, self._map_info)
         room_el  = ROOM_NAMES_EL.get(room_key, room_key)
 
         # Nearby objects (sorted by distance, capped)
