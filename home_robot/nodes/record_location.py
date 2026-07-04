@@ -8,6 +8,12 @@ Drive the robot to the spot (teleop) with localization running
     ros2 run home_robot record_location.py domatio tou max   # spaces OK
     ros2 run home_robot record_location.py --list
 
+Or teach rooms by clicking on the map in RViz ("Publish Point" tool),
+no robot/localization needed — only a map view (view_map.launch.py):
+
+    ros2 run home_robot record_location.py --click            # all rooms in --list order
+    ros2 run home_robot record_location.py --click kouzina    # just one
+
 Writes config/locations.yaml through the install symlink, so the source file
 in the repo is updated in place — commit it when all rooms are re-taught.
 Restart nodes that cache locations at startup (room_markers, mission_executor,
@@ -80,10 +86,55 @@ class RecordLocation(Node):
         return None
 
 
+def _click_mode(names, path, locations):
+    """Record each name from an RViz 'Publish Point' click on /clicked_point."""
+    from geometry_msgs.msg import PointStamped
+
+    rclpy.init()
+    node = rclpy.create_node('record_location_click')
+    clicked = []
+    node.create_subscription(PointStamped, '/clicked_point',
+                             lambda m: clicked.append(m), 10)
+
+    print('Στο RViz διάλεξε το εργαλείο "Publish Point" και κλίκαρε με τη σειρά:')
+    for i, name in enumerate(names, 1):
+        print(f'  {i}. {name}')
+    try:
+        for name in names:
+            print(f'\n🖱  Κλικ για: {name} ...', flush=True)
+            while not clicked:
+                rclpy.spin_once(node, timeout_sec=0.2)
+            m = clicked.pop(0)
+            if m.header.frame_id != 'map':
+                print(f'   ⚠ το κλικ ήρθε σε frame "{m.header.frame_id}" (όχι map) '
+                      '— άλλαξε το Fixed Frame σε map και ξαναδοκίμασε')
+            old = locations.get(name) or {}
+            locations[name] = {'x': round(m.point.x, 3),
+                               'y': round(m.point.y, 3),
+                               'yaw': old.get('yaw', 0.0)}
+            _save_locations(path, locations)  # save per click — crash-safe
+            print(f'   ✔ {name}: x={m.point.x:.3f} y={m.point.y:.3f}')
+    except KeyboardInterrupt:
+        print('\nΔιακόπηκε — ό,τι κλικαρίστηκε ως εδώ έχει σωθεί.')
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+    print(f'\nΓράφτηκε στο {path}')
+
+
 def main():
     args = rclpy.utilities.remove_ros_args(sys.argv)[1:]
     path = _locations_path()
     locations = _load_locations(path)
+
+    if args and args[0] == '--click':
+        rest = args[1:]
+        names = [' '.join(rest)] if rest else sorted(locations)
+        if not names:
+            print('Το locations.yaml είναι άδειο — δώσε όνομα: --click <όνομα>')
+            sys.exit(1)
+        _click_mode(names, path, locations)
+        sys.exit(0)
 
     if not args or args[0] in ('--list', '-l'):
         print(f'locations.yaml: {path}')
