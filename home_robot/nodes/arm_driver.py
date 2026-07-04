@@ -26,15 +26,11 @@ Joint angle limits (radians, from the Waveshare wiki):
   roll:     -3.14 .. 3.14
   hand:      1.08 .. 3.14   (gripper, init 3.141593)
 
-NOT yet confirmed against real hardware — TODO when the arm arrives:
-  - Exact field names of the T:105 feedback response. _parse_feedback()
-    first tries the same names as T:102 (base/shoulder/.../hand); if the
-    real response uses different keys it logs them once (see
-    `_feedback_format_warned`) so the parser can be updated.
-  - T:210 torque on/off parameter name/values.
-  - Single-joint command T:101's "joint" index base (0- vs 1-based) is
-    ambiguous in the docs, so it's deliberately unused — T:102 (all
-    joints) and T:106 (gripper) are unambiguous and used instead.
+Confirmed on the real arm 2026-07-01: T:105 feedback uses the short keys
+b/s/e/t/r/g (see FEEDBACK_JOINT_KEYS). Still deliberately unused:
+single-joint T:101, whose "joint" index base (0- vs 1-based) is ambiguous
+in the docs — T:102 (all joints) and T:106 (gripper) are unambiguous and
+used instead; T:210 semantics remain unconfirmed (raw_cmd only).
 """
 
 import json
