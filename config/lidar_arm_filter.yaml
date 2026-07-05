@@ -12,6 +12,12 @@
 # LIMITATION: this masks only the PARKED arm pose. If the arm is driven out into
 # the scan plane elsewhere it will still create phantom returns -> a proper fix
 # would be a URDF-based robot_body_filter. Fine while the arm is stowed.
+#
+# 2026-07-05: with the arm node OFF (servos loose) the arm DROOPS and produces an
+# intermittent phantom at ~ -21..-24 deg / 0.052 m -> cartesian x~0.048, y~-0.020.
+# That x sat just below the old min_x=0.05, so the filter missed it and Nav2 goals
+# aborted intermittently. Lowered min_x to 0.0 so the box reaches the sensor in
+# this y-strip (which is under the robot footprint anyway) and catches the droop.
 /**:
   ros__parameters:
     filter1:
@@ -19,7 +25,7 @@
       type: laser_filters/LaserScanBoxFilter
       params:
         box_frame: laser
-        min_x: 0.05
+        min_x: 0.0
         max_x: 0.26
         min_y: -0.09
         max_y: 0.14
