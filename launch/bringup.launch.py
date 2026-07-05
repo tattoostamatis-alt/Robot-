@@ -24,6 +24,8 @@ def generate_launch_description():
     localization_map = LaunchConfiguration('localization_map', default='')
     use_camera    = LaunchConfiguration('use_camera',    default='true')
     use_arm       = LaunchConfiguration('use_arm',       default='false')
+    use_roomba    = LaunchConfiguration('use_roomba',    default='true')
+    use_sim_time  = LaunchConfiguration('use_sim_time',  default='false')
     # Placeholder drop-off pose (arm_base frame) — no tray/bin measured yet.
     pick_drop_x          = LaunchConfiguration('pick_drop_x',          default='0.15')
     pick_drop_y          = LaunchConfiguration('pick_drop_y',          default='-0.15')
