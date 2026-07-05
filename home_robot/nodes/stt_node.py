@@ -19,7 +19,9 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rcl_interfaces.msg import SetParametersResult
-from std_msgs.msg import String, Int16MultiArray
+from std_msgs.msg import Bool, String, Int16MultiArray
+
+from home_robot.voice_gate import SpeakingGate, TOPIC as SPEAKING_TOPIC
 
 
 SAMPLE_RATE = 16000
@@ -43,6 +45,9 @@ class STTNode(Node):
         self.declare_parameter('preroll_seconds',    0.5)
         self.declare_parameter('wakeword_flush_ms', 300)
         self.declare_parameter('calibrate_on_start', True)
+        # Don't treat the robot's own TTS as user speech (barge-in / self-echo).
+        self.declare_parameter('suppress_on_tts', True)
+        self.declare_parameter('tts_release_tail', 0.3)
 
         model_size            = self.get_parameter('model_size').value
         self.lang             = self.get_parameter('language').value
@@ -69,6 +74,10 @@ class STTNode(Node):
         self._lock       = threading.Lock()
         self._busy       = threading.Lock()
 
+        self.suppress_on_tts = self.get_parameter('suppress_on_tts').value
+        self._gate = SpeakingGate(
+            release_tail=self.get_parameter('tts_release_tail').value)
+
         cpu_threads = int(self.get_parameter('cpu_threads').value)
 
         self._whisper = None
@@ -80,6 +89,7 @@ class STTNode(Node):
         self.text_pub = self.create_publisher(String, 'speech_text', 10)
         self.create_subscription(String,         'wake_word', self._on_wake_word, 10)
         self.create_subscription(Int16MultiArray, 'mic/audio', self._on_audio,    200)
+        self.create_subscription(Bool,           SPEAKING_TOPIC, self._on_tts_speaking, 10)
 
         self.get_logger().info('STT node started — waiting for wake_word')
 
@@ -126,6 +136,9 @@ class STTNode(Node):
         else:
             self.get_logger().warn('Calibration got no audio from /mic/audio, keeping default')
 
+    def _on_tts_speaking(self, msg: Bool):
+        self._gate.set_speaking(msg.data)
+
     def _on_wake_word(self, msg: String):
         if self._whisper is None:
             self.get_logger().warn('Whisper not loaded yet, ignoring wake word')
@@ -157,6 +170,10 @@ class STTNode(Node):
                 return
 
             energy = float(np.sqrt(np.mean(chunk ** 2)))
+            # While TTS is speaking, treat the mic as silent so the robot's own
+            # voice can't be mistaken for the user's command (barge-in gate).
+            if self.suppress_on_tts and self._gate.suppressed():
+                energy = 0.0
 
             if self._state == 'waiting_speech':
                 self._wait_count += 1

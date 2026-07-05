@@ -30,6 +30,19 @@ Status as of 2026-07-05. Items grouped by whether they need the robot powered on
 - [ ] **MT7902 internal WiFi.** No mainline driver yet; running on a USB dongle. Wait for the
       official driver, don't install out-of-tree.
 
+## 🎙️ Voice UX (software-only, no robot motion)
+
+- [x] **TTS self-echo / barge-in gate.** DONE — `tts_node` publishes `tts/speaking`
+      (Bool) around playback (+0.3 s reverb tail); `wake_word_node` and `stt_node`
+      run a shared `SpeakingGate` (`home_robot/voice_gate.py`) and drop mic input
+      while the robot speaks, so its own voice can't trip the wake word or start a
+      recording. Unit + wiring tests in `tests/test_voice_gate.py`. Params:
+      `suppress_on_tts`, `tts_release_tail`, `speaking_tail`. Not yet HW-heard.
+- [ ] **Wake-word hard negatives.** Current negatives are synthetic edge-tts Greek;
+      false-triggers happen on *real* general speech. Add hard-negative audio (e.g.
+      Common Voice / podcast clips — no mic needed) and re-run `training/wake_word_max/
+      {train,evaluate}.py`. Software-only.
+
 ## ✅ Settled / parked (no action)
 
 - **Spin bug root cause** — found & fixed in sim (see above; HW re-test is the only remainder).

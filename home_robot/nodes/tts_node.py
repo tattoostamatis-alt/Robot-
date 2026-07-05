@@ -15,13 +15,16 @@ import asyncio
 import queue
 import subprocess
 import threading
+import time
 
 import edge_tts
 import numpy as np
 import rclpy
 import sounddevice as sd
 from rclpy.node import Node
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
+
+from home_robot.voice_gate import TOPIC as SPEAKING_TOPIC
 
 SAMPLE_RATE = 24000  # edge-tts default output rate
 
@@ -34,11 +37,22 @@ class TTSNode(Node):
         self.declare_parameter('rate', '+0%')
         self.declare_parameter('volume', '+0%')
         self.declare_parameter('device_index', 7)  # pulse — works with any PulseAudio output
+        # Hold `tts/speaking` True this long after playback ends so the listeners
+        # ride out the room-reverb tail before re-arming (see voice_gate.py).
+        self.declare_parameter('speaking_tail', 0.3)
 
         self.voice = self.get_parameter('voice').value
         self.rate = self.get_parameter('rate').value
         self.volume = self.get_parameter('volume').value
         self.device_index = self.get_parameter('device_index').value
+        self.speaking_tail = self.get_parameter('speaking_tail').value
+
+        # State is re-published on every transition (and True again at the start
+        # of each utterance); the listeners co-start at bringup so plain volatile
+        # QoS is enough — no late-joiner catch-up needed.
+        self.speaking_pub = self.create_publisher(Bool, SPEAKING_TOPIC, 10)
+        self._speaking = False
+        self._set_speaking(False)
 
         self._queue = queue.Queue()
         threading.Thread(target=self._playback_loop, daemon=True).start()
@@ -46,6 +60,14 @@ class TTSNode(Node):
         self.create_subscription(String, 'speech_response', self._on_speech_response, 10)
 
         self.get_logger().info(f'TTS node started — voice={self.voice}')
+
+    def _set_speaking(self, speaking: bool):
+        # Publish on every call so late joiners get the current state, but only
+        # log on an actual transition.
+        if speaking != self._speaking:
+            self.get_logger().debug(f'tts/speaking → {speaking}')
+        self._speaking = speaking
+        self.speaking_pub.publish(Bool(data=speaking))
 
     def _on_speech_response(self, msg: String):
         text = msg.data.strip()
@@ -55,10 +77,18 @@ class TTSNode(Node):
     def _playback_loop(self):
         while True:
             text = self._queue.get()
+            self._set_speaking(True)
             try:
                 self._synthesize_and_play(text)
             except Exception as e:
                 self.get_logger().error(f'TTS failed: {e}')
+            finally:
+                # Only re-arm the mic once the queue has drained, so a burst of
+                # responses doesn't toggle the gate open in the gaps between them.
+                if self._queue.empty():
+                    time.sleep(self.speaking_tail)
+                    if self._queue.empty():
+                        self._set_speaking(False)
 
     def _synthesize_and_play(self, text):
         mp3 = asyncio.run(self._synthesize(text))

@@ -62,9 +62,11 @@ import numpy as np
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import String, Int16MultiArray
+from std_msgs.msg import Bool, String, Int16MultiArray
 import sounddevice as sd
 from ament_index_python.packages import get_package_share_directory
+
+from home_robot.voice_gate import SpeakingGate, TOPIC as SPEAKING_TOPIC
 
 
 def _find_device_by_name(name: str) -> int | None:
@@ -111,6 +113,10 @@ class WakeWordNode(Node):
         self.declare_parameter('threshold', 0.50)
         self.declare_parameter('cooldown', 1.5)
         self.declare_parameter('beep_on_wake', True)
+        # Barge-in / self-echo gate: ignore wake detections while the robot is
+        # speaking (+ a reverb tail) so its own TTS can't trigger the wake word.
+        self.declare_parameter('suppress_on_tts', True)
+        self.declare_parameter('tts_release_tail', 0.3)
 
         device_index = self.get_parameter('device_index').value
         device_name = self.get_parameter('device_name').value
@@ -124,6 +130,9 @@ class WakeWordNode(Node):
         self.threshold = self.get_parameter('threshold').value
         self.cooldown = self.get_parameter('cooldown').value
         self.beep_on_wake = self.get_parameter('beep_on_wake').value
+        self.suppress_on_tts = self.get_parameter('suppress_on_tts').value
+        self._gate = SpeakingGate(
+            release_tail=self.get_parameter('tts_release_tail').value)
 
         if model_path:
             model_paths = [model_path]
@@ -140,6 +149,7 @@ class WakeWordNode(Node):
 
         self.wake_pub = self.create_publisher(String, 'wake_word', 10)
         self.audio_pub = self.create_publisher(Int16MultiArray, 'mic/audio', 200)
+        self.create_subscription(Bool, SPEAKING_TOPIC, self._on_tts_speaking, 10)
 
         self._audio_q = queue.Queue()
         self._last_trigger = {}
@@ -166,6 +176,9 @@ class WakeWordNode(Node):
         msg.data = chunk.tolist()
         self.audio_pub.publish(msg)
 
+    def _on_tts_speaking(self, msg: Bool):
+        self._gate.set_speaking(msg.data)
+
     def _detect_loop(self):
         while rclpy.ok():
             chunk = self._audio_q.get()
@@ -173,6 +186,11 @@ class WakeWordNode(Node):
             now = time.monotonic()
             for name, score in predictions.items():
                 if score < self.threshold:
+                    continue
+                # Drop the robot hearing its own TTS (barge-in / self-echo gate).
+                if self.suppress_on_tts and self._gate.suppressed(now):
+                    self.get_logger().debug(
+                        f'Wake "{name}" ({score:.2f}) suppressed — TTS speaking')
                     continue
                 if now - self._last_trigger.get(name, 0.0) < self.cooldown:
                     continue
