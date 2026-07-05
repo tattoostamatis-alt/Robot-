@@ -84,7 +84,11 @@ controller_server:
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
       required_movement_radius: 0.5
-      movement_time_allowance: 10.0
+      # Raised 10->20s 2026-07-05: on the kela3 kouzina run the robot progressed
+      # ~1.8m then MPPI crept (~0.08 m/s, CostCritic-limited) through a narrow
+      # passage below 0.5m/10s -> "Failed to make progress" -> recoveries -> whole
+      # goal ABORTED (err 105). 20s tolerates momentary creep in tight spots.
+      movement_time_allowance: 20.0
     general_goal_checker:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
@@ -115,7 +119,15 @@ controller_server:
       vy_std: 0.0               # DiffDrive: no lateral motion
       wz_std: 0.4
       vx_max: 0.20
-      vx_min: -0.10             # allow reversing during avoidance
+      # 2026-07-05: was -0.10 (reverse allowed). At a near-wall/unreachable goal
+      # (e.g. toualeta) MPPI couldn't complete the forward approach (CostCritic
+      # conservatism) and REVERSED to re-approach — but the collision_monitor is
+      # direction-aware/front-only, so it did NOT stop the rear motion and the
+      # robot backed its rear into a wall (rear clearance 0.09 m). Set to 0.0 so
+      # FollowPath never commands reverse; it resolves near-wall goals by
+      # rotate-and-forward instead. The behavior_server BackUp recovery still
+      # reverses when genuinely needed (separate path, goes through smoother).
+      vx_min: 0.0
       vy_max: 0.0
       wz_max: 0.6
       # 2026-07-05 ROOT-CAUSE FIX for the "spins in place, v≈0" bug. These are
@@ -172,7 +184,12 @@ controller_server:
       CostCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 3.81
+        # Lowered 3.81->2.0 2026-07-05: at 3.81 the footprint-aware CostCritic
+        # over-penalized every forward trajectory in narrow passages (footprint
+        # circumscribed 0.344 > inflation 0.30), so MPPI crept ~0.08 m/s and
+        # trembled (wz oscillation) instead of driving. Teleop was unaffected.
+        # inflation stays 0.30 per project decision.
+        cost_weight: 2.0
         critical_cost: 300.0
         consider_footprint: true
         collision_cost: 1000000.0
