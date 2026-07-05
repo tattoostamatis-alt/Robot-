@@ -88,8 +88,16 @@ controller_server:
     general_goal_checker:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.10
-      yaw_goal_tolerance: 0.25
+      # Loosened 2026-07-05 after HW test: near a wall the robot legitimately
+      # stalls ~0.23 m short (circumscribed 0.344 > inflation 0.30, CostCritic
+      # gets conservative), so the old 0.10 xy tol was NEVER satisfied → endless
+      # final-align spin → that prolonged in-place rotation is what made AMCL
+      # yaw diverge 145° and lose the map. 0.25 covers the residual stall; the
+      # loose yaw (0.6 rad ~34°) stops the robot hunting an exact heading in
+      # place. Do NOT fix this by touching footprint/inflation (both correct for
+      # kela3 doorways). See memory project_robot_nav_path_wall_bug.
+      xy_goal_tolerance: 0.25
+      yaw_goal_tolerance: 0.60
     # MPPI (Model Predictive Path Integral) — switched from
     # RegulatedPurePursuitController 2026-06-30. RPP only *follows* the global
     # path and stops at obstacles (relying on global replan); MPPI samples
