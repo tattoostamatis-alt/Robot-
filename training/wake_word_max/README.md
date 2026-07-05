@@ -1,9 +1,17 @@
-# Custom "Max"/"Μαξ" wake word model
+# Custom "Ρομπότ Μαξ" / "Robot Max" wake word model
 
-A fully custom openWakeWord model for the wake word "Max" / "Μαξ", trained
-entirely on synthetic speech (no real recordings yet). Output: `max.onnx`,
+A fully custom openWakeWord model for the compound wake phrase "Ρομπότ Μαξ" /
+"Robot Max", trained entirely on synthetic speech. Output: `max.onnx`,
 deployed to `../../config/models/max.onnx` and loaded by `wake_word_node.py`
 as the default model.
+
+The phrase was lengthened from the original single-syllable "Μαξ" because a
+one-syllable wake word false-triggers on everyday speech (too few phonemes to
+separate from common syllables). Plain "Μαξ" and plain "Ρομπότ" are trained in
+as heavily-weighted **hard negatives**, so only the two words spoken together
+fire the detector. Held-out eval after this change: positives mean 0.91,
+negatives mean 0.002 (worst hard negative "Μαξ"-alone = 0.35, below the 0.5
+threshold), pure noise 0.000.
 
 ## Pipeline
 

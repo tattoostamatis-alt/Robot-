@@ -25,8 +25,11 @@ GREEK_VOICES = ['el-GR-AthinaNeural', 'el-GR-NestorasNeural']
 ENGLISH_VOICES = ['en-US-AriaNeural', 'en-US-GuyNeural', 'en-US-JennyNeural',
                   'en-GB-RyanNeural', 'en-GB-SoniaNeural', 'en-US-AndrewNeural']
 
-POS_GREEK = ['Μαξ', 'Μαξ!', 'Έι Μαξ', 'Γεια σου Μαξ', 'Μαξ ελα εδω', 'Μαξ ακου με']
-POS_ENGLISH = ['Max', 'Max!', 'Hey Max', 'Okay Max']
+# Wake phrase is now the compound "Ρομπότ Μαξ" / "Robot Max" — a longer,
+# multi-syllable phrase is far more selective than a single syllable.
+POS_GREEK = ['Ρομπότ Μαξ', 'Ρομπότ Μαξ!', 'Έι ρομπότ Μαξ', 'Ρομπότ Μαξ έλα εδώ',
+             'Ρομπότ Μαξ άκου με', 'Ρομποτ Μαξ']
+POS_ENGLISH = ['Robot Max', 'Robot Max!', 'Hey Robot Max', 'Okay Robot Max']
 
 NEG_GREEK = ['Γεια σου', 'Πήγαινε στην κουζίνα', 'Σταμάτα', 'Καθάρισε το δωμάτιο',
              'Τι ώρα είναι', 'Άσε με ήσυχο', 'Πήγαινε στο σαλόνι', 'Επέστρεψε στη βάση',
@@ -35,6 +38,15 @@ NEG_GREEK = ['Γεια σου', 'Πήγαινε στην κουζίνα', 'Στ�
 NEG_ENGLISH = ['Hello', 'Stop', 'Mark', 'Mac', 'Mix', 'Tax', 'Fax', 'Mask', 'Sax',
                'Jack', 'Alex', 'Go to the kitchen', 'What time is it', 'Thank you',
                'Turn on the light']
+
+# Critical hard negatives: either half of the wake phrase spoken ALONE must NOT
+# trigger. Weighted heavily (all voices, 3 variants) so the model learns that
+# only "Ρομπότ" AND "Μαξ" together fire — plain "Μαξ" or "ρομπότ" in normal
+# conversation stays silent.
+NEG_HARD_GREEK = ['Μαξ', 'Μαξ!', 'Έι Μαξ', 'Γεια σου Μαξ', 'Μαξ έλα εδώ', 'Μαξ άκου με',
+                  'Ρομπότ', 'Το ρομπότ', 'ρομπότ μου', 'Έι ρομπότ']
+NEG_HARD_ENGLISH = ['Max', 'Max!', 'Hey Max', 'Okay Max', 'Robot', 'The robot',
+                    'My robot', 'Hey robot']
 
 VARIANTS_3 = [('-15%', '-25Hz'), ('+0%', '+0Hz'), ('+15%', '+25Hz')]
 VARIANTS_2 = [('-15%', '-25Hz'), ('+15%', '+25Hz')]
@@ -56,6 +68,8 @@ add_jobs('pos', POS_GREEK, GREEK_VOICES, VARIANTS_3)
 add_jobs('pos', POS_ENGLISH, ENGLISH_VOICES, VARIANTS_3)
 add_jobs('neg', NEG_GREEK, GREEK_VOICES, VARIANTS_2)
 add_jobs('neg', NEG_ENGLISH, ENGLISH_VOICES, VARIANTS_1)
+add_jobs('neg', NEG_HARD_GREEK, GREEK_VOICES, VARIANTS_3)
+add_jobs('neg', NEG_HARD_ENGLISH, ENGLISH_VOICES, VARIANTS_2)
 
 print(f'Total jobs: {len(jobs)} '
       f'(pos={sum(1 for j in jobs if j[0]=="pos")}, '

@@ -38,10 +38,15 @@ Status as of 2026-07-05. Items grouped by whether they need the robot powered on
       while the robot speaks, so its own voice can't trip the wake word or start a
       recording. Unit + wiring tests in `tests/test_voice_gate.py`. Params:
       `suppress_on_tts`, `tts_release_tail`, `speaking_tail`. Not yet HW-heard.
-- [ ] **Wake-word hard negatives.** Current negatives are synthetic edge-tts Greek;
-      false-triggers happen on *real* general speech. Add hard-negative audio (e.g.
-      Common Voice / podcast clips — no mic needed) and re-run `training/wake_word_max/
-      {train,evaluate}.py`. Software-only.
+- [x] **Wake-word false-triggers.** DONE 2026-07-05 — root cause was the wake word
+      being a single syllable ("Μαξ"), too few phonemes to separate from everyday
+      speech. Lengthened to the compound phrase **"Ρομπότ Μαξ" / "Robot Max"**; plain
+      "Μαξ" and plain "Ρομπότ" trained in as heavily-weighted hard negatives so only
+      the two together fire. Retrained (`generate_data.py` phrase lists updated),
+      held-out eval: pos mean 0.91, neg mean 0.002 (worst "Μαξ"-alone 0.35 < 0.5
+      threshold), noise 0.000. Deployed to `config/models/max.onnx`, threshold kept at
+      0.5. NOT yet HW-heard on the XVF3800 — confirm live, and optionally record real
+      "Ρομπότ Μαξ" positives via `record_real.py` if real speech scores low.
 
 ## ✅ Settled / parked (no action)
 
@@ -49,7 +54,8 @@ Status as of 2026-07-05. Items grouped by whether they need the robot powered on
 - **Footprint vs kela3 doorways** — verified offline, robot fits through every door at inscribed
       and inflation radius; no change needed.
 - **IMU translation x/y/z** — left as-is by decision (exact IMU chassis position not needed).
-- **Wake word "Max"** — retrained with real recordings, working; parked by user.
+- **Wake word** — changed "Μαξ" → compound "Ρομπότ Μαξ" 2026-07-05 to kill
+  false-triggers (see Voice UX above); HW-heard confirmation pending.
 - **YOLO NPU quantization** — `yolo11n_int8.onnx` left as-is, not integrating; YOLO stays on
       iGPU/ROCm (~63 fps).
 - **Vision Q&A** — stays on Gemini cloud; NPU/Qwen3-VL path not being revisited.

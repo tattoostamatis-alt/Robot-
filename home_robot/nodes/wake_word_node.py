@@ -9,10 +9,13 @@ stay idle until they see a message here, instead of running
 continuously — see the RAM budget notes in project memory.
 
 Default model is a custom-trained "max" model (`config/models/max.onnx`,
-see `training/wake_word_max/`) for the wake word "Max"/"Μαξ", trained on
-synthetic edge-tts speech with gain/reverb/noise augmentation (no real
-recordings yet — see training/wake_word_max/README for evaluation results,
-known limitations and how to improve it with real recordings).
+see `training/wake_word_max/`) for the compound wake phrase "Ρομπότ Μαξ" /
+"Robot Max". A multi-syllable phrase is far more selective than the old
+single-syllable "Μαξ" (which false-triggered on everyday speech); plain
+"Μαξ" or "ρομπότ" alone are trained in as hard negatives so only the two
+together fire. Trained on synthetic edge-tts speech with gain/reverb/noise
+augmentation — see training/wake_word_max/README for evaluation results,
+known limitations and how to improve it with real recordings.
 `model_name` can be set to one of
 openWakeWord's bundled pretrained English models (alexa, hey_jarvis,
 hey_mycroft, hey_marvin, timer, weather) for pipeline testing instead.
