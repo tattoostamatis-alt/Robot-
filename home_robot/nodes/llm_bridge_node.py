@@ -158,6 +158,13 @@ TOOLS = [
         }, 'required': ['object']},
     }},
     {'type': 'function', 'function': {
+        'name': 'fetch',
+        'description': 'Βρες, πιάσε και φέρε μου ένα αντικείμενο ("φέρε μου το X")',
+        'parameters': {'type': 'object', 'properties': {
+            'object': {'type': 'string', 'description': 'αγγλικό COCO label, π.χ. cup, bottle, book'},
+        }, 'required': ['object']},
+    }},
+    {'type': 'function', 'function': {
         'name': 'follow',
         'description': 'Ακολούθησε τον χρήστη ("ακολούθησέ με")',
         'parameters': {'type': 'object', 'properties': {}},
@@ -257,6 +264,7 @@ class LLMBridgeNode(Node):
         self.memory_query_pub = self.create_publisher(String, 'memory/query', 10)
         self.pick_pub = self.create_publisher(String, 'pick_command', 10)
         self.follow_pub = self.create_publisher(Bool, 'follow_command', 10)
+        self.mission_pub = self.create_publisher(String, 'mission/start', 10)
 
         self._history = []
         self._busy = threading.Lock()
@@ -782,6 +790,13 @@ class LLMBridgeNode(Node):
                 return {'status': 'error', 'reason': 'no object specified'}
             self.pick_pub.publish(String(data=json.dumps({'label': obj})))
             return {'status': 'started', 'action': 'pick', 'object': obj}
+
+        elif name == 'fetch':
+            obj = (args.get('object') or '').strip().lower()
+            if not obj:
+                return {'status': 'error', 'reason': 'no object specified'}
+            self.mission_pub.publish(String(data=f'fetch:{obj}'))
+            return {'status': 'started', 'action': 'fetch', 'object': obj}
 
         elif name == 'follow':
             self.follow_pub.publish(Bool(data=True))
