@@ -34,13 +34,22 @@ camera + detector + tracker + dynamic-obstacle layers + object memory).
 
 ## 🧪 Needs the robot live (do these together in one session)
 
-- [ ] **Spin/oscillation fix — HW re-test on kela3.** Fixed in sim (commit 18f6632: MPPI
-      `ax_max` 0.25→2.0 was capping the first cmd to 0.0125 m/s → recovery loops). Verified in
-      Gazebo; confirm on real hardware that an RViz goal now drives a smooth arc instead of
-      spinning in place. See `project_robot_nav_path_wall_bug`.
-- [ ] **`goto_room` HW test.** kela3 remap done (locations re-taught + room_mask). Never driven
-      live. Doorway passability already verified offline (all 6 rooms connected at inscribed 0.20
-      and inflation 0.30 — footprint/inflation are correct, no change needed).
+- [x] **Spin/oscillation fix — HW re-test on kela3.** CONFIRMED 2026-07-06: `/cmd_vel_safe`
+      ramps smoothly to 0.20 m/s, wz stays small/smooth, no pin/oscillation, no spin-in-place.
+      ax_max 0.25→2.0 fix holds. See `project_robot_nav_path_wall_bug`.
+- [ ] **`goto_room` HW test — PARTIAL, fragile at doorways.** 2026-07-06: kouzina and saloni both
+      reachable, but planner/controller repeatedly give up right at doorway/pinch points (corridor
+      mid-point, kouzina↔saloni doorway) with "Failed to create plan"/"Failed to make progress",
+      sometimes spin-recovery itself aborting on collision risk. Workaround that reliably works:
+      a tiny manual `/cmd_vel` nudge (turn + creep, ~1s each) past the pinch point, then resend the
+      same goal — succeeds every time tried. NOT an inflation/footprint problem (doorways are only
+      ~0.78m, raising inflation would seal them — see nav2_params.yaml comments). Also watch for:
+      (a) AMCL can diverge from the in-place spin-recovery attempts at these pinch points — recover
+      via `ros2 service call /apriltag_relocalizer/relocalize std_srvs/srv/Empty` (one-shot per
+      session, won't auto-refire just by showing the tag again); (b) RViz's own "2D Nav Goal" can
+      silently preempt a CLI `goto_room.py` goal if both are sent around the same time.
+      Open question for next session: can the nudge-workaround be automated (e.g. recovery_manager_node
+      detects this specific stuck pattern and does the same small nudge itself)?
 - [ ] **Residual final-approach stall (~0.23 m short near walls).** Separate from the spin bug;
       caused by circumscribed 0.344 > inflation 0.30 making CostCritic over-conservative near
       walls. Likely fix: slightly larger `xy_goal_tolerance` — do NOT tighten footprint (collision
