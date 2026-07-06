@@ -1,6 +1,27 @@
 # home_robot — TODO
 
-Status as of 2026-07-05. Items grouped by whether they need the robot powered on.
+Status as of 2026-07-06. Items grouped by whether they need the robot powered on.
+
+## ✨ New features (built 2026-07-06, code-complete + unit-tested, all HW-untested)
+
+Enable together with `localize.launch.py ... use_perception:=true` (brings up
+camera + detector + tracker + dynamic-obstacle layers + object memory).
+
+- [ ] **Semantic object memory** (020d61e). `use_object_memory` node remembers where
+      objects are in the map frame; feeds RAG recall ("πού είναι το X;"). Verify: drive
+      around, `ros2 topic echo /object_memory`, check RViz `object_memory_markers` land on
+      real objects, then ask Max via voice. Tune `merge_distance`/`min_conf` if noisy.
+- [ ] **Dynamic obstacle layer** (was already built; e788e32 made it reachable in nav).
+      Verify: with `use_perception:=true`, a person walking into the path inflates the local
+      costmap (`/predicted_obstacles` + `/semantic_obstacles`) and Nav2 detours. Tune
+      `person_radius` / prediction `horizon`.
+- [ ] **Pick-place visual servoing** (257798b). Closed-loop XY refine before grasp. Needs
+      `use_arm:=true`. FIRST calibrate `tf_base_arm` (servo can't fix a calibration bias).
+      Verify slowly/by hand: watch the "Servo nudge/converged" logs, confirm it settles over
+      the object before descending. Tune `servo_tolerance` / `servo_max_iters`.
+- [ ] **Voice barge-in** (c24dd1c). Say "Ρομπότ Μαξ" while Max is talking → he stops and
+      listens. `allow_barge_in` defaults true (XVF3800 ch4 AEC). Verify he doesn't interrupt
+      *himself* (self-echo); if he does, the AEC beam isn't clean → set false or raise threshold.
 
 ## 🧪 Needs the robot live (do these together in one session)
 
