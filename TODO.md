@@ -22,6 +22,12 @@ camera + detector + tracker + dynamic-obstacle layers + object memory).
 - [ ] **Voice barge-in** (c24dd1c). Say "Ρομπότ Μαξ" while Max is talking → he stops and
       listens. `allow_barge_in` defaults true (XVF3800 ch4 AEC). Verify he doesn't interrupt
       *himself* (self-echo); if he does, the AEC beam isn't clean → set false or raise threshold.
+- [ ] **Fetch mission ("φέρε μου το X").** `fetch:<label>` in mission_executor composes object
+      memory → nav → pick(hold) → carry → place; LLM `fetch` tool. Needs `use_perception` +
+      `use_arm` + `use_mission` + nav. **Prereqs: calibrate tf_base_arm; object memory must have
+      seen the object.** Verify each stage (resolve/approach/verify/pick/deliver) via mission/status
+      + pick_result/place_result. RISK: arm holding an object while the base drives — check RoArm-M3
+      stability, may need a "carry pose". Design: `docs/PLAN_fetch_mission.md`.
 
 ## 🧪 Needs the robot live (do these together in one session)
 

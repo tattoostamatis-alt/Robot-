@@ -1,7 +1,11 @@
 # Plan — "Φέρε μου το X" (fetch mission)
 
-Σχέδιο υλοποίησης. **Δεν έχει γραφτεί κώδικας ακόμα** — αυτό είναι το design για
-review. Συνθέτει τρία κομμάτια που ήδη υπάρχουν αλλά είναι ασύνδετα:
+> **STATUS 2026-07-06: IMPLEMENTED (software), HW-untested.** Steps 1-4 below are
+> done and unit-tested (46 tests pass); only the on-robot test (step 5) remains.
+> Commits: fetch_planner + pick hold/release + mission state machine + LLM tool.
+> HW-test checklist in `TODO.md`. The design notes below are kept as the record.
+
+Σχέδιο υλοποίησης. Συνθέτει τρία κομμάτια που ήδη υπάρχουν αλλά είναι ασύνδετα:
 semantic object memory (πού είναι το X) → Nav2 (πήγαινε) → pick-place με visual
 servoing (πιάσ' το) → επιστροφή/παράδοση.
 
