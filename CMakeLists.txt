@@ -34,6 +34,7 @@ install(PROGRAMS
   home_robot/nodes/situational_awareness_node.py
   home_robot/nodes/mission_executor_node.py
   home_robot/nodes/semantic_costmap_node.py
+  home_robot/nodes/object_memory_node.py
   home_robot/nodes/face_detection_node.py
   home_robot/nodes/pose_node.py
   home_robot/nodes/goto_room.py
