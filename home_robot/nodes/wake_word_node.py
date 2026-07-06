@@ -69,7 +69,7 @@ from std_msgs.msg import Bool, String, Int16MultiArray
 import sounddevice as sd
 from ament_index_python.packages import get_package_share_directory
 
-from home_robot.voice_gate import SpeakingGate, TOPIC as SPEAKING_TOPIC
+from home_robot.voice_gate import SpeakingGate, TOPIC as SPEAKING_TOPIC, STOP_TOPIC
 
 
 def _find_device_by_name(name: str) -> int | None:
@@ -120,6 +120,13 @@ class WakeWordNode(Node):
         # speaking (+ a reverb tail) so its own TTS can't trigger the wake word.
         self.declare_parameter('suppress_on_tts', True)
         self.declare_parameter('tts_release_tail', 0.3)
+        # Barge-in: if True, saying the wake word *while the robot is speaking*
+        # aborts the TTS (publishes tts/stop) and starts a new turn, instead of
+        # being suppressed as self-echo. Relies on the XVF3800's hardware AEC
+        # (mic_channel=4 ASR beam) keeping the robot's own voice off the mic —
+        # leave False on a plain mic without echo cancellation, or it will
+        # interrupt itself. The reverb *tail* after speech is always suppressed.
+        self.declare_parameter('allow_barge_in', False)
 
         device_index = self.get_parameter('device_index').value
         device_name = self.get_parameter('device_name').value
@@ -134,6 +141,7 @@ class WakeWordNode(Node):
         self.cooldown = self.get_parameter('cooldown').value
         self.beep_on_wake = self.get_parameter('beep_on_wake').value
         self.suppress_on_tts = self.get_parameter('suppress_on_tts').value
+        self.allow_barge_in = self.get_parameter('allow_barge_in').value
         self._gate = SpeakingGate(
             release_tail=self.get_parameter('tts_release_tail').value)
 
@@ -151,6 +159,7 @@ class WakeWordNode(Node):
         self._model = Model(wakeword_model_paths=model_paths, vad_threshold=0.5)
 
         self.wake_pub = self.create_publisher(String, 'wake_word', 10)
+        self.stop_pub = self.create_publisher(Bool, STOP_TOPIC, 10)
         self.audio_pub = self.create_publisher(Int16MultiArray, 'mic/audio', 200)
         self.create_subscription(Bool, SPEAKING_TOPIC, self._on_tts_speaking, 10)
 
@@ -190,11 +199,21 @@ class WakeWordNode(Node):
             for name, score in predictions.items():
                 if score < self.threshold:
                     continue
-                # Drop the robot hearing its own TTS (barge-in / self-echo gate).
                 if self.suppress_on_tts and self._gate.suppressed(now):
-                    self.get_logger().debug(
-                        f'Wake "{name}" ({score:.2f}) suppressed — TTS speaking')
-                    continue
+                    # The robot is speaking (or in the reverb tail). Normally this
+                    # is its own TTS leaking into the mic → drop it. But if barge-in
+                    # is on and it's *actively* speaking (not just the tail), treat
+                    # a detection as the user interrupting: abort TTS and fall
+                    # through to start a new turn.
+                    if not (self.allow_barge_in and self._gate.speaking):
+                        self.get_logger().debug(
+                            f'Wake "{name}" ({score:.2f}) suppressed — TTS speaking')
+                        continue
+                    if now - self._last_trigger.get(name, 0.0) < self.cooldown:
+                        continue
+                    self.get_logger().info(
+                        f'Barge-in: "{name}" ({score:.2f}) while speaking → stopping TTS')
+                    self.stop_pub.publish(Bool(data=True))
                 if now - self._last_trigger.get(name, 0.0) < self.cooldown:
                     continue
                 self._last_trigger[name] = now

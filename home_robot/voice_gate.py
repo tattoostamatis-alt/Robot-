@@ -19,6 +19,10 @@ gate logic can be unit-tested without a robot or a running graph — see
 import time
 
 TOPIC = 'tts/speaking'
+# Barge-in: a listener publishes Bool(True) here to abort TTS mid-utterance.
+# tts_node subscribes and calls sd.stop() + drains its queue; wake_word_node
+# publishes it when the wake word fires while the robot is speaking.
+STOP_TOPIC = 'tts/stop'
 
 
 class SpeakingGate:

@@ -24,7 +24,7 @@ import sounddevice as sd
 from rclpy.node import Node
 from std_msgs.msg import Bool, String
 
-from home_robot.voice_gate import TOPIC as SPEAKING_TOPIC
+from home_robot.voice_gate import TOPIC as SPEAKING_TOPIC, STOP_TOPIC
 
 SAMPLE_RATE = 24000  # edge-tts default output rate
 
@@ -55,9 +55,12 @@ class TTSNode(Node):
         self._set_speaking(False)
 
         self._queue = queue.Queue()
+        self._interrupted = False
         threading.Thread(target=self._playback_loop, daemon=True).start()
 
         self.create_subscription(String, 'speech_response', self._on_speech_response, 10)
+        # Barge-in: abort the current utterance and drop anything queued.
+        self.create_subscription(Bool, STOP_TOPIC, self._on_stop, 10)
 
         self.get_logger().info(f'TTS node started — voice={self.voice}')
 
@@ -74,9 +77,28 @@ class TTSNode(Node):
         if text:
             self._queue.put(text)
 
+    def _on_stop(self, msg: Bool):
+        """Barge-in: abort the current utterance and drop anything queued."""
+        if not msg.data:
+            return
+        self._interrupted = True
+        try:
+            sd.stop()   # makes the sd.wait() in the playback thread return now
+        except Exception:
+            pass
+        dropped = 0
+        try:
+            while True:
+                self._queue.get_nowait()
+                dropped += 1
+        except queue.Empty:
+            pass
+        self.get_logger().info(f'Barge-in: TTS interrupted (dropped {dropped} queued)')
+
     def _playback_loop(self):
         while True:
             text = self._queue.get()
+            self._interrupted = False   # fresh utterance — clear any prior barge-in
             self._set_speaking(True)
             try:
                 self._synthesize_and_play(text)
@@ -95,6 +117,8 @@ class TTSNode(Node):
         pcm = self._decode_mp3(mp3)
         audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
 
+        if self._interrupted:   # barge-in landed during synthesis — don't start playing
+            return
         device = None if self.device_index < 0 else self.device_index
         self.get_logger().info(f'Speaking: {text}')
         sd.play(audio, samplerate=SAMPLE_RATE, device=device)

@@ -14,7 +14,7 @@ import os
 
 import pytest
 
-from home_robot.voice_gate import TOPIC, SpeakingGate
+from home_robot.voice_gate import TOPIC, STOP_TOPIC, SpeakingGate
 
 PKG = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NODES = f'{PKG}/home_robot/nodes'
@@ -133,3 +133,24 @@ def test_listeners_subscribe_and_gate(node):
 def test_topic_name_is_stable():
     # The literal listeners/publisher agree on; guards an accidental rename.
     assert TOPIC == 'tts/speaking'
+
+
+# ── Barge-in wiring contract ──────────────────────────────────────────
+
+def test_stop_topic_name_is_stable():
+    assert STOP_TOPIC == 'tts/stop'
+
+
+def test_tts_honors_barge_in_stop():
+    src = open(f'{NODES}/tts_node.py').read()
+    assert 'STOP_TOPIC' in src and 'create_subscription' in src, \
+        'tts_node must subscribe to tts/stop'
+    assert 'sd.stop()' in src, 'tts_node must abort playback on barge-in'
+
+
+def test_wake_word_publishes_barge_in_only_while_speaking():
+    src = open(f'{NODES}/wake_word_node.py').read()
+    assert 'allow_barge_in' in src, 'wake_word_node needs an allow_barge_in gate'
+    assert 'STOP_TOPIC' in src, 'wake_word_node must publish tts/stop'
+    # Barge-in keys off actual speaking, not the reverb tail.
+    assert '_gate.speaking' in src
