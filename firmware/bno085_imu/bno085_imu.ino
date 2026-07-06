@@ -21,6 +21,22 @@ float qw = 1, qi = 0, qj = 0, qk = 0;
 unsigned long lastReportMs = 0;
 const unsigned long STALL_MS = 1500;  // no report for this long -> assume hung I2C bus
 
+// The rotation vector can stream fine while the gyro report silently never
+// starts (setReports() retries can all fail on the flaky bus and nothing
+// re-tries afterwards, so gx/gy/gz stay 0 forever and the EKF yaw-rate input
+// is a constant 0 that fights every turn). Watch the gyro on its own: if it
+// stays silent while other reports flow, re-enable it, then reboot as a last
+// resort.
+unsigned long lastGyroMs = 0;
+const unsigned long GYRO_STALL_MS = 3000;
+int gyroReenableAttempts = 0;
+
+// Per-report rate counters, printed every 5s as a "DIAG,..." line (ignored by
+// imu_node) so a healthy 100Hz gyro can be told apart from one that only
+// trickles in stale updates.
+unsigned long diagWindowStartMs = 0;
+unsigned int rotCount = 0, gyroCount = 0;
+
 void setReports() {
   // GAME_ROTATION_VECTOR = gyro + accel fusion WITHOUT the magnetometer.
   // The magnetometer-fused SH2_ROTATION_VECTOR gave an "absolute" heading
@@ -75,6 +91,7 @@ void setup() {
     Serial.println("ERR: BNO085 init failed, will keep retrying in loop()");
   }
   lastReportMs = millis();
+  lastGyroMs = millis();
 }
 
 void loop() {
@@ -90,15 +107,39 @@ void loop() {
     ESP.restart();
   }
 
+  if (millis() - diagWindowStartMs >= 5000) {
+    float secs = (millis() - diagWindowStartMs) / 1000.0;
+    Serial.print("DIAG,rotHz="); Serial.print(rotCount / secs, 1);
+    Serial.print(",gyroHz="); Serial.println(gyroCount / secs, 1);
+    rotCount = 0; gyroCount = 0;
+    diagWindowStartMs = millis();
+  }
+
   if (bno08x.wasReset()) {
     Serial.println("BNO085 reset, re-enabling reports");
     setReports();
+    lastGyroMs = millis();
+  }
+
+  if (millis() - lastGyroMs > GYRO_STALL_MS) {
+    if (gyroReenableAttempts < 3) {
+      gyroReenableAttempts++;
+      Serial.print("Gyro silent, re-enabling reports (attempt ");
+      Serial.print(gyroReenableAttempts); Serial.println("/3)");
+      setReports();
+      lastGyroMs = millis();  // fresh window before judging again
+    } else {
+      Serial.println("Gyro still silent after re-enables, rebooting...");
+      delay(50);
+      ESP.restart();
+    }
   }
 
   if (bno08x.getSensorEvent(&sensorValue)) {
     lastReportMs = millis();
     switch (sensorValue.sensorId) {
       case SH2_GAME_ROTATION_VECTOR:
+        rotCount++;
         qw = sensorValue.un.gameRotationVector.real;
         qi = sensorValue.un.gameRotationVector.i;
         qj = sensorValue.un.gameRotationVector.j;
@@ -108,6 +149,9 @@ void loop() {
         gx = sensorValue.un.gyroscope.x;
         gy = sensorValue.un.gyroscope.y;
         gz = sensorValue.un.gyroscope.z;
+        lastGyroMs = millis();
+        gyroReenableAttempts = 0;
+        gyroCount++;
         break;
       case SH2_LINEAR_ACCELERATION:
         ax = sensorValue.un.linearAcceleration.x;
