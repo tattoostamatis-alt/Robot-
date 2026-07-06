@@ -8,6 +8,11 @@ base_link->arm_base TF (bringup.launch.py's tf_base_arm) is a guessed
 placeholder, not a measurement. Re-verify slowly/by hand and calibrate
 tf_base_arm before trusting a full grasp.
 
+Two modes on `pick_command` (JSON): default {"label":"cup"} picks and drops at
+the drop pose; {"label":"cup","hold":true} grasps and lifts but keeps the object
+in the gripper for transport (the fetch mission), and a later `place_command`
+({} or {"x","y","z"}) releases it. `place_result` reports the release.
+
 Flow, triggered by `pick_command` (std_msgs/String, JSON {"label": "cup"}
 or {} for "whatever clutter object_detector.py last saw"):
   1. Look up the target in the latest `detected_objects` message
@@ -100,14 +105,18 @@ class PickPlaceNode(Node):
         self.gripper_pub = self.create_publisher(Float32, 'arm/gripper_cmd', 10)
         self.response_pub = self.create_publisher(String, 'speech_response', 10)
         self.result_pub = self.create_publisher(String, 'pick_result', 10)
+        self.place_result_pub = self.create_publisher(String, 'place_result', 10)
 
         self._latest_objects = None
         self._busy = threading.Lock()
 
         self.create_subscription(String, 'detected_objects', self._on_detected_objects, 10)
         self.create_subscription(String, 'pick_command', self._on_pick_command, 10)
+        # Release a held object (used by the fetch mission after carrying it to
+        # the user). JSON {} → drop at the default drop pose, or {"x","y","z"}.
+        self.create_subscription(String, 'place_command', self._on_place_command, 10)
 
-        self.get_logger().info('Pick-place node started (UNTESTED — no arm hardware yet)')
+        self.get_logger().info('Pick-place node started (HW-unverified — see module docstring)')
 
     def _on_detected_objects(self, msg: String):
         try:
@@ -125,11 +134,36 @@ class PickPlaceNode(Node):
             self.get_logger().warn('Already executing a pick, ignoring new request')
             self._publish_result('error', 'busy with another pick')
             return
-        threading.Thread(target=self._wrapped, args=(data.get('label'),), daemon=True).start()
+        # hold=true: grasp and lift but do NOT place/return — the object stays in
+        # the gripper for transport (fetch). Default false = legacy pick-and-drop.
+        hold = bool(data.get('hold', False))
+        threading.Thread(target=self._wrapped, args=(data.get('label'), hold), daemon=True).start()
 
-    def _wrapped(self, label):
+    def _on_place_command(self, msg: String):
         try:
-            self._run_pick(label)
+            data = json.loads(msg.data) if msg.data else {}
+        except json.JSONDecodeError:
+            data = {}
+        if not self._busy.acquire(blocking=False):
+            self.get_logger().warn('Busy, ignoring place request')
+            self.place_result_pub.publish(String(data=json.dumps({'status': 'error', 'detail': 'busy'})))
+            return
+
+        def _run():
+            try:
+                pose = (data.get('x', self.drop_pose[0]),
+                        data.get('y', self.drop_pose[1]),
+                        data.get('z', self.drop_pose[2]))
+                self._release_sequence(pose)
+                self._say('Ορίστε.')
+                self.place_result_pub.publish(String(data=json.dumps({'status': 'ok', 'detail': 'placed'})))
+            finally:
+                self._busy.release()
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _wrapped(self, label, hold):
+        try:
+            self._run_pick(label, hold)
         finally:
             self._busy.release()
 
@@ -141,7 +175,7 @@ class PickPlaceNode(Node):
             candidates = [o for o in candidates if o.get('label') == label] or candidates
         return candidates[0] if candidates else None
 
-    def _run_pick(self, label):
+    def _run_pick(self, label, hold=False):
         target = self._select_target(label)
         if target is None:
             self._say('Δεν βλέπω κάτι να σηκώσω αυτή τη στιγμή.')
@@ -170,16 +204,27 @@ class PickPlaceNode(Node):
 
         self._cartesian(ax, ay, az)
         self._gripper(self.gripper_closed)
-        self._cartesian(ax, ay, hover_z)
+        self._cartesian(ax, ay, hover_z)   # lift, object grasped
 
-        dx, dy, dz = self.drop_pose
-        self._cartesian(dx, dy, dz)
+        if hold:
+            # Keep it in the gripper for transport (fetch). A later place_command
+            # releases it. Stay at hover so nothing drags on the way up.
+            self._say(f'Το κρατάω: {target["label"]}.')
+            self._publish_result('ok', target['label'])
+            return
+
+        # Legacy pick-and-drop: deposit at the drop pose and return to init.
+        self._release_sequence(self.drop_pose)
+        self._say(f'Τακτοποίησα: {target["label"]}.')
+        self._publish_result('ok', target['label'])
+
+    def _release_sequence(self, pose):
+        """Move to `pose`, open the gripper to release, return to the init pose."""
+        px, py, pz = pose
+        self._cartesian(px, py, pz)
         self._gripper(self.gripper_open)
         self._raw({'T': 100})  # back to init pose
         time.sleep(self.movement_settle_time)
-
-        self._say(f'Τακτοποίησα: {target["label"]}.')
-        self._publish_result('ok', target['label'])
 
     def _servo(self, label, ax, ay, az, hover_z):
         """Refine (ax, ay, az) toward the live detection while hovering. Returns
