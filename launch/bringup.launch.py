@@ -72,6 +72,7 @@ def generate_launch_description():
     use_situational     = LaunchConfiguration('use_situational',     default='false')
     use_mission         = LaunchConfiguration('use_mission',         default='true')
     use_semantic_costmap = LaunchConfiguration('use_semantic_costmap', default='false')
+    use_object_memory   = LaunchConfiguration('use_object_memory',   default='false')
     # RTAB-Map database path — placed alongside slam_toolbox maps so all
     # mapping artefacts live in one directory. Pass delete_db_on_start:=true
     # to recover from a corrupted database (see scripts/reset_rtabmap.sh).
@@ -674,6 +675,17 @@ def generate_launch_description():
         condition=IfCondition(use_semantic_costmap),
     )
 
+    # ── Semantic object memory (remembers where things are, map frame) ──
+    # Folds detected_objects into a persistent per-label spatial map, feeds
+    # RAG recall ("πού είναι το X;"). Needs use_camera:=true for detections.
+    object_memory_node = Node(
+        package='home_robot',
+        executable='object_memory_node.py',
+        name='object_memory_node',
+        output='screen',
+        condition=IfCondition(use_object_memory),
+    )
+
     # ── Wake word detector (openWakeWord) ────────────────────────
     wake_word_node = Node(
         package='home_robot',
@@ -697,6 +709,9 @@ def generate_launch_description():
             'device_name': 'XVF3800',
             'mic_channels': 6,
             'mic_channel': 4,
+            # Barge-in: saying "Ρομπότ Μαξ" while the robot is talking aborts the
+            # TTS and starts a new turn. Safe on the XVF3800 (ch4 = AEC'd ASR beam).
+            'allow_barge_in': LaunchConfiguration('allow_barge_in', default='true'),
         }],
         condition=IfCondition(use_wake_word),
     )
@@ -884,6 +899,7 @@ def generate_launch_description():
         DeclareLaunchArgument('pick_approach_height', default_value='0.10'),
         DeclareLaunchArgument('use_wake_word', default_value='false'),
         DeclareLaunchArgument('use_stt',       default_value='false'),
+        DeclareLaunchArgument('allow_barge_in', default_value='true'),
         DeclareLaunchArgument('use_doa',            default_value='false'),
         DeclareLaunchArgument('doa_rotate_on_wake', default_value='true'),
         DeclareLaunchArgument('doa_rotate_speed',   default_value='0.6'),
@@ -917,6 +933,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_situational',        default_value='false'),
         DeclareLaunchArgument('use_mission',            default_value='true'),
         DeclareLaunchArgument('use_semantic_costmap',   default_value='false'),
+        DeclareLaunchArgument('use_object_memory',      default_value='false'),
         DeclareLaunchArgument('use_sim_time',            default_value='false'),
         DeclareLaunchArgument('use_roomba',              default_value='true'),
         DeclareLaunchArgument('rtabmap_db',
@@ -958,6 +975,7 @@ def generate_launch_description():
         recovery_node,
         prediction_node,
         situational_node,
+        object_memory_node,
         mission_node,
         semantic_costmap_node_action,
         wake_word_node,
