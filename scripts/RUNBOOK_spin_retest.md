@@ -22,6 +22,9 @@
 - [ ] **#10 Pick visual servoing** — closed-loop XY πριν το grasp (θέλει use_arm + tf_base_arm calib)
 - [ ] **#11 Voice barge-in** — "Ρομπότ Μαξ" ενώ μιλάει → σταματά & ακούει
 
+**PART 4 — Fetch mission «φέρε μου το X» (code-complete, HW-untested, δες κάτω):**
+- [ ] **#12 Fetch** — βρες→πιάσε(hold)→κουβάλα→παράδωσε (συνθέτει #8+#10+nav); delivery start_pose ή follow
+
 ---
 
 ## PART 1 — Nav chain
@@ -240,3 +243,53 @@ ros2 topic pub --once pick_command std_msgs/String '{data: "{\"label\": \"cup\"}
 |--------|------|------|
 | διακοπή στο «Ρομπότ Μαξ» | σταματά μέσα σε <0.5s, ακούει | δεν σταματά → `allow_barge_in` off / threshold ψηλά |
 | self-interrupt | ΔΕΝ διακόπτει τον εαυτό του | αυτο-κόβεται → AEC beam όχι καθαρό → `allow_barge_in:=false` ή ↑threshold |
+
+---
+
+## PART 4 — Fetch mission «φέρε μου το X» (#12)
+
+Υλοποιήθηκε 2026-07-06 (f161d50/2635f31/2db066c/40717ec/d4e12c6/fb65fe5). Συνθέτει
+object memory → nav → pick(hold) → carry → place. Code-complete + 51 unit tests,
+**HW-untested**. Design: `docs/PLAN_fetch_mission.md`, memory
+`project_robot_orchestration`.
+
+### Προαπαιτούμενα (ΜΗΝ τα παραλείψεις)
+
+1. **Calibrate `tf_base_arm`** (κοινό με #10 — αλλιώς το grasp αστοχεί).
+2. **Το object memory (#8) να έχει ΔΕΙ το αντικείμενο** — γύρνα το robot να το
+   καταγράψει πρώτα, αλλιώς το fetch πέφτει σε αργό room-by-room search.
+3. Όλα μαζί ζωντανά: perception + arm + mission + nav.
+
+### Launch
+
+```bash
+cd ~/robot_ws && colcon build --packages-select home_robot --symlink-install && source install/setup.bash
+ros2 launch home_robot localize.launch.py map:=kela3 \
+  use_obstacle_safety:=true use_perception:=true use_arm:=true
+# ξεχωριστά (ή πρόσθεσέ τα): use_mission:=true + voice (use_llm/stt/tts/wake_word)
+# delivery: πρόσθεσε delivery_mode:=follow για homing στον χρήστη (default start_pose)
+```
+
+### Το τεστ
+
+```bash
+# απευθείας (χωρίς φωνή):
+ros2 topic pub --once mission/start std_msgs/String '{data: "fetch:cup"}'
+# ή φωνητικά: «Ρομπότ Μαξ, φέρε μου το ποτήρι»
+ros2 topic echo /mission/status      # navigating→inspecting→...→done
+```
+Στάδια που βλέπεις: `RESOLVE` (μιλάει «πάω να φέρω») → οδηγεί σε approach pose →
+`VERIFY` → `PICK` (κρατά) → κουβαλάει πίσω → `PLACE` («ορίστε»).
+
+### PASS / FAIL
+
+| Στάδιο | PASS | FAIL |
+|--------|------|------|
+| RESOLVE | βρίσκει θέση από μνήμη (ή search) | «δεν ξέρω πού είναι» → object memory άδειο (δες #8) |
+| approach | σταματά ~0.4m πριν, κοιτάζοντας το αντικείμενο | πάνω στο αντικείμενο / λάθος γωνία → `fetch_approach_dist` |
+| VERIFY | το βλέπει σε grasp range, προχωράει | δεν το βλέπει → μνήμη stale· κάνει retry/search |
+| PICK hold | πιάνει & **κρατά** (δεν το αφήνει) | το αφήνει αμέσως → `hold` δεν πέρασε |
+| carry | κουβαλάει σταθερά ενώ οδηγεί | βραχίονας ασταθής/πέφτει → χρειάζεται "carry pose" (RISK) |
+| deliver start_pose | γυρίζει εκεί που έδωσες εντολή & αφήνει | λάθος σημείο → TF start-pose δεν πιάστηκε |
+| deliver follow | κεντράρει πάνω σου, σταματά ~0.8m, αφήνει | κυνηγά phantom / δεν σταματά → `deliver_distance`, person detections |
+| cancel | «ακύρωσε αποστολή» → σταματά & **αφήνει** το αντικείμενο | μένει να κρατά → bug |
