@@ -16,6 +16,12 @@
 - [ ] **#6 Wake-word "Ρομπότ Μαξ"** — HW-heard στο XVF3800 (false-trigger check)
 - [ ] **#7 TTS barge-in gate** — το μικρόφωνο κόβεται όσο μιλάει το robot
 
+**PART 3 — Νέα features 2026-07-06 (code-complete, HW-untested, δες κάτω):**
+- [ ] **#8 Semantic object memory** — θυμάται πού είναι αντικείμενα (map frame) + RAG recall
+- [ ] **#9 Dynamic obstacle layer** — άνθρωπος/κατοικίδιο στη διαδρομή → Nav2 παρακάμπτει
+- [ ] **#10 Pick visual servoing** — closed-loop XY πριν το grasp (θέλει use_arm + tf_base_arm calib)
+- [ ] **#11 Voice barge-in** — "Ρομπότ Μαξ" ενώ μιλάει → σταματά & ακούει
+
 ---
 
 ## PART 1 — Nav chain
@@ -157,3 +163,80 @@ ros2 launch home_robot bringup.launch.py \
 | σκέτο "Μαξ"/"Ρομπότ"/κουβέντα | ΔΕΝ ξυπνάει | false-trigger → hard-negative retrain |
 | `/tts/speaking` στο playback | `true` (+0.3s tail) | δεν δημοσιεύεται → tts_node param |
 | αυτο-echo όσο μιλάει | mic muted, κανένα self-wake | αυτο-τριγκάρεται → SpeakingGate wiring |
+
+---
+
+## PART 3 — Νέα perception/interaction features (#8-11)
+
+Χτίστηκαν 2026-07-06 (commits 020d61e, e788e32, 257798b, c24dd1c). Code-complete +
+unit-tested (35 tests), **κανένα HW-tested**. Δες memory
+`project_robot_perception_features`, `TODO.md` (section «✨ New features»).
+
+### Launch — τα #8/#9 (+#10 με arm) μαζί, πάνω στο nav
+
+Το `use_perception:=true` ανεβάζει camera + YOLO detector + tracker + τα δύο
+dynamic-obstacle layers + object memory. Αντικαθιστά το lean depth stream με την
+πλήρη κάμερα (color+depth+aligned+pointcloud).
+
+```bash
+cd ~/robot_ws && colcon build --packages-select home_robot --symlink-install && source install/setup.bash
+ros2 launch home_robot localize.launch.py map:=kela3 \
+  use_obstacle_safety:=true use_perception:=true use_arm:=true   # use_arm μόνο για #10
+```
+⚠️ Κοστίζει iGPU/CPU (ο detector). Αν το nav ήδη τρέχει χωρίς perception, κατέβασέ το
+και ξαναανέβασέ το μ' αυτό — μη τρέχεις δύο realsense (USB conflict).
+
+### #8 Semantic object memory
+
+```bash
+ros2 topic echo /object_memory              # JSON: label/x/y/z(map)/room/last_seen
+# RViz: πρόσθεσε MarkerArray /object_memory_markers
+```
+- Γύρνα το robot σε 2-3 δωμάτια με αντικείμενα (cup, bottle, chair, tv…).
+- Μετά ρώτα φωνητικά: «Ρομπότ Μαξ, πού είναι το ποτήρι;» (μέσω RAG recall).
+- Persist: `~/.robot_object_memory.json` — επιβιώνει restart.
+
+| Σημάδι | PASS | FAIL |
+|--------|------|------|
+| markers | κάθονται πάνω στα πραγματικά αντικείμενα, σταθερά | πλανώνται/διπλασιάζονται → μείωσε `merge_distance` ή ανέβασε `min_conf` |
+| room label | σωστό δωμάτιο ανά αντικείμενο | λάθος → έλεγξε locations.yaml / map→base TF |
+| φωνητικό recall | απαντά με το δωμάτιο | κενό → `rag_push` on? Lemonade up? |
+
+### #9 Dynamic obstacle layer
+
+- Με το robot να πλοηγείται προς goal, μπες με τα πόδια στη διαδρομή (ή βάλε κάποιον).
+- Watch: `ros2 topic echo /semantic_obstacles` (person cylinder) και το local costmap
+  στο RViz να «φουσκώνει» γύρω σου.
+
+| Σημάδι | PASS | FAIL |
+|--------|------|------|
+| costmap γύρω από άνθρωπο | κόκκινη inflation, Nav2 παρακάμπτει | τίποτα → tracker/detector down, ή camera_info λείπει |
+| ταχύ κινούμενο εμπόδιο | `/predicted_obstacles` μπροστά από την πορεία του | καθόλου πρόβλεψη → κατέβασε `min_speed` |
+| tuning | `person_radius` (0.6) πολύ σφιχτό/χαλαρό → ρύθμισε | — |
+
+### #10 Pick visual servoing (θέλει use_arm)
+
+⚠️ **ΠΡΩΤΑ βαθμονόμησε το `tf_base_arm`** — το servo καθαρίζει jitter, ΟΧΙ systematic
+calibration bias (η κάμερα δεν βλέπει το gripper). Δοκίμασε αργά / με το χέρι κοντά
+στο E-stop.
+
+```bash
+ros2 topic pub --once pick_command std_msgs/String '{data: "{\"label\": \"cup\"}"}'
+# παρακολούθησε τα logs του pick_place_node: "Servo nudge N: Δ=..mm" → "Servo converged"
+```
+
+| Σημάδι | PASS | FAIL |
+|--------|------|------|
+| servo logs | Δ μικραίνει, «converged» πριν το descend | Δ μεγαλώνει/ταλαντώνεται → μείωσε βήμα, έλεγξε TF sign |
+| grasp | πιάνει το αντικείμενο | αστοχεί σταθερά κατά offset → tf_base_arm calibration |
+| relock | μένει στο ίδιο αντικείμενο | πηδά σε άλλο → μείωσε `servo_relock_radius` |
+
+### #11 Voice barge-in
+
+- Δώσε εντολή με μεγάλη TTS απάντηση· **όσο μιλάει**, πες «Ρομπότ Μαξ».
+- Πρέπει να κόψει αμέσως την ομιλία (`sd.stop()`) και να ξεκινήσει νέο γύρο.
+
+| Σημάδι | PASS | FAIL |
+|--------|------|------|
+| διακοπή στο «Ρομπότ Μαξ» | σταματά μέσα σε <0.5s, ακούει | δεν σταματά → `allow_barge_in` off / threshold ψηλά |
+| self-interrupt | ΔΕΝ διακόπτει τον εαυτό του | αυτο-κόβεται → AEC beam όχι καθαρό → `allow_barge_in:=false` ή ↑threshold |
