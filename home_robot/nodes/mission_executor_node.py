@@ -3,8 +3,15 @@
 mission_executor_node.py — Multi-step mission state machine for the home robot.
 
 Missions are triggered by publishing to `mission/start` (String).
-Format: "patrol" | "find:<label>" | "dock" | "check_rooms"
+Format: "patrol" | "find:<label>" | "fetch:<label>" | "dock" | "check_rooms"
 Cancel any running mission: publish "" (empty) or "cancel" to `mission/start`.
+
+`fetch:<label>` ("φέρε μου το X") composes the perception + nav + arm stacks:
+resolve the object's map position from object memory (falling back to a live
+room search), drive to an approach pose short of it, verify it's actually
+there, grasp-and-hold it (pick_command hold=true), carry it back to where the
+command was given, and release it (place_command). Needs use_perception
+(object memory + detector) + use_arm + Nav2 all up. HW-untested.
 
 States per mission: NAVIGATE → INSPECT → REPORT → (next waypoint) → DONE | FAILED
 
@@ -28,6 +35,7 @@ from enum import Enum, auto
 
 import yaml
 import rclpy
+import tf2_ros
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from action_msgs.msg import GoalStatus
@@ -35,6 +43,8 @@ from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateToPose
 from std_msgs.msg import String
+
+from home_robot.fetch_planner import approach_pose, memory_target, nearest_detection
 
 
 class State(Enum):
@@ -72,6 +82,22 @@ class MissionExecutorNode(Node):
     def __init__(self):
         super().__init__('mission_executor_node')
 
+        # fetch tuning
+        self.declare_parameter('fetch_approach_dist', 0.4)   # m — park this short of the object
+        self.declare_parameter('fetch_grasp_range', 1.0)     # m — object must be within this to grasp
+        self.declare_parameter('memory_max_age', 300.0)      # s — older object-memory hits are re-verified live
+        self.declare_parameter('pick_timeout', 40.0)         # s — wait for the arm to report
+        self.declare_parameter('place_timeout', 30.0)
+        self.declare_parameter('fetch_max_retries', 1)       # approach+pick retries
+        self.declare_parameter('inspect_settle', 2.5)        # s — let the detector stabilise
+        self._fetch_approach_dist = self.get_parameter('fetch_approach_dist').value
+        self._fetch_grasp_range   = self.get_parameter('fetch_grasp_range').value
+        self._memory_max_age      = self.get_parameter('memory_max_age').value
+        self._pick_timeout        = self.get_parameter('pick_timeout').value
+        self._place_timeout       = self.get_parameter('place_timeout').value
+        self._fetch_max_retries   = self.get_parameter('fetch_max_retries').value
+        self._inspect_settle      = self.get_parameter('inspect_settle').value
+
         self._locations  = _load_locations()
         self._state      = State.IDLE
         self._cancel_flag = threading.Event()
@@ -79,16 +105,31 @@ class MissionExecutorNode(Node):
         self._latest_objects: list = []
 
         self._nav_ac = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+        self._tf_buffer   = tf2_ros.Buffer()
+        self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
+
+        # Request/response state for the fetch mission (callbacks run on the main
+        # executor; the mission worker thread waits on these Events — same
+        # no-spin pattern as _await_future).
+        self._mem_event   = threading.Event(); self._mem_value = None
+        self._pick_event  = threading.Event(); self._pick_value = None
+        self._place_event = threading.Event(); self._place_value = None
 
         # Subscribers
         self.create_subscription(String, 'mission/start',     self._on_mission_start,   10)
         self.create_subscription(String, 'speech_text',       self._on_speech_text,     10)
         self.create_subscription(String, 'detected_objects',  self._on_objects,         10)
         self.create_subscription(String, 'tracked_objects',   self._on_objects,         10)
+        self.create_subscription(String, 'object_memory/answer', self._on_mem_answer,   10)
+        self.create_subscription(String, 'pick_result',       self._on_pick_result,     10)
+        self.create_subscription(String, 'place_result',      self._on_place_result,    10)
 
         # Publishers
         self._status_pub  = self.create_publisher(String, 'mission/status', 10)
         self._speech_pub  = self.create_publisher(String, 'speech_response', 10)
+        self._mem_query_pub = self.create_publisher(String, 'object_memory/query', 10)
+        self._pick_pub    = self.create_publisher(String, 'pick_command', 10)
+        self._place_pub   = self.create_publisher(String, 'place_command', 10)
 
         self.get_logger().info('Mission executor ready — topics: mission/start, mission/status')
 
@@ -99,6 +140,27 @@ class MissionExecutorNode(Node):
             self._latest_objects = json.loads(msg.data) or []
         except json.JSONDecodeError:
             pass
+
+    def _on_mem_answer(self, msg: String):
+        try:
+            self._mem_value = json.loads(msg.data)
+        except json.JSONDecodeError:
+            self._mem_value = None
+        self._mem_event.set()
+
+    def _on_pick_result(self, msg: String):
+        try:
+            self._pick_value = json.loads(msg.data)
+        except json.JSONDecodeError:
+            self._pick_value = None
+        self._pick_event.set()
+
+    def _on_place_result(self, msg: String):
+        try:
+            self._place_value = json.loads(msg.data)
+        except json.JSONDecodeError:
+            self._place_value = None
+        self._place_event.set()
 
     def _on_speech_text(self, msg: String):
         text = msg.data.lower().strip()
@@ -125,6 +187,9 @@ class MissionExecutorNode(Node):
         elif cmd.startswith('find:'):
             label = cmd[5:].strip()
             self._mission_find(label)
+        elif cmd.startswith('fetch:'):
+            label = cmd[6:].strip()
+            self._mission_fetch(label)
         elif cmd == 'dock':
             self._mission_dock()
         elif cmd == 'check_rooms':
@@ -209,6 +274,130 @@ class MissionExecutorNode(Node):
         else:
             self._finish(State.FAILED, f'Δεν βρήκα {label} πουθενά.')
 
+    # ── Mission: fetch ("φέρε μου το X") ─────────────────────────────
+
+    def _mission_fetch(self, label: str):
+        self.get_logger().info(f'Mission: fetch "{label}"')
+        # Deliver back to where the command was given = the robot's pose now.
+        start_pose = self._lookup_base_pose()
+
+        self._set_state(State.NAVIGATING)
+        self._speak(f'Πάω να φέρω {label}.')
+
+        # 1. RESOLVE — where is it?
+        target = self._resolve_location(label)
+        if target is None:
+            self._finish(State.CANCELLED if self._cancel_flag.is_set() else State.FAILED,
+                         'Ακυρώθηκε.' if self._cancel_flag.is_set() else f'Δεν ξέρω πού είναι {label}.')
+            return
+
+        # 2-4. approach → verify → grasp-and-hold, with retries
+        picked = False
+        for attempt in range(self._fetch_max_retries + 1):
+            if self._cancel_flag.is_set():
+                break
+            rob = self._lookup_base_pose() or (target['x'] - 1.0, target['y'], 0.0)
+            ax, ay, yaw = approach_pose((rob[0], rob[1]), (target['x'], target['y']),
+                                        self._fetch_approach_dist)
+            if not self._navigate_to_xy(ax, ay, yaw):
+                continue
+
+            self._set_state(State.INSPECTING)
+            time.sleep(self._inspect_settle)
+            det = nearest_detection(self._latest_objects, label, self._fetch_grasp_range)
+            if det is None:
+                # Memory was stale or the approach overshot — re-query and retry.
+                self._speak(f'Δεν βλέπω {label} εδώ, ξανακοιτάω.')
+                t2 = self._query_object_memory(label)
+                if t2:
+                    target = t2
+                continue
+
+            if self._do_pick(label, hold=True):
+                picked = True
+                break
+
+        if not picked:
+            self._finish(State.CANCELLED if self._cancel_flag.is_set() else State.FAILED,
+                         'Ακυρώθηκε.' if self._cancel_flag.is_set() else f'Δεν κατάφερα να πιάσω {label}.')
+            return
+
+        # 5. carry back to the user (skip the drive if cancelled, but still
+        #    release below so the arm isn't left holding the object)
+        if not self._cancel_flag.is_set():
+            self._set_state(State.NAVIGATING)
+            self._speak(f'Σου φέρνω {label}.')
+            if start_pose is not None:
+                self._navigate_to_xy(*start_pose)
+
+        # 6. DELIVER — release the object
+        self._do_place()
+
+        if self._cancel_flag.is_set():
+            self._finish(State.CANCELLED, f'Ακυρώθηκε — άφησα {label}.')
+        else:
+            self._finish(State.DONE, f'Ορίστε {label}.')
+
+    def _resolve_location(self, label: str):
+        """Return {'x','y','room',...} for `label`, or None. Object memory first,
+        then a live room-by-room search (object memory updates as we look)."""
+        t = self._query_object_memory(label)
+        if t:
+            return t
+        self._speak('Δεν το έχω στη μνήμη, ψάχνω στα δωμάτια.')
+        for room in [n for n in self._locations if n != 'dock']:
+            if self._cancel_flag.is_set():
+                return None
+            if not self._navigate_to(room):
+                continue
+            self._set_state(State.INSPECTING)
+            time.sleep(self._inspect_settle)
+            t = self._query_object_memory(label)
+            if t:
+                return t
+        return None
+
+    def _query_object_memory(self, label: str, timeout: float = 1.5):
+        self._mem_event.clear()
+        self._mem_value = None
+        self._mem_query_pub.publish(String(data=label))
+        if not self._mem_event.wait(timeout):
+            return None
+        return memory_target(self._mem_value, now=self._now(), max_age=self._memory_max_age)
+
+    def _do_pick(self, label: str, hold: bool) -> bool:
+        self._pick_event.clear()
+        self._pick_value = None
+        self._pick_pub.publish(String(data=json.dumps({'label': label, 'hold': hold})))
+        if not self._pick_event.wait(self._pick_timeout):
+            self._speak('Ο βραχίονας άργησε να απαντήσει.')
+            return False
+        return (self._pick_value or {}).get('status') == 'ok'
+
+    def _do_place(self) -> bool:
+        self._place_event.clear()
+        self._place_value = None
+        self._place_pub.publish(String(data='{}'))
+        if not self._place_event.wait(self._place_timeout):
+            return False
+        return (self._place_value or {}).get('status') == 'ok'
+
+    def _lookup_base_pose(self):
+        """Current map-frame (x, y, yaw) of the robot, or None if TF isn't ready."""
+        try:
+            tf = self._tf_buffer.lookup_transform(
+                'map', 'base_link', rclpy.time.Time(),
+                timeout=rclpy.duration.Duration(seconds=0.5))
+        except Exception:
+            return None
+        t, q = tf.transform.translation, tf.transform.rotation
+        yaw = math.atan2(2. * (q.w * q.z + q.x * q.y),
+                         1. - 2. * (q.y * q.y + q.z * q.z))
+        return t.x, t.y, yaw
+
+    def _now(self) -> float:
+        return self.get_clock().now().nanoseconds / 1e9
+
     # ── Mission: dock ────────────────────────────────────────────────
 
     def _mission_dock(self):
@@ -276,7 +465,11 @@ class MissionExecutorNode(Node):
         if not pose_data:
             self.get_logger().warn(f'Location "{location_name}" not in locations.yaml')
             return False
+        return self._navigate_to_xy(float(pose_data.get('x', 0.)),
+                                    float(pose_data.get('y', 0.)),
+                                    float(pose_data.get('yaw', 0.)))
 
+    def _navigate_to_xy(self, x: float, y: float, yaw: float) -> bool:
         if not self._nav_ac.wait_for_server(timeout_sec=5.0):
             self.get_logger().warn('navigate_to_pose action server not available')
             return False
@@ -285,9 +478,8 @@ class MissionExecutorNode(Node):
         goal.pose = PoseStamped()
         goal.pose.header.frame_id = 'map'
         goal.pose.header.stamp = self.get_clock().now().to_msg()
-        goal.pose.pose.position.x = float(pose_data.get('x', 0.))
-        goal.pose.pose.position.y = float(pose_data.get('y', 0.))
-        yaw = float(pose_data.get('yaw', 0.))
+        goal.pose.pose.position.x = float(x)
+        goal.pose.pose.position.y = float(y)
         goal.pose.pose.orientation.z = math.sin(yaw / 2.)
         goal.pose.pose.orientation.w = math.cos(yaw / 2.)
 
