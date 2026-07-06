@@ -52,13 +52,20 @@ def _launch_setup(context, *args, **kwargs):
     use_joy = LaunchConfiguration('use_joy').perform(context).lower() in ('true', '1')
     use_apriltag = LaunchConfiguration('use_apriltag').perform(context).lower() in ('true', '1')
     use_obstacle_safety = LaunchConfiguration('use_obstacle_safety').perform(context).lower() in ('true', '1')
+    # Opt-in perception stack for navigation: YOLO detector + tracker feeding the
+    # dynamic-obstacle costmap layers (predicted/semantic) + semantic object
+    # memory. Off by default because the detector costs iGPU/CPU; when on, the
+    # full realsense (color+depth+aligned+pointcloud) from bringup replaces the
+    # lean depth-only stream we'd otherwise start below.
+    use_perception = LaunchConfiguration('use_perception').perform(context).lower() in ('true', '1')
+    perc = 'true' if use_perception else 'false'
 
     pkg = FindPackageShare('home_robot')
     actions = []
 
-    # bringup with use_camera:=false so the heavy object detector (YOLO/NPU)
-    # stays off — we only want the D435 *depth* stream for localization, which
-    # we start leanly below.
+    # bringup: with use_perception the heavy object detector (YOLO/iGPU) + the
+    # dynamic-obstacle layers come up and bringup starts the full camera; without
+    # it, use_camera:=false and we start a lean depth-only stream below.
     actions.append(IncludeLaunchDescription(
         PythonLaunchDescriptionSource([pkg, '/launch/bringup.launch.py']),
         launch_arguments={
@@ -66,7 +73,11 @@ def _launch_setup(context, *args, **kwargs):
             'localization_map':    map_yaml,
             'use_slam':            'false',   # AMCL owns map->odom; no slam_toolbox
             'use_rtabmap':         'false',
-            'use_camera':          'false',   # detector off; depth started separately
+            'use_camera':          perc,      # detector on only with perception
+            'use_tracker':         perc,      # track_id/velocity for prediction
+            'use_prediction':      perc,      # /predicted_obstacles costmap layer
+            'use_semantic_costmap': perc,     # /semantic_obstacles costmap layer
+            'use_object_memory':   perc,      # remembers where objects are (map frame)
             'use_mission':         'false',
             'use_recovery':        'false',
             'use_obstacle_safety': 'true' if use_obstacle_safety else 'false',
@@ -82,7 +93,9 @@ def _launch_setup(context, *args, **kwargs):
     # D435 depth driver only (no color/pointcloud, no detector) so the
     # global_localizer can fuse the forward depth virtual-scan with the 360°
     # LiDAR — much better global localization from a random start position.
-    if use_depth:
+    # Skipped under use_perception: bringup's full camera already covers depth
+    # (starting a second realsense would fight over the USB device).
+    if use_depth and not use_perception:
         actions.append(IncludeLaunchDescription(
             PythonLaunchDescriptionSource([
                 FindPackageShare('realsense2_camera'), '/launch/rs_launch.py'
@@ -181,5 +194,11 @@ def generate_launch_description():
             description='Relay cmd_vel -> cmd_vel_safe through velocity_smoother + '
                         'collision_monitor (needed for autonomous drive tests; teleop '
                         'still bypasses via its direct cmd_vel_safe remap)'),
+        DeclareLaunchArgument(
+            'use_perception', default_value='false',
+            description='Bring up the YOLO detector + tracker, the dynamic-obstacle '
+                        'costmap layers (predicted/semantic) and semantic object '
+                        'memory during navigation. Starts the full camera (replaces '
+                        'the lean depth-only stream); costs iGPU/CPU.'),
         OpaqueFunction(function=_launch_setup),
     ])
