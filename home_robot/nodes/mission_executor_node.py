@@ -40,11 +40,12 @@ from rclpy.node import Node
 from rclpy.action import ActionClient
 from action_msgs.msg import GoalStatus
 from ament_index_python.packages import get_package_share_directory
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Twist
 from nav2_msgs.action import NavigateToPose
 from std_msgs.msg import String
 
-from home_robot.fetch_planner import approach_pose, memory_target, nearest_detection
+from home_robot.fetch_planner import (approach_pose, memory_target,
+                                      nearest_detection, homing_twist)
 
 
 class State(Enum):
@@ -90,6 +91,12 @@ class MissionExecutorNode(Node):
         self.declare_parameter('place_timeout', 30.0)
         self.declare_parameter('fetch_max_retries', 1)       # approach+pick retries
         self.declare_parameter('inspect_settle', 2.5)        # s — let the detector stabilise
+        # Delivery: 'start_pose' returns to where the command was given; 'follow'
+        # then homes in on the user's *current* position (they may have moved).
+        self.declare_parameter('delivery_mode', 'start_pose')
+        self.declare_parameter('deliver_distance', 0.8)      # m — how close to get to the user
+        self.declare_parameter('homing_timeout', 25.0)       # s — give up homing, place anyway
+        self.declare_parameter('search_speed', 0.4)          # rad/s — rotate to find the user
         self._fetch_approach_dist = self.get_parameter('fetch_approach_dist').value
         self._fetch_grasp_range   = self.get_parameter('fetch_grasp_range').value
         self._memory_max_age      = self.get_parameter('memory_max_age').value
@@ -97,6 +104,10 @@ class MissionExecutorNode(Node):
         self._place_timeout       = self.get_parameter('place_timeout').value
         self._fetch_max_retries   = self.get_parameter('fetch_max_retries').value
         self._inspect_settle      = self.get_parameter('inspect_settle').value
+        self._delivery_mode       = self.get_parameter('delivery_mode').value
+        self._deliver_distance    = self.get_parameter('deliver_distance').value
+        self._homing_timeout      = self.get_parameter('homing_timeout').value
+        self._search_speed        = self.get_parameter('search_speed').value
 
         self._locations  = _load_locations()
         self._state      = State.IDLE
@@ -130,6 +141,10 @@ class MissionExecutorNode(Node):
         self._mem_query_pub = self.create_publisher(String, 'object_memory/query', 10)
         self._pick_pub    = self.create_publisher(String, 'pick_command', 10)
         self._place_pub   = self.create_publisher(String, 'place_command', 10)
+        # For the follow-delivery final approach (Nav2 gets us to the area; this
+        # closes the last metre onto the user). obstacle_safety relays it to
+        # cmd_vel_safe, same as person_follower.
+        self._cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
 
         self.get_logger().info('Mission executor ready — topics: mission/start, mission/status')
 
@@ -328,7 +343,9 @@ class MissionExecutorNode(Node):
             self._set_state(State.NAVIGATING)
             self._speak(f'Σου φέρνω {label}.')
             if start_pose is not None:
-                self._navigate_to_xy(*start_pose)
+                self._navigate_to_xy(*start_pose)      # Nav2 to the area
+            if self._delivery_mode == 'follow':
+                self._home_in_on_person()              # close onto the user now
 
         # 6. DELIVER — release the object
         self._do_place()
@@ -381,6 +398,33 @@ class MissionExecutorNode(Node):
         if not self._place_event.wait(self._place_timeout):
             return False
         return (self._place_value or {}).get('status') == 'ok'
+
+    def _home_in_on_person(self):
+        """Follow-delivery final approach: rotate to find the user, then drive
+        onto them until within deliver_distance. Bounded by homing_timeout;
+        always stops the base on exit. Falls through (places where it is) if the
+        user is never found — better than driving forever."""
+        self._set_state(State.INSPECTING)
+        self._speak('Σε ψάχνω για να σου το δώσω.')
+        deadline = time.monotonic() + self._homing_timeout
+        arrived = False
+        while time.monotonic() < deadline and not self._cancel_flag.is_set():
+            person = nearest_detection(self._latest_objects, 'person', max_z=5.0)
+            tw = Twist()
+            if person is None:
+                tw.angular.z = self._search_speed          # scan for the user
+            else:
+                lin, ang, arrived = homing_twist(
+                    person, deliver_distance=self._deliver_distance)
+                tw.linear.x, tw.angular.z = lin, ang
+                if arrived:
+                    self._cmd_vel_pub.publish(Twist())
+                    break
+            self._cmd_vel_pub.publish(tw)
+            time.sleep(0.2)
+        self._cmd_vel_pub.publish(Twist())                 # always stop
+        if not arrived and not self._cancel_flag.is_set():
+            self._speak('Δεν σε βρήκα, το αφήνω εδώ.')
 
     def _lookup_base_pose(self):
         """Current map-frame (x, y, yaw) of the robot, or None if TF isn't ready."""

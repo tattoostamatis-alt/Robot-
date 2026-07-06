@@ -55,6 +55,31 @@ def memory_target(answer, now, max_age):
     }
 
 
+def homing_twist(person, deliver_distance=0.8, center_tol=0.15,
+                 ang_gain=1.0, max_ang=0.5, lin_speed=0.12):
+    """Velocity to home in on a person for `follow` delivery.
+
+    `person` is a detected_objects entry (camera frame: x right, z forward, m).
+    We rotate to centre them, then drive forward until within deliver_distance.
+    Returns (linear_x, angular_z, arrived):
+      - angular_z steers to null out the bearing (person on the right → turn
+        right = negative/CW under REP-103);
+      - linear_x drives forward only once roughly centred and still too far;
+      - arrived is True when centred AND within deliver_distance → stop & place.
+    """
+    x = float(person.get('x', 0.0))
+    z = float(person.get('z', 0.0))
+    if z <= 0.05:
+        return 0.0, 0.0, False           # no usable range — hold
+    bearing = math.atan2(x, z)           # 0 = ahead, + = to the right
+    centred = abs(bearing) <= center_tol
+    close   = z <= deliver_distance
+
+    ang = 0.0 if centred else -max(-max_ang, min(max_ang, ang_gain * bearing))
+    lin = lin_speed if (centred and not close) else 0.0
+    return lin, ang, (centred and close)
+
+
 def nearest_detection(objects, label, max_z):
     """Closest same-label detection in a detected_objects list, or None.
 

@@ -9,7 +9,8 @@ node and LLM tool speak the fetch:<label> contract.
 import math
 import os
 
-from home_robot.fetch_planner import approach_pose, memory_target, nearest_detection
+from home_robot.fetch_planner import (approach_pose, memory_target,
+                                      nearest_detection, homing_twist)
 
 PKG = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NODES = f'{PKG}/home_robot/nodes'
@@ -82,6 +83,37 @@ def test_nearest_detection_filters_range_and_label():
     assert nearest_detection(objs, 'cup', max_z=3.0) is None   # too far / too near
     assert nearest_detection([], 'cup', max_z=3.0) is None
     assert nearest_detection([{'label': 'bottle', 'z': 1.0}], 'cup', max_z=3.0) is None
+
+
+# ── homing_twist (follow delivery) ─────────────────────────────────────
+
+def test_homing_turns_right_toward_person_on_the_right():
+    lin, ang, arrived = homing_twist({'x': 1.0, 'z': 2.0}, deliver_distance=0.8)
+    assert ang < 0            # person on the right → turn clockwise (negative)
+    assert lin == 0.0         # don't drive forward until centred
+    assert not arrived
+
+
+def test_homing_drives_forward_when_centred_and_far():
+    lin, ang, arrived = homing_twist({'x': 0.0, 'z': 2.0}, deliver_distance=0.8)
+    assert ang == 0.0
+    assert lin > 0.0
+    assert not arrived
+
+
+def test_homing_arrived_when_centred_and_close():
+    lin, ang, arrived = homing_twist({'x': 0.0, 'z': 0.6}, deliver_distance=0.8)
+    assert arrived
+    assert lin == 0.0 and ang == 0.0
+
+
+def test_homing_angular_is_clamped():
+    lin, ang, _ = homing_twist({'x': 100.0, 'z': 0.1}, max_ang=0.5)
+    assert abs(ang) <= 0.5
+
+
+def test_homing_no_range_holds():
+    assert homing_twist({'x': 0.5, 'z': 0.0}) == (0.0, 0.0, False)
 
 
 # ── static wiring contract ─────────────────────────────────────────────

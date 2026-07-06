@@ -661,6 +661,9 @@ def generate_launch_description():
         executable='mission_executor_node.py',
         name='mission_executor_node',
         output='screen',
+        # fetch delivery: 'start_pose' (return to where the command was given) or
+        # 'follow' (home in on the user's current position via person detections).
+        parameters=[{'delivery_mode': LaunchConfiguration('delivery_mode', default='start_pose')}],
         condition=IfCondition(use_mission),
     )
 
@@ -900,6 +903,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_wake_word', default_value='false'),
         DeclareLaunchArgument('use_stt',       default_value='false'),
         DeclareLaunchArgument('allow_barge_in', default_value='true'),
+        DeclareLaunchArgument('delivery_mode',  default_value='start_pose'),
         DeclareLaunchArgument('use_doa',            default_value='false'),
         DeclareLaunchArgument('doa_rotate_on_wake', default_value='true'),
         DeclareLaunchArgument('doa_rotate_speed',   default_value='0.6'),

@@ -57,11 +57,15 @@ RESOLVE → NAVIGATE_TO_OBJECT → VERIFY → PICK → NAVIGATE_TO_USER → DELI
    ({status: ok|error}) με timeout (~30s). Το pick_place ήδη κάνει το visual
    servoing (257798b). Σε error → **retry x1** (re-approach), μετά FAILED.
 
-5. **NAVIGATE_TO_USER** — παράδοση. Επιλογές (param `delivery_mode`):
-   - **`start_pose`** (default, v1) — στην αρχή του mission κράτα το τρέχον pose του
-     robot (TF map→base_link) ως delivery pose· γύρνα εκεί. Απλό & robust.
-   - `follow` — βρες τον χρήστη με DOA/person_follower. Καλύτερο UX, πιο εύθραυστο.
-   - `location:<room>` — σταθερό σημείο "εμένα".
+5. **NAVIGATE_TO_USER** — παράδοση. Param `delivery_mode` (ΥΛΟΠΟΙΗΜΕΝΑ):
+   - **`start_pose`** (default) — κράτα το pose του robot στην αρχή (TF map→base_link)
+     ως delivery pose· γύρνα εκεί με Nav2. Απλό & robust.
+   - **`follow`** — Nav2 στην περιοχή του start_pose, μετά **homing** στον χρήστη
+     εκεί που είναι *τώρα*: `_home_in_on_person()` περιστρέφεται να τον βρει (person
+     detections), κεντράρει & πλησιάζει μέχρι `deliver_distance`, μετά place. Timeout
+     → αφήνει εκεί που είναι. Καθαρή γεωμετρία: `homing_twist()` (unit-tested).
+     Καλύτερο UX (ο χρήστης μπορεί να μετακινήθηκε), πιο εύθραυστο (θέλει person να
+     είναι ορατός).
 
 6. **DELIVER** — άφησε το αντικείμενο (place: `pick_command` place-branch ή arm drop
    σε χαμηλό pose μπροστά) + `_speak("Ορίστε το X.")`.

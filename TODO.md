@@ -28,6 +28,9 @@ camera + detector + tracker + dynamic-obstacle layers + object memory).
       seen the object.** Verify each stage (resolve/approach/verify/pick/deliver) via mission/status
       + pick_result/place_result. RISK: arm holding an object while the base drives — check RoArm-M3
       stability, may need a "carry pose". Design: `docs/PLAN_fetch_mission.md`.
+      Delivery: default returns to where you stood (`delivery_mode:=start_pose`); try
+      `delivery_mode:=follow` to have it home in on you (person detections) — verify it
+      centres + stops at ~0.8m and doesn't chase phantoms.
 
 ## 🧪 Needs the robot live (do these together in one session)
 
