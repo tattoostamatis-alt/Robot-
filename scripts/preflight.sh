@@ -53,19 +53,28 @@ DUPES=$(echo "$NODES" | sort | uniq -d | grep -v "^/lidar_arm_filter$")
 [ -z "$DUPES" ] && ok "κανένα διπλό node" \
                 || bad "ΔΙΠΛΑ nodes (ορφανά; → RViz flicker/TF jumps): $(echo $DUPES | tr '\n' ' ')"
 # Known orphan offenders: duplicate processes → duplicate TF publishers
+# "=" catches remapped node names too, e.g. ekf_node's argv only contains
+# "ekf_filter_node" as "...--ros-args -r __node:=ekf_filter_node..." — the
+# binary itself is named ekf_node, so "[/ ]" alone never matched it.
 for pat in imu_node ekf_filter_node scan_to_scan_filter_chain; do
-    n=$(pgrep -cf "[/ ]$pat" || true)
+    n=$(pgrep -cf "[/ =]$pat" || true)
     [ "${n:-0}" -le 1 ] && ok "$pat: $n process" || bad "$pat: $n processes — σκότωσε το ορφανό"
 done
 
 echo "── Topics"
 for t in /scan /odom /map; do
-    # generous timeout — right after a daemon restart the first queries are slow
-    if timeout 15 ros2 topic info $t 2>/dev/null | grep -q "Publisher count: [1-9]"; then
-        ok "$t έχει publisher"
-    else
-        bad "$t χωρίς publisher"
-    fi
+    # retry — right after the daemon restart above, DDS discovery can take
+    # longer than any single timeout to repopulate a topic's publisher list.
+    # Capture into a variable first: piping straight into `grep -q` lets grep
+    # exit (and close the pipe) the instant it sees a match, SIGPIPE-ing
+    # `timeout`/ros2 mid-write and corrupting the pipeline's exit status.
+    found=false
+    for attempt in 1 2 3; do
+        out=$(timeout 6 ros2 topic info $t 2>/dev/null)
+        echo "$out" | grep -q "Publisher count: [1-9]" && { found=true; break; }
+        sleep 2
+    done
+    $found && ok "$t έχει publisher" || bad "$t χωρίς publisher"
 done
 if ! $QUICK; then
     hz=$(timeout 8 ros2 topic hz /scan --window 10 2>/dev/null | grep -oE 'average rate: [0-9.]+' | head -1 | grep -oE '[0-9.]+')
@@ -79,7 +88,17 @@ fi
 echo "── TF αλυσίδα"
 for pair in "map odom" "odom base_link" "base_link laser"; do
     set -- $pair
-    if timeout 5 ros2 run tf2_ros tf2_echo "$1" "$2" 2>/dev/null | grep -q "Translation"; then
+    # a fresh tf2_echo process needs a few seconds to build its buffer from
+    # /tf_static + /tf before the first lookup succeeds — retry, don't 1-shot.
+    # Captured into a variable for the same reason as the topic-info check
+    # above (direct pipe into `grep -q` races with the writer's SIGPIPE).
+    found=false
+    for attempt in 1 2 3; do
+        out=$(timeout 6 ros2 run tf2_ros tf2_echo "$1" "$2" 2>/dev/null)
+        echo "$out" | grep -q "Translation" && { found=true; break; }
+        sleep 2
+    done
+    if $found; then
         ok "TF $1 → $2"
     else
         bad "TF $1 → $2 λείπει $([ "$1" = map ] && echo '(τρέχει localize/AMCL;)')"
