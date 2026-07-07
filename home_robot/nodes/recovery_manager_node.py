@@ -30,9 +30,9 @@ import time
 from collections import deque
 from action_msgs.srv import CancelGoal
 from builtin_interfaces.msg import Duration
-from geometry_msgs.msg import Point, Twist
-from nav_msgs.msg import Odometry
-from nav2_msgs.action import BackUp, DriveOnHeading, Spin
+from geometry_msgs.msg import Point, PoseStamped, Twist
+from nav_msgs.msg import Odometry, Path
+from nav2_msgs.action import BackUp, DriveOnHeading, NavigateToPose, Spin
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from std_msgs.msg import String, Bool
@@ -62,6 +62,20 @@ class RecoveryManagerNode(Node):
         self.declare_parameter('nudge_linear_speed',  0.10)  # m/s — doorway pinch-point creep
         self.declare_parameter('nudge_angular_speed', 0.10)  # rad/s
         self.declare_parameter('nudge_duration',      1.2)   # seconds per phase (turn, then creep)
+        # After a successful escape, re-send the navigation goal that was
+        # cancelled to run the recovery. recovery_manager cancels the active
+        # NavigateToPose to nudge (owner gets CANCELED and stops), so without
+        # this the robot just sits free after each pinch — the goto never
+        # completes hands-off. We learn the goal from the last /plan endpoint
+        # (map frame, published by planner_server for every owner) and re-issue
+        # it ourselves. Capped at reissue_max consecutive re-issues *without
+        # net progress* so a truly unreachable (in-wall) goal can't loop forever;
+        # any odom advance > reissue_progress_dist between two pinches resets the
+        # count, so a multi-doorway journey re-issues as many times as it needs.
+        self.declare_parameter('reissue_after_recovery', True)
+        self.declare_parameter('reissue_max',            4)     # re-issues w/o progress before giving up
+        self.declare_parameter('reissue_progress_dist',  0.25)  # m odom advance that resets the count
+        self.declare_parameter('goal_max_age',           30.0)  # s — don't re-issue a stale plan endpoint
 
         self._stuck_timeout   = self.get_parameter('stuck_timeout').value
         self._min_disp        = self.get_parameter('min_displacement').value
@@ -76,6 +90,17 @@ class RecoveryManagerNode(Node):
         self._nudge_linear    = self.get_parameter('nudge_linear_speed').value
         self._nudge_angular   = self.get_parameter('nudge_angular_speed').value
         self._nudge_duration  = self.get_parameter('nudge_duration').value
+        self._reissue_enabled = self.get_parameter('reissue_after_recovery').value
+        self._reissue_max     = self.get_parameter('reissue_max').value
+        self._reissue_prog    = self.get_parameter('reissue_progress_dist').value
+        self._goal_max_age    = self.get_parameter('goal_max_age').value
+
+        # Last global-plan endpoint = the goal we're driving to (map frame),
+        # captured from /plan so re-issue works for any goal owner.
+        self._last_goal: PoseStamped | None = None
+        self._last_goal_rx: float | None = None
+        self._reissue_count = 0
+        self._reissue_odom: tuple | None = None   # odom (x,y) at the last re-issue
 
         # Sliding window: deque of (timestamp_sec, x, y)
         self._positions: deque = deque(maxlen=40)   # ~20s at 0.5Hz check
@@ -94,6 +119,8 @@ class RecoveryManagerNode(Node):
         # recovery didn't send the goal itself so it has no goal handle to use.
         self._nav_cancel_cli = self.create_client(
             CancelGoal, 'navigate_to_pose/_action/cancel_goal')
+        # Our own NavigateToPose client to re-issue the goal after recovery.
+        self._nav_ac = ActionClient(self, NavigateToPose, 'navigate_to_pose')
 
         # Publishers
         self._status_pub   = self.create_publisher(String, 'recovery/status',  10)
@@ -108,6 +135,8 @@ class RecoveryManagerNode(Node):
         # Teleop that remaps straight onto cmd_vel_safe bypasses this on
         # purpose: no auto-recovery fighting the joystick.
         self.create_subscription(Twist, 'cmd_vel_smoothed', self._on_cmd_vel, 10)
+        # Learn the active goal (last plan pose, map frame) so we can re-issue it.
+        self.create_subscription(Path, 'plan', self._on_plan, 10)
 
         self.create_timer(0.5, self._check_stuck)
 
@@ -136,6 +165,19 @@ class RecoveryManagerNode(Node):
             elif not active:
                 self._cmd_active = False
                 self._cmd_active_since = None
+
+    def _on_plan(self, msg: Path):
+        # The planner republishes the full path each cycle; its last pose is the
+        # current navigation goal in the map frame. Stamp it so a stale plan from
+        # a finished navigation isn't re-issued much later.
+        if not msg.poses:
+            return
+        goal = PoseStamped()
+        goal.header.frame_id = msg.header.frame_id or 'map'
+        goal.pose = msg.poses[-1].pose
+        with self._lock:
+            self._last_goal = goal
+            self._last_goal_rx = self.get_clock().now().nanoseconds / 1e9
 
     def _on_trigger(self, msg: Bool):
         if msg.data and self._status == STATUS_IDLE:
@@ -228,11 +270,59 @@ class RecoveryManagerNode(Node):
         self._publish_status(STATUS_RECOVERED)
         self._speak('Ξεκόλλησα!')
         self.get_logger().info('Recovery succeeded')
-        # Reset to IDLE after a pause
+        # Let the body settle, then resume the goal that was cancelled to run
+        # the recovery — otherwise the robot just sits free after each pinch.
         time.sleep(2.0)
+        self._maybe_reissue_goal()
         self._status = STATUS_IDLE
         self._cmd_active = False
         self._cmd_active_since = None
+
+    def _maybe_reissue_goal(self):
+        """Re-send the cancelled navigation goal (learned from /plan) so a
+        multi-doorway goto completes hands-off. Capped by consecutive re-issues
+        without net odom progress so an unreachable goal can't loop forever."""
+        if not self._reissue_enabled:
+            return
+        now = self.get_clock().now().nanoseconds / 1e9
+        with self._lock:
+            goal = self._last_goal
+            age = None if self._last_goal_rx is None else now - self._last_goal_rx
+        if goal is None or age is None or age > self._goal_max_age:
+            return  # no fresh navigation to resume (e.g. a manual trigger test)
+
+        # If the robot advanced since the last re-issue, this is a new pinch
+        # further along the route → reset the no-progress counter.
+        cur = self._positions[-1][1:3] if self._positions else None
+        if cur is not None and self._reissue_odom is not None:
+            if math.hypot(cur[0] - self._reissue_odom[0],
+                          cur[1] - self._reissue_odom[1]) > self._reissue_prog:
+                self._reissue_count = 0
+
+        if self._reissue_count >= self._reissue_max:
+            self.get_logger().warn(
+                f'Not re-issuing: {self._reissue_count} re-issues without progress '
+                f'— goal likely unreachable')
+            self._speak('Δεν μπορώ να φτάσω στον στόχο.')
+            return
+
+        if not self._nav_ac.wait_for_server(timeout_sec=2.0):
+            self.get_logger().warn('navigate_to_pose server unavailable; cannot re-issue')
+            return
+
+        ps = PoseStamped()
+        ps.header.frame_id = goal.header.frame_id or 'map'
+        ps.header.stamp = self.get_clock().now().to_msg()
+        ps.pose = goal.pose
+        nav_goal = NavigateToPose.Goal()
+        nav_goal.pose = ps
+        self._reissue_count += 1
+        self._reissue_odom = cur
+        self.get_logger().info(
+            f're-issuing navigation goal (attempt {self._reissue_count}/'
+            f'{self._reissue_max}) to ({goal.pose.position.x:.2f}, '
+            f'{goal.pose.position.y:.2f})')
+        self._nav_ac.send_goal_async(nav_goal)  # fire-and-forget; monitor re-catches re-sticks
 
     def _await_future(self, future, timeout_sec):
         """Wait for an async future from this worker thread WITHOUT spinning —
