@@ -9,11 +9,15 @@ entirely (seen live 2026-07-06, saloni→kouzina doorway — Spin commanded wz=0
 for 10s, cmd_vel_safe empty, robot frozen), so the motor-side topic carries no
 evidence that motion is being asked for. If motion is commanded but the robot
 doesn't move for `stuck_timeout` seconds it declares STUCK, cancels any active
-NavigateToPose goal, and executes:
-  1. A small direct creep+turn nudge (bypasses Nav2's Spin/BackUp, which
-     collision-check the full footprint sweep and abort in tight doorways)
-  2. Nav2 BackUp action (0.25 m reverse) — fallback if the nudge didn't work
-  3. Nav2 Spin action (90° rotation) — fallback if the nudge didn't work
+NavigateToPose goal, and runs the stock Nav2 recovery behaviors first, in the
+order that works in tight doorways (translation before rotation):
+  1. Nav2 BackUp action — collision-checked reverse; rear is usually clear
+  2. Nav2 DriveOnHeading action — collision-checked forward creep
+  3. Direct creep+turn nudge on cmd_vel_safe — LAST resort only: bypasses the
+     collision monitor, for the case where even the checked behaviors refuse
+     (e.g. footprint pinched between doorframes)
+  4. Nav2 Spin action (90° rotation) — last because its full-footprint sweep
+     check is exactly what aborts in doorways
 Up to `max_attempts` times, then declares FAILED and asks for help.
 
 Publishes: recovery/status (std_msgs/String: idle/stuck/recovering/recovered/failed)
@@ -28,7 +32,7 @@ from action_msgs.srv import CancelGoal
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import Point, Twist
 from nav_msgs.msg import Odometry
-from nav2_msgs.action import BackUp, Spin
+from nav2_msgs.action import BackUp, DriveOnHeading, Spin
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from std_msgs.msg import String, Bool
@@ -51,6 +55,8 @@ class RecoveryManagerNode(Node):
         self.declare_parameter('max_attempts',     3)
         self.declare_parameter('backup_distance',  0.25)  # meters
         self.declare_parameter('backup_speed',     0.05)  # m/s
+        self.declare_parameter('drive_distance',   0.15)  # meters — DriveOnHeading creep
+        self.declare_parameter('drive_speed',      0.05)  # m/s
         self.declare_parameter('spin_angle',       1.571) # radians (π/2 = 90°)
         self.declare_parameter('enabled',          True)
         self.declare_parameter('nudge_linear_speed',  0.10)  # m/s — doorway pinch-point creep
@@ -63,6 +69,8 @@ class RecoveryManagerNode(Node):
         self._max_attempts    = self.get_parameter('max_attempts').value
         self._backup_dist     = self.get_parameter('backup_distance').value
         self._backup_speed    = self.get_parameter('backup_speed').value
+        self._drive_dist      = self.get_parameter('drive_distance').value
+        self._drive_speed     = self.get_parameter('drive_speed').value
         self._spin_angle      = self.get_parameter('spin_angle').value
         self._enabled         = self.get_parameter('enabled').value
         self._nudge_linear    = self.get_parameter('nudge_linear_speed').value
@@ -77,9 +85,10 @@ class RecoveryManagerNode(Node):
         self._status = STATUS_IDLE
         self._lock = threading.Lock()
 
-        # Action clients
-        self._backup_ac = ActionClient(self, BackUp, 'backup')
-        self._spin_ac   = ActionClient(self, Spin,   'spin')
+        # Action clients — the stock nav2_behaviors servers
+        self._backup_ac = ActionClient(self, BackUp,         'backup')
+        self._drive_ac  = ActionClient(self, DriveOnHeading, 'drive_on_heading')
+        self._spin_ac   = ActionClient(self, Spin,           'spin')
         # Cancel any in-flight NavigateToPose via the action's cancel service.
         # An empty CancelGoal request (zero id + zero stamp) cancels all goals;
         # recovery didn't send the goal itself so it has no goal handle to use.
@@ -191,29 +200,28 @@ class RecoveryManagerNode(Node):
         # Cancel any active navigation goal
         self._cancel_navigation()
 
-        # Try the small direct nudge first — Nav2's Spin/BackUp collision-check
-        # the full footprint sweep and abort ("Collision Ahead") in doorways
-        # only slightly wider than the footprint, exactly where this stuck
-        # condition tends to fire. A short creep+turn sidesteps the corner
-        # without a full in-place sweep (proven by hand on kela3, 2026-07-06).
-        self._do_nudge()
-        if self._has_moved_recently(window=2.0, threshold=0.01):
-            self._recovered()
-            return
+        # Stock Nav2 behaviors first, translation before rotation: BackUp and
+        # DriveOnHeading collision-check only the straight-line motion, so they
+        # work in doorways where Spin's full-footprint 90° sweep check aborts
+        # ("Collision Ahead - Exiting Spin"). The raw creep+turn nudge (proven
+        # by hand on kela3, 2026-07-06) bypasses the collision monitor and is
+        # kept strictly as the step before giving up; Spin goes last.
+        steps = [
+            ('BackUp',         self._do_backup),
+            ('DriveOnHeading', self._do_drive_on_heading),
+            ('nudge',          self._do_nudge),
+            ('Spin',           self._do_spin),
+        ]
+        for name, step in steps:
+            self.get_logger().info(f'Recovery step: {name}')
+            step()
+            time.sleep(1.0)
+            if self._has_moved_recently(window=5.0, threshold=0.01):
+                self._recovered()
+                return
 
-        backed_up = self._do_backup()
-        if backed_up:
-            self._do_spin()
-
-        # Check if we can move now
-        self.get_logger().info('Recovery actions done — monitoring for 2s')
-        time.sleep(2.0)
-
-        if self._has_moved_recently(window=2.0, threshold=0.01):
-            self._recovered()
-        else:
-            self.get_logger().warn(f'Still stuck, {attempts_left - 1} attempt(s) left')
-            self._run_recovery(attempts_left - 1)
+        self.get_logger().warn(f'Still stuck, {attempts_left - 1} attempt(s) left')
+        self._run_recovery(attempts_left - 1)
 
     def _recovered(self):
         self._status = STATUS_RECOVERED
@@ -277,6 +285,24 @@ class RecoveryManagerNode(Node):
         result_future = gh.get_result_async()
         self._await_future(result_future, 15.0)
         self.get_logger().info('BackUp done')
+        return True
+
+    def _do_drive_on_heading(self) -> bool:
+        if not self._drive_ac.wait_for_server(timeout_sec=5.0):
+            self.get_logger().warn('drive_on_heading action server not available')
+            return False
+        goal = DriveOnHeading.Goal()
+        goal.target = Point(x=float(self._drive_dist), y=0.0, z=0.0)
+        goal.speed  = float(self._drive_speed)
+        goal.time_allowance = Duration(sec=int(self._drive_dist / self._drive_speed) + 5)
+        future = self._drive_ac.send_goal_async(goal)
+        gh = self._await_future(future, 10.0)
+        if gh is None or not gh.accepted:
+            self.get_logger().warn('DriveOnHeading goal rejected')
+            return False
+        result_future = gh.get_result_async()
+        self._await_future(result_future, 15.0)
+        self.get_logger().info('DriveOnHeading done')
         return True
 
     def _do_spin(self) -> bool:

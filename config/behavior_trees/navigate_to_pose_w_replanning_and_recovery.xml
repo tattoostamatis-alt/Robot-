@@ -1,0 +1,57 @@
+<!--
+  Copy of Nav2 Jazzy's stock navigate_to_pose_w_replanning_and_recovery.xml
+  (ros-navigation/navigation2, jazzy branch) with ONE change: the recovery
+  RoundRobin is reordered for tight-doorway pinch points. Stock order is
+  Clear -> Spin(1.57) -> Wait -> BackUp, but Spin collision-checks the full
+  footprint swept through 90 deg and aborts in our ~0.78m doorways (seen live
+  2026-07-06, bag 20260706_221041), burning a retry without moving. Here the
+  translational behaviors (BackUp, DriveOnHeading) run before a reduced 45 deg
+  Spin, and speeds match the Roomba's 0.05 m/s recovery creep. Everything else
+  is verbatim upstream. Wired in via SetParameter(default_nav_to_pose_bt_xml)
+  in bringup.launch.py / sim.launch.py.
+-->
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithReplanning">
+        <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
+        <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
+        <RateController hz="1.0">
+          <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
+            <Sequence>
+              <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}"/>
+              <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+            </Sequence>
+          </RecoveryNode>
+        </RateController>
+        <RecoveryNode number_of_retries="1" name="FollowPath">
+          <FollowPath path="{path}" controller_id="{selected_controller}" error_code_id="{follow_path_error_code}"/>
+          <Sequence>
+            <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
+            <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+          </Sequence>
+        </RecoveryNode>
+      </PipelineSequence>
+      <Sequence>
+        <Fallback>
+          <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
+          <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}"/>
+        </Fallback>
+        <ReactiveFallback name="RecoveryFallback">
+          <GoalUpdated/>
+          <RoundRobin name="RecoveryActions">
+            <Sequence name="ClearingActions">
+              <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+              <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+            </Sequence>
+            <BackUp backup_dist="0.15" backup_speed="0.05" error_code_id="{backup_code_id}"/>
+            <DriveOnHeading dist_to_travel="0.15" speed="0.05" time_allowance="10.0" error_code_id="{drive_on_heading_error_code}"/>
+            <Spin spin_dist="0.785" error_code_id="{spin_error_code}"/>
+            <Wait wait_duration="5.0"/>
+          </RoundRobin>
+        </ReactiveFallback>
+      </Sequence>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

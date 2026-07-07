@@ -156,6 +156,12 @@ def generate_launch_description():
     # the odom->base_link TF at activation trips the 4 s bond and aborts the chain.
     delayed_nav = TimerAction(period=12.0, actions=[GroupAction([
         SetParameter('bond_timeout', 0.0),
+        # Same doorway-friendly recovery tree as the real robot (bringup).
+        # default_nav_to_pose_bt_xml is NOT in the params file, so this
+        # SetParameter wins (unlike use_sim_time above).
+        SetParameter('default_nav_to_pose_bt_xml', os.path.join(
+            pkg, 'config', 'behavior_trees',
+            'navigate_to_pose_w_replanning_and_recovery.xml')),
         localization,
         navigation,
     ])])

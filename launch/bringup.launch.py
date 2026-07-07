@@ -469,6 +469,11 @@ def generate_launch_description():
     # nav2_params.yaml so they don't create their side of the bond.)
     nav2_node = GroupAction([
         SetParameter('bond_timeout', 0.0),
+        # Doorway-friendly recovery order (BackUp/DriveOnHeading before Spin)
+        # — stock Jazzy tree otherwise; see the XML header for rationale.
+        SetParameter('default_nav_to_pose_bt_xml', PathJoinSubstitution(
+            [pkg, 'config', 'behavior_trees',
+             'navigate_to_pose_w_replanning_and_recovery.xml'])),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource([nav2_pkg, '/launch/navigation_launch.py']),
             launch_arguments={
