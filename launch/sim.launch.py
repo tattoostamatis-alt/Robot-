@@ -164,6 +164,20 @@ def generate_launch_description():
         output='screen',
     )
 
+    # Real robot's doorway-pinch recovery (bringup.launch.py). Watches
+    # cmd_vel_smoothed vs /odom; when motion is commanded but the body doesn't
+    # move (footprint wedged in a tight doorway where Nav2's full-footprint Spin
+    # sweep aborts) it runs translation-first BackUp/DriveOnHeading + a direct
+    # creep nudge. Without it the sim only exercises bare Nav2 recovery, which
+    # thrashes at kela3's ~0.78 m doorways (e.g. exiting domatio_max).
+    recovery_manager = Node(
+        package='home_robot',
+        executable='recovery_manager_node.py',
+        name='recovery_manager_node',
+        parameters=[{'use_sim_time': True}],
+        output='screen',
+    )
+
     # Seed AMCL once it (and TF) are up — AMCL only starts after the 12 s nav delay.
     set_initial_pose = TimerAction(period=22.0, actions=[ExecuteProcess(
         cmd=['ros2', 'topic', 'pub', '-1', '/initialpose',
@@ -195,6 +209,7 @@ def generate_launch_description():
             'navigate_to_pose_w_replanning_and_recovery.xml')),
         localization,
         navigation,
+        recovery_manager,
     ])])
 
     return LaunchDescription([

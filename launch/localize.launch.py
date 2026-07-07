@@ -59,6 +59,12 @@ def _launch_setup(context, *args, **kwargs):
     # lean depth-only stream we'd otherwise start below.
     use_perception = LaunchConfiguration('use_perception').perform(context).lower() in ('true', '1')
     perc = 'true' if use_perception else 'false'
+    # Physical stuck detection + escape (BackUp/creep) before Nav2's raw
+    # Spin/BackUp recovery loop. Default ON: without it, a near-wall room goal
+    # drives the footprint into high inflation (cost ~99), the planner can no
+    # longer plan (start-in-collision) and Nav2 loops recoveries until ABORT.
+    # HW-confirmed 2026-07-07 (kela3, goto domatio tou max).
+    use_recovery = LaunchConfiguration('use_recovery').perform(context).lower() in ('true', '1')
 
     pkg = FindPackageShare('home_robot')
     actions = []
@@ -79,7 +85,7 @@ def _launch_setup(context, *args, **kwargs):
             'use_semantic_costmap': perc,     # /semantic_obstacles costmap layer
             'use_object_memory':   perc,      # remembers where objects are (map frame)
             'use_mission':         'false',
-            'use_recovery':        'false',
+            'use_recovery':        'true' if use_recovery else 'false',
             'use_obstacle_safety': 'true' if use_obstacle_safety else 'false',
             'use_rviz':            'true',
             # We start joy/teleop ourselves below (correct device-by-name +
@@ -194,6 +200,12 @@ def generate_launch_description():
             description='Relay cmd_vel -> cmd_vel_safe through velocity_smoother + '
                         'collision_monitor (needed for autonomous drive tests; teleop '
                         'still bypasses via its direct cmd_vel_safe remap)'),
+        DeclareLaunchArgument(
+            'use_recovery', default_value='true',
+            description='Run recovery_manager_node: detects the robot physically '
+                        'stuck (cmd_vel commanded but no displacement) near walls/'
+                        'doorways and does a BackUp/creep escape before Nav2 loops '
+                        'raw Spin/BackUp into an ABORT. HW-confirmed 2026-07-07.'),
         DeclareLaunchArgument(
             'use_perception', default_value='false',
             description='Bring up the YOLO detector + tracker, the dynamic-obstacle '
