@@ -2,9 +2,14 @@
 """
 recovery_manager_node.py — Physical stuck detection + Nav2 backup/spin recovery.
 
-Watches cmd_vel_safe (what actually reaches the motors) against /odom. If the
-robot receives motion commands but doesn't move for `stuck_timeout` seconds it
-declares STUCK, cancels any active NavigateToPose goal, and executes:
+Watches cmd_vel_smoothed (the commanded intent, upstream of collision_monitor)
+against /odom. It must NOT watch cmd_vel_safe: when collision_monitor zeroes a
+command it publishes zeros for stop_pub_timeout seconds and then goes silent
+entirely (seen live 2026-07-06, saloni→kouzina doorway — Spin commanded wz=0.6
+for 10s, cmd_vel_safe empty, robot frozen), so the motor-side topic carries no
+evidence that motion is being asked for. If motion is commanded but the robot
+doesn't move for `stuck_timeout` seconds it declares STUCK, cancels any active
+NavigateToPose goal, and executes:
   1. A small direct creep+turn nudge (bypasses Nav2's Spin/BackUp, which
      collision-check the full footprint sweep and abort in tight doorways)
   2. Nav2 BackUp action (0.25 m reverse) — fallback if the nudge didn't work
@@ -66,8 +71,9 @@ class RecoveryManagerNode(Node):
 
         # Sliding window: deque of (timestamp_sec, x, y)
         self._positions: deque = deque(maxlen=40)   # ~20s at 0.5Hz check
-        self._cmd_active = False   # True when cmd_vel_safe magnitude > threshold
+        self._cmd_active = False   # True when cmd_vel_smoothed magnitude > threshold
         self._cmd_active_since: float | None = None
+        self._cmd_last_rx: float | None = None  # last cmd_vel_smoothed arrival
         self._status = STATUS_IDLE
         self._lock = threading.Lock()
 
@@ -90,7 +96,9 @@ class RecoveryManagerNode(Node):
         # Manual trigger (Bool True = force a recovery attempt)
         self.create_subscription(Bool, 'recovery/trigger', self._on_trigger, 10)
         self.create_subscription(Odometry, '/odom', self._on_odom, 10)
-        self.create_subscription(Twist, 'cmd_vel_safe', self._on_cmd_vel, 10)
+        # Teleop that remaps straight onto cmd_vel_safe bypasses this on
+        # purpose: no auto-recovery fighting the joystick.
+        self.create_subscription(Twist, 'cmd_vel_smoothed', self._on_cmd_vel, 10)
 
         self.create_timer(0.5, self._check_stuck)
 
@@ -112,6 +120,7 @@ class RecoveryManagerNode(Node):
         active = mag > self._cmd_thr
         now = self.get_clock().now().nanoseconds / 1e9
         with self._lock:
+            self._cmd_last_rx = now
             if active and not self._cmd_active:
                 self._cmd_active = True
                 self._cmd_active_since = now
@@ -130,14 +139,20 @@ class RecoveryManagerNode(Node):
         if not self._enabled or self._status != STATUS_IDLE:
             return
 
+        now = self.get_clock().now().nanoseconds / 1e9
         with self._lock:
+            # If the publisher went quiet with a non-zero command as its last
+            # message (goal aborted mid-motion), don't let a stale "active"
+            # flag fire a bogus STUCK minutes later.
+            if self._cmd_last_rx is not None and now - self._cmd_last_rx > 1.0:
+                self._cmd_active = False
+                self._cmd_active_since = None
             active = self._cmd_active
             since  = self._cmd_active_since
 
         if not active or since is None:
             return
 
-        now = self.get_clock().now().nanoseconds / 1e9
         elapsed = now - since
         if elapsed < self._stuck_timeout:
             return
