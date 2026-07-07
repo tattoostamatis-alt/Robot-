@@ -27,10 +27,11 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node, SetParameter
 from launch_ros.parameter_descriptions import ParameterValue
-from nav2_common.launch import RewrittenYaml
-
 
 # Free pose with ~1 m clearance, computed from dimi.pgm (see scripts/map_to_world.py).
+# Defaults for the dimi world; override world/map/init_* together to sim another
+# apartment, e.g. kela3:
+#   sim.launch.py world:=.../kela3.world map:=.../kela3.yaml init_x:=... init_y:=...
 INIT_X, INIT_Y, INIT_YAW = 1.885, -1.045, 0.0
 
 
@@ -39,16 +40,46 @@ def generate_launch_description():
     nav2_bringup = get_package_share_directory('nav2_bringup')
     ros_gz_sim = get_package_share_directory('ros_gz_sim')
 
-    world = os.path.join(pkg, 'worlds', 'dimi.world')
+    world = LaunchConfiguration('world')
+    init_x = LaunchConfiguration('init_x')
+    init_y = LaunchConfiguration('init_y')
+    init_yaw = LaunchConfiguration('init_yaw')
     xacro_file = os.path.join(pkg, 'description', 'robot_sim.urdf.xacro')
     # nav2_params.yaml hard-codes use_sim_time:false throughout (hardware config).
     # Rewrite every occurrence to true for sim so all Nav2 nodes run on /clock —
     # a SetParameter override loses to the params file, so patch the file itself.
-    params_file = RewrittenYaml(
-        source_file=os.path.join(pkg, 'config', 'nav2_params.yaml'),
-        param_rewrites={'use_sim_time': 'true'},
-        convert_types=True,
-    )
+    # Also sim-only: disable the GLOBAL costmap's obstacle_layer. The generated
+    # world's 0.10m wall boxes protrude up to 5cm past the real map walls, so
+    # scan marks + inflation seal kela3's ~0.78m doorways below the inscribed
+    # radius and NavFn stops finding plans (verified live 2026-07-07: BFS on
+    # the live costmap showed start/goal disconnected under cost<99). The
+    # LOCAL costmap keeps its scan for reactive avoidance. RewrittenYaml can't
+    # target one node's key, so patch the file directly.
+    def _make_sim_params():
+        import tempfile
+        import yaml as _yaml
+        with open(os.path.join(pkg, 'config', 'nav2_params.yaml')) as fh:
+            data = _yaml.safe_load(fh)
+        def _walk(d):
+            for k, v in d.items():
+                if k == 'use_sim_time':
+                    d[k] = True
+                elif isinstance(v, dict):
+                    _walk(v)
+        _walk(data)
+        data['global_costmap']['global_costmap']['ros__parameters'][
+            'obstacle_layer']['enabled'] = False
+        # Same geometry error, local side: give MPPI back the ~8cm the chunky
+        # sim walls steal from kela3's borderline corridors, else FollowPath
+        # aborts at the corridor pinch that the real robot squeezes through.
+        data['local_costmap']['local_costmap']['ros__parameters'][
+            'inflation_layer']['inflation_radius'] = 0.22
+        out = tempfile.NamedTemporaryFile(
+            'w', suffix='_sim_nav2.yaml', delete=False)
+        _yaml.safe_dump(data, out)
+        out.close()
+        return out.name
+    params_file = _make_sim_params()
     map_yaml = LaunchConfiguration('map')
     use_rviz = LaunchConfiguration('use_rviz')
     headless = LaunchConfiguration('headless')
@@ -76,8 +107,8 @@ def generate_launch_description():
         package='ros_gz_sim',
         executable='create',
         arguments=['-topic', 'robot_description', '-name', 'robot_sim',
-                   '-x', str(INIT_X), '-y', str(INIT_Y), '-z', '0.05',
-                   '-Y', str(INIT_YAW)],
+                   '-x', init_x, '-y', init_y, '-z', '0.05',
+                   '-Y', init_yaw],
         output='screen',
     )
 
@@ -137,8 +168,8 @@ def generate_launch_description():
     set_initial_pose = TimerAction(period=22.0, actions=[ExecuteProcess(
         cmd=['ros2', 'topic', 'pub', '-1', '/initialpose',
              'geometry_msgs/msg/PoseWithCovarianceStamped',
-             '{header: {frame_id: map}, pose: {pose: {position: {x: %f, y: %f, z: 0.0}, '
-             'orientation: {z: 0.0, w: 1.0}}}}' % (INIT_X, INIT_Y)],
+             ['{header: {frame_id: map}, pose: {pose: {position: {x: ', init_x,
+              ', y: ', init_y, ', z: 0.0}, orientation: {z: 0.0, w: 1.0}}}}']],
         output='screen')])
 
     rviz = Node(
@@ -168,6 +199,10 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument('map', default_value=os.path.expanduser('~/robot_ws/maps/dimi.yaml')),
+        DeclareLaunchArgument('world', default_value=os.path.join(pkg, 'worlds', 'dimi.world')),
+        DeclareLaunchArgument('init_x', default_value=str(INIT_X)),
+        DeclareLaunchArgument('init_y', default_value=str(INIT_Y)),
+        DeclareLaunchArgument('init_yaw', default_value=str(INIT_YAW)),
         DeclareLaunchArgument('use_rviz', default_value='true'),
         DeclareLaunchArgument('headless', default_value='false',
                               description='run gz server only (no GUI) for display-less hosts'),
