@@ -48,8 +48,11 @@ camera + detector + tracker + dynamic-obstacle layers + object memory).
       via `ros2 service call /apriltag_relocalizer/relocalize std_srvs/srv/Empty` (one-shot per
       session, won't auto-refire just by showing the tag again); (b) RViz's own "2D Nav Goal" can
       silently preempt a CLI `goto_room.py` goal if both are sent around the same time.
-      Open question for next session: can the nudge-workaround be automated (e.g. recovery_manager_node
-      detects this specific stuck pattern and does the same small nudge itself)?
+      **DONE 2026-07-07**: `recovery_manager_node` now tries a direct creep+turn nudge on
+      `cmd_vel_safe` (bypassing Nav2's Spin/BackUp, which abort in tight doorways) BEFORE
+      falling back to Nav2's BackUp+Spin actions. Params `nudge_linear_speed`/`nudge_angular_speed`
+      (0.10/0.10)/`nudge_duration` (1.2s). Code-complete, builds + unit tests pass — **not yet
+      HW-tested at an actual doorway pinch-point**.
 - [ ] **Residual final-approach stall (~0.23 m short near walls).** Separate from the spin bug;
       caused by circumscribed 0.344 > inflation 0.30 making CostCritic over-conservative near
       walls. Likely fix: slightly larger `xy_goal_tolerance` — do NOT tighten footprint (collision

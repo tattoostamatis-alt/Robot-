@@ -5,8 +5,10 @@ recovery_manager_node.py — Physical stuck detection + Nav2 backup/spin recover
 Watches cmd_vel_safe (what actually reaches the motors) against /odom. If the
 robot receives motion commands but doesn't move for `stuck_timeout` seconds it
 declares STUCK, cancels any active NavigateToPose goal, and executes:
-  1. Nav2 BackUp action (0.25 m reverse)
-  2. Nav2 Spin action (90° rotation)
+  1. A small direct creep+turn nudge (bypasses Nav2's Spin/BackUp, which
+     collision-check the full footprint sweep and abort in tight doorways)
+  2. Nav2 BackUp action (0.25 m reverse) — fallback if the nudge didn't work
+  3. Nav2 Spin action (90° rotation) — fallback if the nudge didn't work
 Up to `max_attempts` times, then declares FAILED and asks for help.
 
 Publishes: recovery/status (std_msgs/String: idle/stuck/recovering/recovered/failed)
@@ -46,6 +48,9 @@ class RecoveryManagerNode(Node):
         self.declare_parameter('backup_speed',     0.05)  # m/s
         self.declare_parameter('spin_angle',       1.571) # radians (π/2 = 90°)
         self.declare_parameter('enabled',          True)
+        self.declare_parameter('nudge_linear_speed',  0.10)  # m/s — doorway pinch-point creep
+        self.declare_parameter('nudge_angular_speed', 0.10)  # rad/s
+        self.declare_parameter('nudge_duration',      1.2)   # seconds per phase (turn, then creep)
 
         self._stuck_timeout   = self.get_parameter('stuck_timeout').value
         self._min_disp        = self.get_parameter('min_displacement').value
@@ -55,6 +60,9 @@ class RecoveryManagerNode(Node):
         self._backup_speed    = self.get_parameter('backup_speed').value
         self._spin_angle      = self.get_parameter('spin_angle').value
         self._enabled         = self.get_parameter('enabled').value
+        self._nudge_linear    = self.get_parameter('nudge_linear_speed').value
+        self._nudge_angular   = self.get_parameter('nudge_angular_speed').value
+        self._nudge_duration  = self.get_parameter('nudge_duration').value
 
         # Sliding window: deque of (timestamp_sec, x, y)
         self._positions: deque = deque(maxlen=40)   # ~20s at 0.5Hz check
@@ -75,6 +83,9 @@ class RecoveryManagerNode(Node):
         # Publishers
         self._status_pub   = self.create_publisher(String, 'recovery/status',  10)
         self._speech_pub   = self.create_publisher(String, 'speech_response',  10)
+        # Same bypass teleop uses (project_robot_teleop_cmdvel_safe): publish
+        # straight onto cmd_vel_safe, past collision_monitor, for the nudge.
+        self._nudge_pub    = self.create_publisher(Twist,  'cmd_vel_safe',     10)
 
         # Manual trigger (Bool True = force a recovery attempt)
         self.create_subscription(Bool, 'recovery/trigger', self._on_trigger, 10)
@@ -165,6 +176,16 @@ class RecoveryManagerNode(Node):
         # Cancel any active navigation goal
         self._cancel_navigation()
 
+        # Try the small direct nudge first — Nav2's Spin/BackUp collision-check
+        # the full footprint sweep and abort ("Collision Ahead") in doorways
+        # only slightly wider than the footprint, exactly where this stuck
+        # condition tends to fire. A short creep+turn sidesteps the corner
+        # without a full in-place sweep (proven by hand on kela3, 2026-07-06).
+        self._do_nudge()
+        if self._has_moved_recently(window=2.0, threshold=0.01):
+            self._recovered()
+            return
+
         backed_up = self._do_backup()
         if backed_up:
             self._do_spin()
@@ -174,18 +195,21 @@ class RecoveryManagerNode(Node):
         time.sleep(2.0)
 
         if self._has_moved_recently(window=2.0, threshold=0.01):
-            self._status = STATUS_RECOVERED
-            self._publish_status(STATUS_RECOVERED)
-            self._speak('Ξεκόλλησα!')
-            self.get_logger().info('Recovery succeeded')
-            # Reset to IDLE after a pause
-            time.sleep(2.0)
-            self._status = STATUS_IDLE
-            self._cmd_active = False
-            self._cmd_active_since = None
+            self._recovered()
         else:
             self.get_logger().warn(f'Still stuck, {attempts_left - 1} attempt(s) left')
             self._run_recovery(attempts_left - 1)
+
+    def _recovered(self):
+        self._status = STATUS_RECOVERED
+        self._publish_status(STATUS_RECOVERED)
+        self._speak('Ξεκόλλησα!')
+        self.get_logger().info('Recovery succeeded')
+        # Reset to IDLE after a pause
+        time.sleep(2.0)
+        self._status = STATUS_IDLE
+        self._cmd_active = False
+        self._cmd_active_since = None
 
     def _await_future(self, future, timeout_sec):
         """Wait for an async future from this worker thread WITHOUT spinning —
@@ -205,6 +229,22 @@ class RecoveryManagerNode(Node):
         # Empty request → cancel all active goals on navigate_to_pose.
         future = self._nav_cancel_cli.call_async(CancelGoal.Request())
         self._await_future(future, 3.0)
+
+    def _do_nudge(self):
+        self.get_logger().info('Nudge: turn then creep')
+        self._publish_twist_for(self._nudge_duration, angular_z=self._nudge_angular)
+        self._publish_twist_for(self._nudge_duration, linear_x=self._nudge_linear)
+        self.get_logger().info('Nudge done')
+
+    def _publish_twist_for(self, seconds: float, linear_x: float = 0.0, angular_z: float = 0.0):
+        twist = Twist()
+        twist.linear.x = linear_x
+        twist.angular.z = angular_z
+        rate_hz = 10.0
+        for _ in range(int(seconds * rate_hz)):
+            self._nudge_pub.publish(twist)
+            time.sleep(1.0 / rate_hz)
+        self._nudge_pub.publish(Twist())  # stop
 
     def _do_backup(self) -> bool:
         if not self._backup_ac.wait_for_server(timeout_sec=5.0):
