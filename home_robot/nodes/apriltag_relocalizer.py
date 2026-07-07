@@ -84,6 +84,13 @@ class AprilTagRelocalizer(Node):
         self.map_frame = self.declare_parameter('map_frame', 'map').value
         self.tag_id = int(self.declare_parameter('tag_id', 0).value)
         self.auto_seed = bool(self.declare_parameter('auto_seed', True).value)
+        # How often auto_seed may re-lock while the tag stays visible. 0 = the
+        # old once-per-session behaviour (needed a manual ~/relocalize call after
+        # any divergence or a physical move). >0 = re-seed periodically, so just
+        # parking the robot in front of the tag re-syncs AMCL again and again
+        # without a service call. Throttled so it can't reset AMCL every frame.
+        self.auto_seed_interval = float(
+            self.declare_parameter('auto_seed_interval', 8.0).value)
         default_calib = os.path.expanduser('~/.ros/saloni_tag_map_pose.yaml')
         self.calib_file = self.declare_parameter('calib_file', default_calib).value
 
@@ -94,6 +101,7 @@ class AprilTagRelocalizer(Node):
         self._load_calib()
         self.seeded = False
         self.force_once = False
+        self._last_seed = 0.0   # monotonic-ish sec of the last auto/forced seed
 
         self.pub = self.create_publisher(PoseWithCovarianceStamped, '/initialpose', 10)
         self.create_subscription(AprilTagDetectionArray, '/detections',
@@ -103,6 +111,7 @@ class AprilTagRelocalizer(Node):
 
         self.get_logger().info(
             f"apriltag_relocalizer up. tag_frame={self.tag_frame} id={self.tag_id} "
+            f"auto_seed={'every %.0fs' % self.auto_seed_interval if (self.auto_seed and self.auto_seed_interval > 0) else ('once' if self.auto_seed else 'off')} "
             f"calibrated={'yes' if self.map_tag is not None else 'NO - call ~/calibrate_tag'}")
 
     def _load_calib(self):
@@ -125,10 +134,19 @@ class AprilTagRelocalizer(Node):
     def _on_detections(self, msg):
         if not self._tag_visible(msg):
             return
-        if self.force_once or (self.auto_seed and not self.seeded):
-            if self._publish_initialpose():
-                self.seeded = True
-                self.force_once = False
+        now = self.get_clock().now().nanoseconds / 1e9
+        fire = False
+        if self.force_once:
+            fire = True
+        elif self.auto_seed:
+            if self.auto_seed_interval <= 0.0:
+                fire = not self.seeded                       # once per session
+            else:
+                fire = (now - self._last_seed) >= self.auto_seed_interval
+        if fire and self._publish_initialpose():
+            self.seeded = True
+            self.force_once = False
+            self._last_seed = now
 
     def _lookup(self, target, source):
         return self.tf_buffer.lookup_transform(target, source, Time(),
