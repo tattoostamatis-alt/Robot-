@@ -1,0 +1,27 @@
+# Filter params for the vendored interbotix_perception_pipelines pointcloud_pipeline node.
+# Crop box (x/y/z_filter_*) is expressed in the CAMERA depth-optical frame:
+#   x = right (+), y = down (+), z = forward/depth (+), all metres.
+# Defaults below are a STARTING POINT for the body-mounted D435 looking forward
+# at objects on a surface ~0.3-0.75 m ahead; tune on real data (see README).
+# '/**' matches the node regardless of its name/namespace.
+/**:
+  ros__parameters:
+    # Crop box: keep only points in a box in front of the camera
+    x_filter_min: -0.25
+    x_filter_max:  0.25
+    y_filter_min: -0.25
+    y_filter_max:  0.25
+    z_filter_min:  0.25
+    z_filter_max:  0.75
+    # Voxel downsample leaf size [m]
+    voxel_leaf_size: 0.004
+    # RANSAC plane (support surface) removal
+    plane_max_iter: 50
+    plane_dist_thresh: 0.005
+    # Radius outlier removal
+    ror_radius_search: 0.01
+    ror_min_neighbors: 5
+    # Euclidean cluster extraction
+    cluster_tol: 0.02
+    cluster_min_size: 50
+    cluster_max_size: 1000
