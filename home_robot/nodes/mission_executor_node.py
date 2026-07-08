@@ -4,7 +4,14 @@ mission_executor_node.py — Multi-step mission state machine for the home robot
 
 Missions are triggered by publishing to `mission/start` (String).
 Format: "patrol" | "find:<label>" | "fetch:<label>" | "dock" | "check_rooms"
+        | "check:<room>:<question>"
 Cancel any running mission: publish "" (empty) or "cancel" to `mission/start`.
+
+`check:<room>:<question>` ("πήγαινε στην κουζίνα, δες αν είναι αναμμένο το φως,
+γύρνα και πες μου") drives to <room>, asks the VLM <question> about what the
+camera sees there (via vision_node: vision/query → vision/answer, Gemini),
+drives back to where the command was given, and speaks the answer. Needs the
+camera + vision_node + tts_node up.
 
 `fetch:<label>` ("φέρε μου το X") composes the perception + nav + arm stacks:
 resolve the object's map position from object memory (falling back to a live
@@ -125,6 +132,7 @@ class MissionExecutorNode(Node):
         self._mem_event   = threading.Event(); self._mem_value = None
         self._pick_event  = threading.Event(); self._pick_value = None
         self._place_event = threading.Event(); self._place_value = None
+        self._vision_event = threading.Event(); self._vision_value = None
 
         # Subscribers
         self.create_subscription(String, 'mission/start',     self._on_mission_start,   10)
@@ -134,11 +142,13 @@ class MissionExecutorNode(Node):
         self.create_subscription(String, 'object_memory/answer', self._on_mem_answer,   10)
         self.create_subscription(String, 'pick_result',       self._on_pick_result,     10)
         self.create_subscription(String, 'place_result',      self._on_place_result,    10)
+        self.create_subscription(String, 'vision/answer',     self._on_vision_answer,    10)
 
         # Publishers
         self._status_pub  = self.create_publisher(String, 'mission/status', 10)
         self._speech_pub  = self.create_publisher(String, 'speech_response', 10)
         self._mem_query_pub = self.create_publisher(String, 'object_memory/query', 10)
+        self._vision_query_pub = self.create_publisher(String, 'vision/query', 10)
         self._pick_pub    = self.create_publisher(String, 'pick_command', 10)
         self._place_pub   = self.create_publisher(String, 'place_command', 10)
         # For the follow-delivery final approach (Nav2 gets us to the area; this
@@ -177,6 +187,10 @@ class MissionExecutorNode(Node):
             self._place_value = None
         self._place_event.set()
 
+    def _on_vision_answer(self, msg: String):
+        self._vision_value = msg.data.strip()
+        self._vision_event.set()
+
     def _on_speech_text(self, msg: String):
         text = msg.data.lower().strip()
         if any(p in text for p in CANCEL_PHRASES) and 'αποστολ' in text:
@@ -209,6 +223,9 @@ class MissionExecutorNode(Node):
             self._mission_dock()
         elif cmd == 'check_rooms':
             self._mission_check_rooms()
+        elif cmd.startswith('check:'):
+            room, _, question = cmd[6:].strip().partition(':')
+            self._mission_check(room.strip(), question.strip() or 'τι βλέπεις;')
         else:
             self.get_logger().warn(f'Unknown mission: {cmd}')
             self._speak(f'Δεν ξέρω αποστολή "{cmd}".')
@@ -489,6 +506,64 @@ class MissionExecutorNode(Node):
             self._finish(State.CANCELLED, 'Έλεγχος ακυρώθηκε.')
         else:
             self._finish(State.DONE, 'Ολοκλήρωσα έλεγχο δωματίων.')
+
+    # ── Mission: check ("πήγαινε δες X και πες μου") ─────────────────
+
+    def _mission_check(self, room: str, question: str):
+        """Go to <room>, ask the VLM <question> about what the camera sees
+        there, drive back to where the command was given, and speak the answer.
+        Reuses vision_node (vision/query → vision/answer). Needs the camera +
+        vision_node + tts_node running."""
+        self.get_logger().info(f'Mission: check room="{room}" q="{question}"')
+        if room not in self._locations:
+            self._finish(State.FAILED,
+                         f'Δεν ξέρω πού είναι {LOCATION_NAMES_EL.get(room, room)}.')
+            return
+
+        name_el = LOCATION_NAMES_EL.get(room, room)
+        # Where the command was given (= robot's pose now) so we can report back.
+        start_pose = self._lookup_base_pose()
+
+        # 1. go to the room
+        self._set_state(State.NAVIGATING)
+        self._speak(f'Πάω {name_el} να δω.')
+        if not self._navigate_to(room):
+            self._finish(State.CANCELLED if self._cancel_flag.is_set() else State.FAILED,
+                         'Ακυρώθηκε.' if self._cancel_flag.is_set()
+                         else f'Δεν μπόρεσα να φτάσω {name_el}.')
+            return
+
+        # 2. inspect — ask the VLM about the live frame
+        self._set_state(State.INSPECTING)
+        time.sleep(self._inspect_settle)
+        answer = self._ask_vision(question) if not self._cancel_flag.is_set() else None
+        if answer is None and not self._cancel_flag.is_set():
+            answer = 'δεν μπόρεσα να δω καθαρά'
+
+        # 3. come back to the user
+        if not self._cancel_flag.is_set() and start_pose is not None:
+            self._set_state(State.NAVIGATING)
+            self._speak('Γυρίζω πίσω.')
+            self._navigate_to_xy(*start_pose)
+
+        # 4. report by speaking
+        if self._cancel_flag.is_set():
+            self._finish(State.CANCELLED, 'Η αποστολή ακυρώθηκε.')
+        else:
+            self._set_state(State.REPORTING)
+            self._finish(State.DONE, f'Πήγα {name_el}. {answer}')
+
+    def _ask_vision(self, question: str, timeout: float = 20.0):
+        """Ask vision_node a free-form question about the current camera frame.
+        Publishes on vision/query, waits (no-spin, main executor services the
+        callback) for vision/answer. Returns the answer, or None on timeout."""
+        self._vision_event.clear()
+        self._vision_value = None
+        self._vision_query_pub.publish(String(data=question))
+        if not self._vision_event.wait(timeout):
+            self.get_logger().warn('vision/answer timed out')
+            return None
+        return self._vision_value
 
     # ── Navigation ───────────────────────────────────────────────────
 
