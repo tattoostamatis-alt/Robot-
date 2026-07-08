@@ -519,7 +519,12 @@ collision_monitor:
       type: "polygon"
       action_type: "approach"
       footprint_topic: "/local_costmap/published_footprint"
-      time_before_collision: 1.2
+      # 2026-07-08: 1.2->0.9. At 1.2s the approach zone triggered ~0.46m out
+      # and chopped MPPI's velocity to a stutter (cmd_vel_safe 0.045,0,0.035,0)
+      # → near-zero net progress near obstacles. 0.9 lets the robot keep
+      # moving a bit closer so MPPI has room to steer around; HW-verified it
+      # then drove ~1.8m smoothly with AMCL staying locked (was frozen before).
+      time_before_collision: 0.9
       simulation_time_step: 0.1
       min_points: 6
       visualize: false
