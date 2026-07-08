@@ -1,0 +1,24 @@
+# Vendored external dependencies for home_robot's label-free pointcloud
+# clustering (perception_clusters.launch.py). See project_robot_pcl_clusters.
+#
+# NOTE: vcstool clones whole repositories, but the two packages we actually
+# need -- interbotix_perception_msgs and interbotix_perception_pipelines --
+# are SUBDIRECTORIES of interbotix_ros_toolboxes. Importing the whole repo
+# below drops it under src/interbotix_ros_toolboxes; every sub-package except
+# those two ships/needs Interbotix hardware deps we don't have, so build
+# selectively, e.g.:
+#
+#   vcs import src < src/home_robot/vendor.repos
+#   colcon build --packages-select interbotix_perception_msgs interbotix_perception_pipelines
+#
+# RECOMMENDED instead: scripts/fetch_vendored.sh does a sparse checkout of ONLY
+# those two packages straight into src/ (matches the copies already in tree),
+# so a plain `colcon build` stays clean. This file exists to pin provenance.
+#
+# Pinned to the humble-branch commit the packages were vendored from
+# (2026-01-14). BSD-3-Clause, Trossen Robotics.
+repositories:
+  interbotix_ros_toolboxes:
+    type: git
+    url: https://github.com/Interbotix/interbotix_ros_toolboxes.git
+    version: f52234371b9ec1cb1f5ee8241da32e6b8476fa5c
