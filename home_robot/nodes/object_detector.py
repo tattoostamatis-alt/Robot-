@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""Object detector — RealSense → YOLO11n (iGPU/ROCm) → 3D positions.
+"""Object detector — RealSense → YOLO11n-seg (iGPU/ROCm) → 3D positions + grasps.
 
 Inference runs on the AMD Radeon 860M iGPU via Ultralytics + torch-ROCm
 (device='cuda:0'), which keeps the NPU 100% free for Qwen3 and offloads the
 CPU (freeing it for the faster-whisper STT). ~93 FPS on the iGPU vs ~46 on CPU.
 fp16 is NOT used — it aborts with HSA_STATUS_ERROR_INVALID_ISA on this arch.
 Falls back to CPU automatically if the iGPU is unavailable.
+
+Uses the -seg model so each detection carries an instance mask, not just a box.
+For clutter objects the mask + aligned depth feed grasp_geometry.py, which adds
+a grasp axis (as two 3D fingertip contacts) and opening width to the published
+JSON; pick_place_node.py turns those into a wrist-roll angle and gripper opening
+instead of grasping blindly at the centroid.
 """
 
 # Must be set BEFORE torch is imported (via ultralytics) so ROCm accepts the
@@ -16,6 +22,7 @@ os.environ.setdefault('HSA_OVERRIDE_GFX_VERSION', '11.0.0')
 import json
 import threading
 
+import cv2
 import numpy as np
 
 import rclpy
@@ -25,6 +32,8 @@ from visualization_msgs.msg import MarkerArray, Marker
 from std_msgs.msg import String
 from message_filters import ApproximateTimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
+
+from home_robot.grasp_geometry import PinholeCamera, EllipsoidGraspEstimator
 
 
 COCO_NAMES = [
@@ -47,7 +56,7 @@ CLUTTER_CLASSES = {
     'tie', 'suitcase', 'umbrella', 'shoe',
 }
 
-_MODEL_PATH   = os.path.join(os.path.dirname(__file__), 'yolo11n.pt')
+_MODEL_PATH   = os.path.join(os.path.dirname(__file__), 'yolo11n-seg.pt')
 _INPUT_SIZE   = 640
 
 
@@ -59,10 +68,14 @@ class ObjectDetector(Node):
         self.declare_parameter('process_every_n', 6)
         # 'cuda:0' = Radeon 860M iGPU via ROCm; 'cpu' to force CPU fallback.
         self.declare_parameter('device',          'cuda:0')
+        # Grasp geometry: use_3d PCA is more accurate for tilted objects but
+        # scans every mask pixel; False (default) is the fast 2D ellipse fit.
+        self.declare_parameter('grasp_use_3d',    False)
 
         self.conf            = self.get_parameter('confidence').value
         self.process_every_n = self.get_parameter('process_every_n').value
         self._device_req     = self.get_parameter('device').value
+        self._grasp_use_3d   = self.get_parameter('grasp_use_3d').value
         self.bridge          = CvBridge()
         self._model          = None
         self._device         = None
@@ -108,7 +121,7 @@ class ObjectDetector(Node):
         self._model   = model
         self._device  = device
         self._backend = ('iGPU/ROCm' if device.startswith('cuda') else 'CPU')
-        self.get_logger().info(f'YOLO11n loaded on {self._backend} ({_MODEL_PATH})')
+        self.get_logger().info(f'YOLO11n-seg loaded on {self._backend} ({_MODEL_PATH})')
 
     def _detect_cb(self, color_msg: Image, depth_msg: Image, info_msg: CameraInfo):
         if self._model is None:
@@ -131,22 +144,29 @@ class ObjectDetector(Node):
         res = self._model.predict(color_img, device=self._device, imgsz=_INPUT_SIZE,
                                   conf=self.conf, half=False, verbose=False)[0]
         b = res.boxes
+        # -seg gives polygons in original-image pixel coords, index-aligned with
+        # boxes. Kept alongside each detection so we can rasterize a full-res mask
+        # for grasp geometry without a second inference pass.
+        polygons = res.masks.xy if res.masks is not None else None
         detections = []
         if b is not None and len(b):
             xyxy = b.xyxy.cpu().numpy()
             confs = b.conf.cpu().numpy()
             clss  = b.cls.cpu().numpy().astype(int)
-            for (x1, y1, x2, y2), cf, cl in zip(xyxy, confs, clss):
+            for j, ((x1, y1, x2, y2), cf, cl) in enumerate(zip(xyxy, confs, clss)):
+                poly = polygons[j] if polygons is not None and j < len(polygons) else None
                 detections.append((
                     int(max(0, min(x1, img_w - 1))), int(max(0, min(y1, img_h - 1))),
                     int(max(0, min(x2, img_w - 1))), int(max(0, min(y2, img_h - 1))),
-                    float(cf), int(cl),
+                    float(cf), int(cl), poly,
                 ))
 
         detected = []
         markers  = MarkerArray()
+        cam       = PinholeCamera(self._fx, self._fy, self._cx, self._cy)
+        estimator = EllipsoidGraspEstimator(cam, use_3d=self._grasp_use_3d)
 
-        for i, (x1, y1, x2, y2, conf, cls_id) in enumerate(detections):
+        for i, (x1, y1, x2, y2, conf, cls_id, poly) in enumerate(detections):
             label = COCO_NAMES[cls_id] if cls_id < len(COCO_NAMES) else str(cls_id)
 
             bx = (x1 + x2) // 2
@@ -172,6 +192,19 @@ class ObjectDetector(Node):
                 'img_w': img_w, 'img_h': img_h,
                 'box_distance': round(box_distance, 3) if box_distance is not None else None,
             }
+
+            # Grasp geometry for graspable clutter: the -seg mask + depth give a
+            # grasp axis (two 3D contacts) and opening width, in the camera
+            # optical frame. pick_place_node.py transforms these into arm_base.
+            if obj['clutter'] and poly is not None:
+                grasp = self._estimate_grasp(
+                    estimator, poly, depth_img, img_h, img_w,
+                    np.array([px, py, pz], dtype=np.float64))
+                if grasp is not None:
+                    obj['grasp_width'] = round(float(grasp.grasp_width), 3)
+                    obj['grasp_contact_a'] = [round(float(v), 3) for v in grasp.left_contact_3d]
+                    obj['grasp_contact_b'] = [round(float(v), 3) for v in grasp.right_contact_3d]
+
             detected.append(obj)
 
             m = Marker()
@@ -192,6 +225,21 @@ class ObjectDetector(Node):
 
         self.objects_pub.publish(String(data=json.dumps(detected)))
         self.markers_pub.publish(markers)
+
+    def _estimate_grasp(self, estimator, poly, depth_img, img_h, img_w, center_3d):
+        """Rasterize the -seg polygon to a full-res mask and estimate a grasp.
+        Never raises — a geometry failure just means no grasp field, not a
+        dropped detection."""
+        try:
+            pts = np.asarray(poly, dtype=np.int32).reshape(-1, 1, 2)
+            if len(pts) < 3:
+                return None
+            mask = np.zeros((img_h, img_w), dtype=np.uint8)
+            cv2.fillPoly(mask, [pts], 1)
+            return estimator.estimate(mask, depth_img, center_3d)
+        except Exception as e:            # noqa: BLE001 — geometry is best-effort
+            self.get_logger().debug(f'grasp estimate failed: {e}')
+            return None
 
     @staticmethod
     def _box_distance(depth_m_img, x1, y1, x2, y2, width, height):

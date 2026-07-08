@@ -38,6 +38,17 @@ systematic base_link->arm_base calibration bias (the camera can't see the
 gripper) — calibrate tf_base_arm for that. If detections stop mid-servo the
 loop keeps the last good estimate and proceeds (graceful open-loop fallback).
 
+Grasp orientation (param `grasp_orient_enabled`):
+When object_detector.py runs the -seg model it attaches a grasp axis to each
+clutter detection as two 3D fingertip contacts (grasp_contact_a/b, in the
+camera frame) plus a grasp_width. We transform both contacts into arm_base via
+the same tf2 path as the centroid, take the direction between them, and set the
+wrist roll so the gripper closes ACROSS the object's short axis instead of at a
+fixed orientation. `grasp_roll_sign`/`grasp_roll_offset` calibrate the gripper's
+zero-roll convention; leave orientation off until roll is verified by hand on
+the RoArm-M3 (T:104 'r' semantics are among arm_driver.py's documented unknowns).
+grasp_width is published for future gripper pre-shaping but not yet commanded.
+
 arm_driver.py exposes no "motion complete" feedback (T:105 reports
 joint/EE pose, not a busy flag), so each step waits a fixed settle time
 instead of polling for arrival — generous by design until real timing is
@@ -81,6 +92,12 @@ class PickPlaceNode(Node):
         self.declare_parameter('servo_max_iters', 4)       # correction moves before giving up
         self.declare_parameter('servo_settle_time', 0.8)   # s — shorter than a full move; just a nudge
         self.declare_parameter('servo_relock_radius', 0.15)  # m — max jump to still count as the same object
+        # Grasp orientation (align wrist roll to the object's short axis). Off by
+        # default: T:104 'r' semantics and the gripper's zero-roll convention are
+        # unverified on the RoArm-M3 — enable only after checking roll by hand.
+        self.declare_parameter('grasp_orient_enabled', False)
+        self.declare_parameter('grasp_roll_sign', 1.0)     # flip if roll turns the wrong way
+        self.declare_parameter('grasp_roll_offset', 0.0)   # rad — gripper zero-roll correction
 
         self.approach_height = self.get_parameter('approach_height').value
         self.grasp_z_offset = self.get_parameter('grasp_z_offset').value
@@ -97,6 +114,9 @@ class PickPlaceNode(Node):
         self.servo_max_iters = self.get_parameter('servo_max_iters').value
         self.servo_settle_time = self.get_parameter('servo_settle_time').value
         self.servo_relock_radius = self.get_parameter('servo_relock_radius').value
+        self.grasp_orient_enabled = self.get_parameter('grasp_orient_enabled').value
+        self.grasp_roll_sign = self.get_parameter('grasp_roll_sign').value
+        self.grasp_roll_offset = self.get_parameter('grasp_roll_offset').value
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -202,9 +222,16 @@ class PickPlaceNode(Node):
         if self.servo_enabled:
             ax, ay, az = self._servo(target['label'], ax, ay, az, hover_z)
 
-        self._cartesian(ax, ay, az)
+        # Align the wrist to the object's short axis (grasp geometry from -seg).
+        roll = self._grasp_roll(target)
+        if roll is not None:
+            self.get_logger().info(f'Grasp roll aligned to object axis: {math.degrees(roll):.0f}°')
+            self._cartesian(ax, ay, hover_z, roll=roll)  # re-orient before descending
+        r = roll or 0.0
+
+        self._cartesian(ax, ay, az, roll=r)
         self._gripper(self.gripper_closed)
-        self._cartesian(ax, ay, hover_z)   # lift, object grasped
+        self._cartesian(ax, ay, hover_z, roll=r)   # lift, object grasped
 
         if hold:
             # Keep it in the gripper for transport (fetch). A later place_command
@@ -245,6 +272,31 @@ class PickPlaceNode(Node):
             self._cartesian(ax, ay, hover_z, settle=self.servo_settle_time)
         return ax, ay, az
 
+    def _grasp_roll(self, target):
+        """Wrist-roll angle (rad) that aligns the gripper opening across the
+        object's short axis, from object_detector.py's grasp contacts. Both
+        contacts go through the same camera->arm_base tf2 path as the centroid,
+        so the roll is computed in the arm frame. None if orientation is
+        disabled, the detection has no grasp axis, or TF drops out."""
+        if not self.grasp_orient_enabled:
+            return None
+        ca, cb = target.get('grasp_contact_a'), target.get('grasp_contact_b')
+        if not ca or not cb:
+            return None
+        pa = self._transform_to_arm_frame(*ca)
+        pb = self._transform_to_arm_frame(*cb)
+        if pa is None or pb is None:
+            return None
+        yaw = math.atan2(pb[1] - pa[1], pb[0] - pa[0])
+        roll = self.grasp_roll_sign * yaw + self.grasp_roll_offset
+        # Wrap to [-pi/2, pi/2]: a parallel-jaw grasp axis is symmetric, so a
+        # 180deg flip is the same grasp — keep the wrist move small.
+        while roll > math.pi / 2:
+            roll -= math.pi
+        while roll < -math.pi / 2:
+            roll += math.pi
+        return roll
+
     def _relock(self, label, ref_ax, ref_ay):
         """Among the latest detections of `label`, return the arm-frame (x,y,z)
         of the one nearest the current estimate (so we track the *same* object,
@@ -276,8 +328,8 @@ class PickPlaceNode(Node):
         out = do_transform_point(point, transform)
         return out.point.x, out.point.y, out.point.z
 
-    def _cartesian(self, x, y, z, settle=None):
-        self._raw({'T': 104, 'x': x, 'y': y, 'z': z, 't': 0, 'r': 0, 'spd': self.arm_speed})
+    def _cartesian(self, x, y, z, settle=None, roll=0.0):
+        self._raw({'T': 104, 'x': x, 'y': y, 'z': z, 't': 0, 'r': roll, 'spd': self.arm_speed})
         time.sleep(self.movement_settle_time if settle is None else settle)
 
     def _gripper(self, pos):

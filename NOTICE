@@ -1,0 +1,17 @@
+home_robot — third-party attributions
+======================================
+
+home_robot/grasp_geometry.py
+  Grasp-axis / grasp-width estimation math (mask PCA, ellipse fit, and the
+  depth-profile edge trace) ported and adapted from:
+
+      stretch4_grasping_demo (grasp_estimators.py)
+      Copyright 2026 Hello Robot Inc.
+      Licensed under the Apache License, Version 2.0.
+      https://github.com/hello-robot/stretch4_grasping_demo
+
+  Adaptations: depth taken in metres (Stretch's per-pixel /1000 removed to
+  match our RealSense pipeline), and Stretch's gripper_camera dependency
+  replaced by a self-contained PinholeCamera. The finite-state visual-servoing
+  controller, VLM (Molmo 2) and SAM 2 tracking from the original repository are
+  NOT used — only the geometric grasp estimators were ported.

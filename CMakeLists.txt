@@ -55,6 +55,7 @@ install(PROGRAMS
 
 install(FILES
   home_robot/nodes/yolo11n.pt
+  home_robot/nodes/yolo11n-seg.pt
   home_robot/nodes/yolo11n-pose.pt
   home_robot/nodes/yolo11n_int8.onnx
   home_robot/nodes/yolo11n_pose_int8.onnx
