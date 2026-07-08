@@ -90,6 +90,41 @@ ros2 launch home_robot localize.launch.py map:=kela3 \
   use_obstacle_safety:=true use_perception:=true use_arm:=true   # use_arm only for pick
 ```
 
+## Label-free object clustering (`perception_clusters`)
+
+Geometric object detection adapted from the **Interbotix LoCoBot** stack — the
+label-free complement to `pick_place_node.py` (which needs a YOLO label). A PCL
+pipeline on the D435 cloud (CropBox → Voxel → RANSAC plane removal → Euclidean
+clustering) reports the centroid of *any* object sitting on a support surface.
+
+The heavy lifting is in two **vendored** packages (BSD-3-Clause, Trossen) that
+live in `src/` *outside* this repo — like `roarm_*` and `m-explore-ros2`. On a
+fresh machine, fetch them first, then build:
+
+```bash
+cd ~/robot_ws
+./src/home_robot/scripts/fetch_vendored.sh   # sparse-checks-out the 2 pkgs into src/
+colcon build --packages-select interbotix_perception_msgs interbotix_perception_pipelines home_robot
+source install/setup.bash
+```
+
+`vendor.repos` pins the exact upstream commit (see the script/file headers).
+
+Run it (needs the D435 pointcloud up — `bringup` with `pointcloud.enable:=true`
+— and the `base_link → arm_base` TF):
+
+```bash
+ros2 launch home_robot perception_clusters.launch.py                    # on-demand: PCL runs per service call
+ros2 launch home_robot perception_clusters.launch.py enable_pipeline:=true  # continuous, for RViz tuning
+```
+
+- `~/clusters` (JSON) and `~/cluster_markers` (RViz MarkerArray) report the
+  objects in `arm_base`; the launch **picks/moves nothing**, it's verification.
+- Tune the crop box in [`config/pcl_filter_params.yaml`](config/pcl_filter_params.yaml)
+  to the RoArm-M3 reach (box is in the camera depth-optical frame: x=right,
+  y=down, z=forward). `enable_pipeline:=true` + RViz makes tuning live.
+- **Status: HW-untested** on real D435 data — smoke-tested wiring only.
+
 ## Tests
 
 Robot-free unit + wiring tests (no ROS graph needed):
