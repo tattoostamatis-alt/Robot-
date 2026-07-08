@@ -145,6 +145,13 @@ def _launch_setup(context, *args, **kwargs):
             parameters=[PathJoinSubstitution([pkg, 'config', 'teleop_twist_joy_ps5.yaml'])],
             remappings=[('cmd_vel', 'cmd_vel_safe')],
         ))
+        # Sticky soft e-stop: Circle latches the robot stopped (roomba_driver
+        # zeros the wheels + ignores cmd_vel), Share+Options together resets.
+        actions.append(Node(
+            package='home_robot',
+            executable='joystick_estop_node.py',
+            name='joystick_estop',
+        ))
 
     # AprilTag reference-tag relocalization: detect the single saloni tag off the
     # D435 color stream (publishes TF camera_color_optical_frame -> saloni_tag),

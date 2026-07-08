@@ -883,6 +883,15 @@ def generate_launch_description():
         output='screen',
         condition=IfCondition(use_joy),
     )
+    # Sticky soft e-stop: Circle latches the robot stopped (roomba_driver zeros
+    # the wheels + ignores cmd_vel), Share+Options together resets.
+    joystick_estop_node = Node(
+        package='home_robot',
+        executable='joystick_estop_node.py',
+        name='joystick_estop',
+        output='screen',
+        condition=IfCondition(use_joy),
+    )
 
     # ── RViz2 ─────────────────────────────────────────────────────
     rviz_node = Node(
@@ -1002,5 +1011,6 @@ def generate_launch_description():
         goal_pose_bridge_node,
         joy_node,
         teleop_twist_joy_node,
+        joystick_estop_node,
         rviz_node,
     ])

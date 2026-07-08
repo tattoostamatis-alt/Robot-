@@ -17,6 +17,7 @@ install(PROGRAMS
   home_robot/nodes/pick_place_node.py
   home_robot/nodes/cluster_detector_node.py
   home_robot/nodes/system_metrics_node.py
+  home_robot/nodes/joystick_estop_node.py
   home_robot/nodes/wake_word_node.py
   home_robot/nodes/stt_node.py
   home_robot/nodes/llm_bridge_node.py

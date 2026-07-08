@@ -3,6 +3,7 @@
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSHistoryPolicy
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import BatteryState
@@ -227,6 +228,7 @@ class RoombaDriver(Node):
 
         self._idle = False
         self._stopped = True
+        self._estop = False
         self._last_cmd_time = time.monotonic()
         self._target_left = 0.0
         self._target_right = 0.0
@@ -236,6 +238,17 @@ class RoombaDriver(Node):
 
         self.cmd_sub = self.create_subscription(Twist, 'cmd_vel', self._cmd_vel_cb, 10)
         self.dock_sub = self.create_subscription(Bool, 'dock', self._dock_cb, 10)
+        # Soft e-stop (joystick_estop_node): latched so we pick up the current
+        # state even if that node published before this driver subscribed. When
+        # engaged the wheels are forced to zero regardless of any cmd_vel_safe
+        # source (teleop bypasses obstacle_safety straight to cmd_vel_safe, so
+        # this driver is the only place a stop can be guaranteed).
+        estop_qos = QoSProfile(
+            depth=1,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
+        self.estop_sub = self.create_subscription(
+            Bool, 'emergency_stop', self._estop_cb, estop_qos)
         self.odom_pub = self.create_publisher(Odometry, 'odom', 10)
         self.battery_pub = self.create_publisher(BatteryState, 'battery/state', 10)
         self.charge_ratio_pub = self.create_publisher(Float32, 'battery/charge_ratio', 10)
@@ -266,7 +279,28 @@ class RoombaDriver(Node):
                 self.reverse_speed_scale = p.value
         return SetParametersResult(successful=True)
 
+    def _estop_cb(self, msg: Bool):
+        if msg.data == self._estop:
+            return
+        self._estop = msg.data
+        if self._estop:
+            # hard stop immediately — no ramp, this is an emergency
+            self._target_left = self._target_right = 0.0
+            self._cur_left = self._cur_right = 0.0
+            try:
+                self.bot.drive_direct(0, 0)
+            except Exception as e:  # never let a serial hiccup swallow the e-stop
+                self.get_logger().error(f'e-stop drive_direct(0,0) failed: {e!r}')
+            self._stopped = True
+            self.get_logger().warn('EMERGENCY STOP engaged — ignoring cmd_vel until reset')
+        else:
+            # release: drop any stale target so we don't lurch on the next cmd
+            self._target_left = self._target_right = 0.0
+            self.get_logger().info('Emergency stop released — motion re-enabled')
+
     def _cmd_vel_cb(self, msg: Twist):
+        if self._estop:
+            return  # commands are ignored while e-stopped
         self._last_cmd_time = time.monotonic()
         self._stopped = False
         if self._idle:
@@ -300,6 +334,12 @@ class RoombaDriver(Node):
         now = time.monotonic()
         dt = now - self._last_control_time
         self._last_control_time = now
+
+        if self._estop:
+            # keep the wheels pinned at zero for as long as the e-stop is held
+            self._cur_left = self._cur_right = 0.0
+            self.bot.drive_direct(0, 0)
+            return
 
         target_left, target_right = self._target_left, self._target_right
         if not self._idle and (now - self._last_cmd_time) > 0.25:
