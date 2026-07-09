@@ -23,7 +23,6 @@ the published cloud so Nav2 inflates cost ahead of the object's path.
 """
 
 import json
-import math
 import struct
 import threading
 
@@ -36,6 +35,10 @@ from std_msgs.msg import String
 import tf2_ros
 from geometry_msgs.msg import PointStamped
 import tf2_geometry_msgs   # noqa: F401 — registers transform methods
+
+from home_robot.obstacle_prediction import (
+    camera_velocity_mps, should_predict, project_track, clamp_dt,
+)
 
 
 def _make_pc2(points_xyz: list, frame_id: str, stamp) -> PointCloud2:
@@ -67,16 +70,24 @@ class ObstaclePredictionNode(Node):
         self.declare_parameter('min_speed',   0.15)  # m/s — below this, don't predict
         self.declare_parameter('horizon',     2.0)   # seconds ahead
         self.declare_parameter('steps',       5)     # number of predicted positions per object
+        self.declare_parameter('min_track_hits', 3)  # frames before a track's velocity is trusted
         self.declare_parameter('target_frame', 'base_link')
 
         self._min_speed    = self.get_parameter('min_speed').value
         self._horizon      = self.get_parameter('horizon').value
         self._steps        = self.get_parameter('steps').value
+        self._min_hits     = self.get_parameter('min_track_hits').value
         self._target_frame = self.get_parameter('target_frame').value
 
         # Camera intrinsics (populated from /camera_info)
         self._fx = self._fy = self._cx = self._cy = None
         self._cam_lock = threading.Lock()
+
+        # Detection-cycle timing: the tracker reports velocity per *cycle*, so we
+        # measure the wall-clock interval between tracked_objects messages (EMA-
+        # smoothed) to turn that into m/s. Seeded at 10 Hz until the first gap.
+        self._last_msg_t = None
+        self._dt = 0.1
 
         self._tf_buffer   = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
@@ -110,6 +121,13 @@ class ObstaclePredictionNode(Node):
         if fx is None:
             return  # haven't received camera_info yet
 
+        # ── Update the detection-cycle dt from the message interval ──────────
+        now_s = self.get_clock().now().nanoseconds / 1e9
+        if self._last_msg_t is not None:
+            raw_dt = clamp_dt(now_s - self._last_msg_t)
+            self._dt = 0.7 * self._dt + 0.3 * raw_dt   # EMA smooth
+        self._last_msg_t = now_s
+
         stamp = self.get_clock().now().to_msg()
         predicted_points: list[tuple] = []
 
@@ -122,25 +140,19 @@ class ObstaclePredictionNode(Node):
             if z_cam <= 0.1:
                 continue
 
-            # Convert pixel velocity → camera-frame 3D velocity (m/frame)
-            # Tracker gives pixels/detection-cycle; we treat it as relative motion.
-            vel_px = t.get('vel_x', 0.)
-            vel_py = t.get('vel_y', 0.)
-            vx_cam = vel_px * z_cam / fx   # m per detection cycle
-            vy_cam = vel_py * z_cam / fy
+            # Pixel velocity (px/cycle) → metric velocity (m/s) at this depth,
+            # using the measured cycle dt — so horizon/min_speed are real seconds
+            # and m/s, not tied to the detector's (variable) frame rate.
+            vx_ms, vy_ms = camera_velocity_mps(
+                t.get('vel_x', 0.), t.get('vel_y', 0.), z_cam, fx, fy, self._dt)
 
-            speed = math.sqrt(vx_cam**2 + vy_cam**2)
-            if speed < self._min_speed * 0.1:
-                # Too slow to be worth predicting (skip)
+            if not should_predict(vx_ms, vy_ms, t.get('track_hits', 0),
+                                  self._min_speed, self._min_hits):
                 continue
 
             # Project N future positions (constant-velocity, constant depth approx)
-            for step in range(1, self._steps + 1):
-                t_frac = step / self._steps
-                xp = x_cam + vx_cam * self._horizon * t_frac
-                yp = y_cam + vy_cam * self._horizon * t_frac
-                zp = z_cam  # assume constant depth for simplicity
-
+            for xp, yp, zp in project_track(x_cam, y_cam, z_cam, vx_ms, vy_ms,
+                                            self._horizon, self._steps):
                 # Transform from camera_color_optical_frame to target_frame
                 pt_in = PointStamped()
                 pt_in.header.frame_id = 'camera_color_optical_frame'
