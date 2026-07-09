@@ -96,11 +96,15 @@ controller_server:
       # stalls ~0.23 m short (circumscribed 0.344 > inflation 0.30, CostCritic
       # gets conservative), so the old 0.10 xy tol was NEVER satisfied → endless
       # final-align spin → that prolonged in-place rotation is what made AMCL
-      # yaw diverge 145° and lose the map. 0.25 covers the residual stall; the
-      # loose yaw (0.6 rad ~34°) stops the robot hunting an exact heading in
-      # place. Do NOT fix this by touching footprint/inflation (both correct for
-      # kela3 doorways). See memory project_robot_nav_path_wall_bug.
-      xy_goal_tolerance: 0.25
+      # yaw diverge 145° and lose the map. The loose yaw (0.6 rad ~34°) stops the
+      # robot hunting an exact heading in place. Do NOT fix this by touching
+      # footprint/inflation (both correct for kela3 doorways).
+      # 0.25→0.30 2026-07-09: 0.25 gave only ~2cm margin over the ~0.23m stall,
+      # and 0.23 is an estimate — near some walls the stall exceeded 0.25 and the
+      # goal was never reached. 0.30 gives comfortable margin; fine for room-level
+      # goto_room (taught points sit near walls), and precise picking uses its own
+      # visual-servoing goal, not this checker. See project_robot_nav_path_wall_bug.
+      xy_goal_tolerance: 0.30
       yaw_goal_tolerance: 0.60
     # MPPI (Model Predictive Path Integral) — switched from
     # RegulatedPurePursuitController 2026-06-30. RPP only *follows* the global

@@ -11,17 +11,43 @@ camera + detector + tracker + dynamic-obstacle layers + object memory).
       objects are in the map frame; feeds RAG recall ("πού είναι το X;"). Verify: drive
       around, `ros2 topic echo /object_memory`, check RViz `object_memory_markers` land on
       real objects, then ask Max via voice. Tune `merge_distance`/`min_conf` if noisy.
+      **2026-07-09 hardened (desk, SORT-style):** added `confirm_count` (default 3) —
+      an instance is *tentative* until seen 3× and is hidden from RAG push + "where is X?"
+      answers, so a single false-positive detection no longer pollutes memory forever;
+      EMA is now confidence-weighted so a marginal sighting pulls position less. RViz
+      shows tentative instances faint with a "?". Unit-tested (14/14). HW-verify the
+      confirm threshold isn't so high it drops real objects.
 - [ ] **Dynamic obstacle layer** (was already built; e788e32 made it reachable in nav).
       Verify: with `use_perception:=true`, a person walking into the path inflates the local
       costmap (`/predicted_obstacles` + `/semantic_obstacles`) and Nav2 detours. Tune
       `person_radius` / prediction `horizon`.
+      **2026-07-09 fixed (desk):** the prediction had a dimensional bug — tracker velocity
+      is px/*cycle* but the code projected it as if 1 cycle = 1 s (and gated with a magic
+      `min_speed*0.1`), so horizon/min_speed meant nothing and the forecast scaled with the
+      detector frame rate. Now measures the real message dt, converts px/cycle→m/s, and
+      requires `min_track_hits` (3) before trusting a SORT velocity. Extracted to
+      `home_robot/obstacle_prediction.py`, unit-tested (9/9). NOTE still open: velocity is
+      in camera frame so robot ego-motion isn't compensated — verify predictions while the
+      base is moving, may need to gate on robot stationary or subtract odom twist.
 - [ ] **Pick-place visual servoing** (257798b). Closed-loop XY refine before grasp. Needs
       `use_arm:=true`. FIRST calibrate `tf_base_arm` (servo can't fix a calibration bias).
       Verify slowly/by hand: watch the "Servo nudge/converged" logs, confirm it settles over
       the object before descending. Tune `servo_tolerance` / `servo_max_iters`.
+      **2026-07-09 hardened (desk):** the eye-to-hand "servo" is really multi-frame target
+      settling; it used to grasp at the *last* relock frame, so one noisy RealSense depth
+      → descend into the table / grasp air. Now collects the relock estimates and grasps at
+      their component-wise **median** (rejects a lone outlier frame), with convergence judged
+      by the spread of recent frames. Extracted to `home_robot/servo_filter.py`, unit-tested
+      (7/7). Still needs the tf_base_arm calibration + HW grasp test.
 - [ ] **Voice barge-in** (c24dd1c). Say "Ρομπότ Μαξ" while Max is talking → he stops and
       listens. `allow_barge_in` defaults true (XVF3800 ch4 AEC). Verify he doesn't interrupt
       *himself* (self-echo); if he does, the AEC beam isn't clean → set false or raise threshold.
+      **2026-07-09 hardened (desk):** added a stricter `barge_in_threshold` (0.70 vs wake 0.50)
+      — a barge-in is only accepted while actively speaking if the score clears the higher bar,
+      since self-echo false positives are brief marginal spikes while a real "Ρομπότ Μαξ" scores
+      high/sustained. The whole decision is now a pure `wake_decision()` in voice_gate.py,
+      unit-tested (reverb tail never barges, disabled→suppress, etc.). If it still self-echoes on
+      HW, raise `barge_in_threshold` toward 0.8–0.9 before disabling barge-in.
 - [ ] **Fetch mission ("φέρε μου το X").** `fetch:<label>` in mission_executor composes object
       memory → nav → pick(hold) → carry → place; LLM `fetch` tool. Needs `use_perception` +
       `use_arm` + `use_mission` + nav. **Prereqs: calibrate tf_base_arm; object memory must have
@@ -31,6 +57,11 @@ camera + detector + tracker + dynamic-obstacle layers + object memory).
       Delivery: default returns to where you stood (`delivery_mode:=start_pose`); try
       `delivery_mode:=follow` to have it home in on you (person detections) — verify it
       centres + stops at ~0.8m and doesn't chase phantoms.
+      **2026-07-09 hardened (desk):** follow-delivery `homing_twist` is now a proportional
+      follower — forward speed scales with remaining distance (capped) so it eases to a gentle
+      stop at the user instead of driving full-speed then slamming to zero (safer approach to a
+      person). Unit-tested (17/17). Still HW-untested end-to-end; carry-pose arm stability + the
+      full resolve→approach→pick→carry→place chain remain the live-test items.
 
 ## 🧪 Needs the robot live (do these together in one session)
 
@@ -57,6 +88,9 @@ camera + detector + tracker + dynamic-obstacle layers + object memory).
       caused by circumscribed 0.344 > inflation 0.30 making CostCritic over-conservative near
       walls. Likely fix: slightly larger `xy_goal_tolerance` — do NOT tighten footprint (collision
       risk) or raise inflation (starts sealing the ~0.78 m doorways). Confirm on HW.
+      **2026-07-09: bumped `xy_goal_tolerance` 0.25→0.30** (0.25 gave only ~2 cm margin over the
+      ~0.23 m stall). Code change only — **still needs HW confirm** that goals near walls now
+      complete without the endless final-align spin.
 - [ ] **MPPI controller — live validation.** RPP→MPPI swap (commit chain, `project_robot_mppi_controller`)
       untested on hardware beyond the spin fix.
 - [ ] **Orchestration end-to-end.** task_planner → mission_executor → recovery async bugs fixed
