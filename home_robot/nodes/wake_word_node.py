@@ -69,7 +69,10 @@ from std_msgs.msg import Bool, String, Int16MultiArray
 import sounddevice as sd
 from ament_index_python.packages import get_package_share_directory
 
-from home_robot.voice_gate import SpeakingGate, TOPIC as SPEAKING_TOPIC, STOP_TOPIC
+from home_robot.voice_gate import (
+    SpeakingGate, TOPIC as SPEAKING_TOPIC, STOP_TOPIC,
+    wake_decision, IGNORE, SUPPRESS, BARGE_IN, WAKE,
+)
 
 
 def _find_device_by_name(name: str) -> int | None:
@@ -127,6 +130,10 @@ class WakeWordNode(Node):
         # leave False on a plain mic without echo cancellation, or it will
         # interrupt itself. The reverb *tail* after speech is always suppressed.
         self.declare_parameter('allow_barge_in', False)
+        # Stricter threshold to accept a wake as a real barge-in (vs the robot's
+        # own voice leaking through imperfect AEC). Higher than `threshold` so a
+        # marginal self-echo spike can't interrupt the robot mid-sentence.
+        self.declare_parameter('barge_in_threshold', 0.70)
 
         device_index = self.get_parameter('device_index').value
         device_name = self.get_parameter('device_name').value
@@ -142,6 +149,7 @@ class WakeWordNode(Node):
         self.beep_on_wake = self.get_parameter('beep_on_wake').value
         self.suppress_on_tts = self.get_parameter('suppress_on_tts').value
         self.allow_barge_in = self.get_parameter('allow_barge_in').value
+        self.barge_in_threshold = self.get_parameter('barge_in_threshold').value
         self._gate = SpeakingGate(
             release_tail=self.get_parameter('tts_release_tail').value)
 
@@ -197,25 +205,27 @@ class WakeWordNode(Node):
             predictions = self._model.predict(chunk)
             now = time.monotonic()
             for name, score in predictions.items():
-                if score < self.threshold:
+                decision = wake_decision(
+                    score, self.threshold,
+                    suppressed=self._gate.suppressed(now),
+                    speaking=self._gate.speaking,
+                    suppress_on_tts=self.suppress_on_tts,
+                    allow_barge_in=self.allow_barge_in,
+                    barge_in_threshold=self.barge_in_threshold)
+
+                if decision == IGNORE:
                     continue
-                if self.suppress_on_tts and self._gate.suppressed(now):
-                    # The robot is speaking (or in the reverb tail). Normally this
-                    # is its own TTS leaking into the mic → drop it. But if barge-in
-                    # is on and it's *actively* speaking (not just the tail), treat
-                    # a detection as the user interrupting: abort TTS and fall
-                    # through to start a new turn.
-                    if not (self.allow_barge_in and self._gate.speaking):
-                        self.get_logger().debug(
-                            f'Wake "{name}" ({score:.2f}) suppressed — TTS speaking')
-                        continue
-                    if now - self._last_trigger.get(name, 0.0) < self.cooldown:
-                        continue
+                if decision == SUPPRESS:
+                    self.get_logger().debug(
+                        f'Wake "{name}" ({score:.2f}) suppressed — TTS speaking/tail')
+                    continue
+                # WAKE or BARGE_IN both start a new turn; rate-limit either.
+                if now - self._last_trigger.get(name, 0.0) < self.cooldown:
+                    continue
+                if decision == BARGE_IN:
                     self.get_logger().info(
                         f'Barge-in: "{name}" ({score:.2f}) while speaking → stopping TTS')
                     self.stop_pub.publish(Bool(data=True))
-                if now - self._last_trigger.get(name, 0.0) < self.cooldown:
-                    continue
                 self._last_trigger[name] = now
                 self.get_logger().info(f'Wake word "{name}" detected (score={score:.2f})')
                 if self.beep_on_wake:

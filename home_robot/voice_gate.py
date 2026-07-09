@@ -62,3 +62,35 @@ class SpeakingGate:
             return True
         now = self._clock() if now is None else now
         return now < self._release_at
+
+
+# ── wake-word decision (pure) ────────────────────────────────────────────
+
+# What to do with a wake-word detection, given the gate state. Kept as plain
+# strings so the decision can be unit-tested without ROS.
+IGNORE = 'ignore'        # below threshold — do nothing
+SUPPRESS = 'suppress'    # self-echo / reverb tail — drop it
+BARGE_IN = 'barge_in'    # user interrupted active TTS — abort TTS, start a turn
+WAKE = 'wake'            # normal wake — start a turn
+
+
+def wake_decision(score: float, threshold: float, *,
+                  suppressed: bool, speaking: bool,
+                  suppress_on_tts: bool, allow_barge_in: bool,
+                  barge_in_threshold: float) -> str:
+    """Classify a wake-word detection.
+
+    The subtlety is telling a real interruption apart from the robot's own voice
+    leaking into the mic ("self-echo"). While TTS plays we only accept a wake as
+    a genuine barge-in if it clears a *stricter* `barge_in_threshold` — self-echo
+    false positives tend to be brief marginal spikes, whereas a person saying the
+    whole "Ρομπότ Μαξ" scores high and sustained. Anything during the reverb tail
+    (suppressed but no longer speaking) is always dropped.
+    """
+    if score < threshold:
+        return IGNORE
+    if suppress_on_tts and suppressed:
+        if allow_barge_in and speaking and score >= barge_in_threshold:
+            return BARGE_IN
+        return SUPPRESS
+    return WAKE

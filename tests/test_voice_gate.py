@@ -14,7 +14,10 @@ import os
 
 import pytest
 
-from home_robot.voice_gate import TOPIC, STOP_TOPIC, SpeakingGate
+from home_robot.voice_gate import (
+    TOPIC, STOP_TOPIC, SpeakingGate,
+    wake_decision, IGNORE, SUPPRESS, BARGE_IN, WAKE,
+)
 
 PKG = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NODES = f'{PKG}/home_robot/nodes'
@@ -108,6 +111,45 @@ def test_explicit_now_overrides_clock():
     gate.set_speaking(False)   # release at 0.3
     assert gate.suppressed(now=0.29)
     assert not gate.suppressed(now=0.31)
+
+
+# ── wake_decision (pure) ──────────────────────────────────────────────
+
+_KW = dict(suppress_on_tts=True, allow_barge_in=True, barge_in_threshold=0.7)
+
+
+def test_below_threshold_ignored():
+    assert wake_decision(0.4, 0.5, suppressed=False, speaking=False, **_KW) == IGNORE
+
+
+def test_normal_wake_when_idle():
+    assert wake_decision(0.6, 0.5, suppressed=False, speaking=False, **_KW) == WAKE
+
+
+def test_self_echo_while_speaking_below_barge_threshold_suppressed():
+    # Confident enough to wake, but not confident enough to barge in → drop it,
+    # so a marginal self-echo spike can't interrupt the robot.
+    assert wake_decision(0.6, 0.5, suppressed=True, speaking=True, **_KW) == SUPPRESS
+
+
+def test_barge_in_when_speaking_and_above_barge_threshold():
+    assert wake_decision(0.8, 0.5, suppressed=True, speaking=True, **_KW) == BARGE_IN
+
+
+def test_reverb_tail_never_barges_in():
+    # Suppressed but no longer actively speaking (tail) → always dropped, even
+    # at a high score.
+    assert wake_decision(0.9, 0.5, suppressed=True, speaking=False, **_KW) == SUPPRESS
+
+
+def test_barge_in_disabled_suppresses_even_high_score():
+    kw = dict(suppress_on_tts=True, allow_barge_in=False, barge_in_threshold=0.7)
+    assert wake_decision(0.95, 0.5, suppressed=True, speaking=True, **kw) == SUPPRESS
+
+
+def test_suppress_disabled_wakes_through_tts():
+    kw = dict(suppress_on_tts=False, allow_barge_in=False, barge_in_threshold=0.7)
+    assert wake_decision(0.6, 0.5, suppressed=True, speaking=True, **kw) == WAKE
 
 
 # ── Three-node wiring contract ────────────────────────────────────────
