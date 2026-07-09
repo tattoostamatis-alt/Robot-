@@ -30,18 +30,30 @@ class ObjectMemory:
         snappier/noisier, lower = smoother/laggier.
     min_conf:
         Sightings below this detector confidence are ignored.
+    confirm_count:
+        How many sightings an instance needs before it is *confirmed*. Below
+        this it is "tentative": still tracked (so repeated sightings can confirm
+        it) but hidden from confirmed-only queries/outputs, so a single spurious
+        detection never pollutes the RAG store or a "where is X?" answer. This is
+        the SORT/DeepSORT `n_init` track-confirmation idea. Default 1 keeps the
+        old behaviour (every sighting confirmed immediately).
     clock:
         Monotonic-ish time source (seconds, float). Injectable for tests.
     """
 
     def __init__(self, merge_distance: float = 0.6, ema_alpha: float = 0.35,
-                 min_conf: float = 0.5, clock=time.time):
+                 min_conf: float = 0.5, confirm_count: int = 1, clock=time.time):
         self.merge_distance = float(merge_distance)
         self.ema_alpha = min(1.0, max(0.0, float(ema_alpha)))
         self.min_conf = float(min_conf)
+        self.confirm_count = max(1, int(confirm_count))
         self._clock = clock
         self._instances: list[dict] = []
         self._next_id = 1
+
+    def is_confirmed(self, inst: dict) -> bool:
+        """True once an instance has been seen `confirm_count` times."""
+        return inst.get('count', 0) >= self.confirm_count
 
     # ── ingest ────────────────────────────────────────────────────────────
     def observe(self, label: str, x: float, y: float, z: float,
@@ -65,7 +77,10 @@ class ObjectMemory:
             self._instances.append(inst)
             return inst
 
-        a = self.ema_alpha
+        # Confidence-weighted EMA: a low-confidence sighting pulls the stored
+        # position less than a crisp one, so a marginal detection can't yank a
+        # well-established instance across the room.
+        a = self.ema_alpha * min(1.0, max(0.0, conf))
         inst['x'] = (1 - a) * inst['x'] + a * x
         inst['y'] = (1 - a) * inst['y'] + a * y
         inst['z'] = (1 - a) * inst['z'] + a * z
@@ -99,18 +114,26 @@ class ObjectMemory:
         return before - len(self._instances)
 
     # ── query ─────────────────────────────────────────────────────────────
-    def query(self, label: str, now: float | None = None) -> dict | None:
+    def query(self, label: str, now: float | None = None,
+              confirmed_only: bool = False) -> dict | None:
         """Best current guess for where `label` is: most recently seen instance
-        of that label (ties broken by confidence). None if unknown."""
+        of that label (ties broken by confidence). None if unknown.
+
+        confirmed_only skips tentative (single-sighting) instances so a spurious
+        detection is never returned as fact."""
         now = self._clock() if now is None else now
-        matches = [i for i in self._instances if i['label'] == label]
+        matches = [i for i in self._instances if i['label'] == label
+                   and (not confirmed_only or self.is_confirmed(i))]
         if not matches:
             return None
         return max(matches, key=lambda i: (i['last_seen'], i['conf']))
 
-    def all(self) -> list[dict]:
-        """All instances, most-recently-seen first."""
-        return sorted(self._instances, key=lambda i: i['last_seen'], reverse=True)
+    def all(self, confirmed_only: bool = False) -> list[dict]:
+        """All instances, most-recently-seen first. confirmed_only hides
+        tentative instances still short of confirm_count sightings."""
+        items = self._instances if not confirmed_only else \
+            [i for i in self._instances if self.is_confirmed(i)]
+        return sorted(items, key=lambda i: i['last_seen'], reverse=True)
 
     # ── persistence ───────────────────────────────────────────────────────
     def to_list(self) -> list[dict]:

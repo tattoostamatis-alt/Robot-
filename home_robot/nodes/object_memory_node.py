@@ -62,6 +62,7 @@ class ObjectMemoryNode(Node):
         self.declare_parameter('merge_distance', 0.6)     # m — same-label sightings within this = one instance
         self.declare_parameter('ema_alpha', 0.35)         # position smoothing
         self.declare_parameter('min_conf', 0.5)
+        self.declare_parameter('confirm_count', 3)        # sightings before an instance is trusted (rejects false positives)
         self.declare_parameter('max_range', 5.0)          # ignore detections farther than this (m, camera z)
         self.declare_parameter('prune_age', 0.0)          # s unseen before forgetting; 0 = never
         self.declare_parameter('ignore_labels', ['person'])  # transient/moving — don't memorise
@@ -84,6 +85,7 @@ class ObjectMemoryNode(Node):
             merge_distance=self.get_parameter('merge_distance').value,
             ema_alpha=self.get_parameter('ema_alpha').value,
             min_conf=self.get_parameter('min_conf').value,
+            confirm_count=self.get_parameter('confirm_count').value,
             clock=lambda: self.get_clock().now().nanoseconds / 1e9,
         )
         self._lock = threading.Lock()
@@ -164,18 +166,22 @@ class ObjectMemoryNode(Node):
     def _on_query(self, msg: String):
         label = msg.data.strip().lower()
         with self._lock:
-            inst = self.mem.query(label) if label else None
+            inst = self.mem.query(label, confirmed_only=True) if label else None
         self.answer_pub.publish(String(
             data=json.dumps(inst or {}, ensure_ascii=False)))
 
     # ── outputs ───────────────────────────────────────────────────────────
     def _publish(self):
         with self._lock:
-            items = self.mem.all()
-        self.mem_pub.publish(String(data=json.dumps(items, ensure_ascii=False)))
+            # The published "memory" is the trusted set; markers show everything
+            # (tentative ones dimmed) so you can watch instances get confirmed.
+            confirmed = self.mem.all(confirmed_only=True)
+            allitems = self.mem.all()
+        self.mem_pub.publish(String(data=json.dumps(confirmed, ensure_ascii=False)))
 
         markers = MarkerArray()
-        for i, inst in enumerate(items):
+        for i, inst in enumerate(allitems):
+            is_conf = self.mem.is_confirmed(inst)
             m = Marker()
             m.header.frame_id = self.target_frame
             m.header.stamp = self.get_clock().now().to_msg()
@@ -187,10 +193,11 @@ class ObjectMemoryNode(Node):
             m.pose.position.z = float(inst['z'])
             m.pose.orientation.w = 1.0
             m.scale.z = 0.12
-            m.color.a = 1.0
+            m.color.a = 1.0 if is_conf else 0.35    # tentative = faint
             m.color.r = m.color.g = m.color.b = 1.0
             room = inst.get('room')
-            m.text = f"{inst['label']}" + (f" ({room})" if room else "")
+            tag = "" if is_conf else "?"
+            m.text = f"{inst['label']}{tag}" + (f" ({room})" if room else "")
             markers.markers.append(m)
         self.marker_pub.publish(markers)
 
@@ -198,7 +205,7 @@ class ObjectMemoryNode(Node):
         """Push a concise NL fact per instance to rag_memory, but only when it
         changed (new room / new object) so we don't spam the vector store."""
         with self._lock:
-            items = self.mem.all()
+            items = self.mem.all(confirmed_only=True)
         for inst in items:
             room = inst.get('room')
             if not room:
