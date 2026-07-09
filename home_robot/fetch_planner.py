@@ -56,7 +56,7 @@ def memory_target(answer, now, max_age):
 
 
 def homing_twist(person, deliver_distance=0.8, center_tol=0.15,
-                 ang_gain=1.0, max_ang=0.5, lin_speed=0.12):
+                 ang_gain=1.0, max_ang=0.5, lin_speed=0.12, lin_gain=0.6):
     """Velocity to home in on a person for `follow` delivery.
 
     `person` is a detected_objects entry (camera frame: x right, z forward, m).
@@ -64,7 +64,10 @@ def homing_twist(person, deliver_distance=0.8, center_tol=0.15,
     Returns (linear_x, angular_z, arrived):
       - angular_z steers to null out the bearing (person on the right → turn
         right = negative/CW under REP-103);
-      - linear_x drives forward only once roughly centred and still too far;
+      - linear_x drives forward only once roughly centred and still too far,
+        proportional to the *remaining* distance (capped at lin_speed) so the
+        robot eases to a gentle stop instead of slamming to zero at the user —
+        the standard proportional-follower behaviour;
       - arrived is True when centred AND within deliver_distance → stop & place.
     """
     x = float(person.get('x', 0.0))
@@ -76,7 +79,10 @@ def homing_twist(person, deliver_distance=0.8, center_tol=0.15,
     close   = z <= deliver_distance
 
     ang = 0.0 if centred else -max(-max_ang, min(max_ang, ang_gain * bearing))
-    lin = lin_speed if (centred and not close) else 0.0
+    if centred and not close:
+        lin = max(0.0, min(lin_speed, lin_gain * (z - deliver_distance)))
+    else:
+        lin = 0.0
     return lin, ang, (centred and close)
 
 

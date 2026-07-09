@@ -116,6 +116,15 @@ def test_homing_no_range_holds():
     assert homing_twist({'x': 0.5, 'z': 0.0}) == (0.0, 0.0, False)
 
 
+def test_homing_eases_off_approaching_the_user():
+    # Proportional slowdown: creeping in near deliver_distance is slower than
+    # driving from far away — a gentle stop, no lunge at the person.
+    far,  _, _ = homing_twist({'x': 0.0, 'z': 3.0}, deliver_distance=0.8)
+    near, _, _ = homing_twist({'x': 0.0, 'z': 0.95}, deliver_distance=0.8)
+    assert 0.0 < near < far
+    assert far <= 0.12        # never exceeds the speed cap
+
+
 # ── static wiring contract ─────────────────────────────────────────────
 
 def test_mission_node_handles_fetch():
