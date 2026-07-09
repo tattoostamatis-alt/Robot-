@@ -67,6 +67,8 @@ from rclpy.node import Node
 from std_msgs.msg import Float32, String
 from tf2_geometry_msgs import do_transform_point
 
+from home_robot.servo_filter import median_point, spread, converged
+
 
 CAMERA_FRAME = 'camera_color_optical_frame'
 ARM_FRAME = 'arm_base'
@@ -254,23 +256,35 @@ class PickPlaceNode(Node):
         time.sleep(self.movement_settle_time)
 
     def _servo(self, label, ax, ay, az, hover_z):
-        """Refine (ax, ay, az) toward the live detection while hovering. Returns
-        the settled arm-frame target. Keeps the current estimate if detections
-        or TF drop out mid-loop (graceful open-loop fallback)."""
+        """Refine (ax, ay, az) toward the live detection while hovering.
+
+        Collects several relocked estimates and returns their robust
+        (component-wise median) arm-frame target, so a single noisy frame —
+        especially a bad RealSense depth — can't decide the grasp point. The
+        hover XY tracks the running median between reads; the loop stops once the
+        recent frames agree to within servo_tolerance. Keeps the best estimate so
+        far if detections or TF drop out mid-loop (graceful open-loop fallback)."""
+        samples: list[tuple] = []          # raw arm-frame relock points (no z offset)
+        ref_x, ref_y = ax, ay
         for i in range(self.servo_max_iters):
-            locked = self._relock(label, ax, ay)
+            locked = self._relock(label, ref_x, ref_y)
             if locked is None:
-                self.get_logger().info('Servo: lost sight of target, using last estimate')
+                self.get_logger().info('Servo: lost sight of target, using best estimate so far')
                 break
-            nx, ny, nz = locked
-            dxy = math.hypot(nx - ax, ny - ay)
-            ax, ay, az = nx, ny, nz + self.grasp_z_offset
-            if dxy <= self.servo_tolerance:
-                self.get_logger().info(f'Servo converged (Δ={dxy*1000:.0f}mm) after {i} nudges')
+            samples.append(locked)
+            ref_x, ref_y, _ = median_point(samples)
+            if converged(samples, self.servo_tolerance):
+                self.get_logger().info(
+                    f'Servo converged (spread={spread(samples)*1000:.0f}mm) after {i+1} frames')
                 break
-            self.get_logger().info(f'Servo nudge {i+1}: Δ={dxy*1000:.0f}mm → ({ax:.3f}, {ay:.3f})')
-            self._cartesian(ax, ay, hover_z, settle=self.servo_settle_time)
-        return ax, ay, az
+            self.get_logger().info(
+                f'Servo frame {i+1}: est=({ref_x:.3f}, {ref_y:.3f}) '
+                f'spread={spread(samples)*1000:.0f}mm')
+            self._cartesian(ref_x, ref_y, hover_z, settle=self.servo_settle_time)
+        est = median_point(samples)
+        if est is None:
+            return ax, ay, az              # never got a lock — keep the original
+        return est[0], est[1], est[2] + self.grasp_z_offset
 
     def _grasp_roll(self, target):
         """Wrist-roll angle (rad) that aligns the gripper opening across the
