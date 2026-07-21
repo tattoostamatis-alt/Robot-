@@ -1,13 +1,14 @@
 [Unit]
-# Pulses the Roomba's BRC line once a minute so the Open Interface's 5-minute
-# inactivity sleep timer never expires. Without this the robot falls asleep
-# between sessions and only a human pressing CLEAN can wake it -- serial is
-# ignored entirely while it sleeps.
+# Holds the Roomba in OI Full mode, which has no 5-minute inactivity sleep, so
+# the robot never sleeps. A BRC-pulse keep-alive was tried first but this
+# robot/cable ignores the RTS/DTR wake, so once asleep only a CLEAN press wakes
+# it -- Full mode avoids ever getting there. Trade-off (user-accepted): Full
+# mode does not charge on the dock, so the battery slowly drains while idle.
 #
 # Unlike the other robot services (moved off boot to on-demand), this one is
-# deliberately always-on: it is idle for ~57 of every 60 seconds, and its whole
+# deliberately always-on: it is idle for ~59 of every 60 seconds, and its whole
 # purpose is to cover the stretches when nothing else is running.
-Description=Roomba BRC keep-alive (never let the robot sleep)
+Description=Roomba keep-alive (hold Full mode, never sleep)
 After=dev-roomba.device
 Wants=dev-roomba.device
 
