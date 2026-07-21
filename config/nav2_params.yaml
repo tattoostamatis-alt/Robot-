@@ -270,7 +270,13 @@ local_costmap:
       # regions (kouzina) went lethal — planner couldn't even start from a
       # parked pose. Now matches the Stop polygon exactly: 0.50x0.40,
       # inscribed 0.20, circumscribed 0.344.
-      footprint: "[[0.22, 0.20], [0.22, -0.20], [-0.28, -0.20], [-0.28, 0.20]]"
+      # 2026-07-21, Roomba 879 chassis: replaced that rectangle with a circular
+      # footprint — user-measured as a Ø0.40 m circle about the wheel axle.
+      # Side effect worth knowing: circumscribed drops 0.344 -> 0.20, now BELOW
+      # inflation_radius 0.30, which clears the long-standing Nav2
+      # "inflation < circumscribed" ERROR and restores MPPI CostCritic's
+      # potential-field shortcut.
+      robot_radius: 0.20
       # keepout_filter is harmless when use_keepout:=false (the default) —
       # filter_mask_server/costmap_filter_info_server just aren't running,
       # so this layer waits quietly for filter info and never applies
@@ -369,7 +375,9 @@ global_costmap:
       # regions (kouzina) went lethal — planner couldn't even start from a
       # parked pose. Now matches the Stop polygon exactly: 0.50x0.40,
       # inscribed 0.20, circumscribed 0.344.
-      footprint: "[[0.22, 0.20], [0.22, -0.20], [-0.28, -0.20], [-0.28, 0.20]]"
+      # 2026-07-21, Roomba 879 chassis: circular Ø0.40 m footprint (see the
+      # matching note in local_costmap above).
+      robot_radius: 0.20
       resolution: 0.05
       track_unknown_space: true
       plugins: ["static_layer", "obstacle_layer", "keepout_filter", "inflation_layer"]
@@ -486,32 +494,42 @@ collision_monitor:
     # only checks the rear sub-polygon and driving forward only checks the
     # front one.
     #
-    # User-specified clearances measured from the lidar itself,
-    # not a uniform box — front 100mm, rear 400mm, left/right 200mm each.
-    # Converted to base_link frame: lidar at x=+0.12, y=0.0 relative to base_link:
-    #   front edge = 0.12 + 0.100 =  0.22
-    #   rear  edge = 0.12 - 0.400 = -0.28
-    #   left  edge = 0.00 + 0.200 =  0.20
-    #   right edge = 0.00 - 0.200 = -0.20
+    # 2026-07-21, Roomba 879: the old clearances were measured from the lidar
+    # when it sat at x=+0.12; the lidar is now centred at x=0.0, so they no
+    # longer mean anything (the old front edge 0.10 would fall INSIDE the
+    # robot). Re-specified by the user as a uniform 50mm margin around the body.
+    #
+    # The two radii in play are different things, and it matters here:
+    #   - the PHYSICAL robot is Ø0.34 m    -> radius 0.17
+    #   - the costmap footprint is Ø0.40 m -> radius 0.20, i.e. the user already
+    #     padded it by 30mm so the planner keeps its distance from obstacles
+    # The 50mm stop margin is measured from the *physical* body, so every edge
+    # sits at 0.17 + 0.05 = 0.22. (Measuring from the padded 0.20 instead would
+    # have given 0.25, i.e. 80mm of real clearance — more than was asked for.)
+    # 0.22 still exceeds the 0.20 footprint, so the stop box never cuts inside
+    # what the planner considers to be the robot.
+    #
+    # This also buys doorway margin: kela3 doorways are only ~0.78 m, where a
+    # 0.50 m-wide stop box would leave ~70mm per side; 0.44 m leaves ~170mm.
     Stop:
       type: "velocity_polygon"
       action_type: "stop"
       holonomic: false
       velocity_polygons: ["moving_forward", "moving_backward", "stopped_or_rotating"]
       moving_forward:
-        points: "[[0.22, 0.20], [0.22, -0.20], [-0.05, -0.20], [-0.05, 0.20]]"
+        points: "[[0.22, 0.22], [0.22, -0.22], [-0.05, -0.22], [-0.05, 0.22]]"
         linear_min: 0.02
         linear_max: 1.0
         theta_min: -10.0
         theta_max: 10.0
       moving_backward:
-        points: "[[0.05, 0.20], [0.05, -0.20], [-0.28, -0.20], [-0.28, 0.20]]"
+        points: "[[0.05, 0.22], [0.05, -0.22], [-0.22, -0.22], [-0.22, 0.22]]"
         linear_min: -1.0
         linear_max: -0.02
         theta_min: -10.0
         theta_max: 10.0
       stopped_or_rotating:
-        points: "[[0.22, 0.20], [0.22, -0.20], [-0.28, -0.20], [-0.28, 0.20]]"
+        points: "[[0.22, 0.22], [0.22, -0.22], [-0.22, -0.22], [-0.22, 0.22]]"
         linear_min: -0.02
         linear_max: 0.02
         theta_min: -10.0

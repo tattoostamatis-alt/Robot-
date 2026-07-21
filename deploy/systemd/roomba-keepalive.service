@@ -1,0 +1,24 @@
+[Unit]
+# Pulses the Roomba's BRC line once a minute so the Open Interface's 5-minute
+# inactivity sleep timer never expires. Without this the robot falls asleep
+# between sessions and only a human pressing CLEAN can wake it -- serial is
+# ignored entirely while it sleeps.
+#
+# Unlike the other robot services (moved off boot to on-demand), this one is
+# deliberately always-on: it is idle for ~57 of every 60 seconds, and its whole
+# purpose is to cover the stretches when nothing else is running.
+Description=Roomba BRC keep-alive (never let the robot sleep)
+After=dev-roomba.device
+Wants=dev-roomba.device
+
+[Service]
+Type=simple
+User=dimi
+Group=dialout
+Environment=HOME=/home/dimi
+ExecStart=/usr/bin/python3 /home/dimi/robot_ws/src/home_robot/scripts/roomba_keepalive.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

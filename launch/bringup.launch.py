@@ -194,38 +194,42 @@ def generate_launch_description():
         package='tf2_ros',
         executable='static_transform_publisher',
         name='tf_base_laser',
-        # Remeasured 2026-07-01: 150mm forward of the wheel axle, 220mm above
-        # it, centered left/right. yaw=pi: the unit is mounted rotated 180
-        # degrees in the horizontal plane (connector facing back), so the laser
-        # frame is rotated 180 degrees about Z to align scans with base_link.
-        arguments=['--x', '0.15', '--y', '0.0', '--z', '0.22',
+        # Remeasured 2026-07-21 for the Roomba 879 chassis: centred over the
+        # wheel axle (x=0, y=0) on the sensor mast, 570mm above the axle. The
+        # user measured from the axle; base_link sits on the floor, so
+        # z = 0.570 + 0.036 (wheel radius) = 0.606.
+        # yaw=pi RE-CONFIRMED by the user 2026-07-21 on the new mast: the
+        # connector still faces back while the unit scans forward, so the laser
+        # frame is still rotated 180 deg about Z to align with base_link.
+        arguments=['--x', '0.0', '--y', '0.0', '--z', '0.606',
                    '--roll', '0', '--pitch', '0', '--yaw', '3.14159265',
                    '--frame-id', 'base_link', '--child-frame-id', 'laser'],
     )
 
     # ── Static TF: base_link → camera_link ───────────────────────
-    # Remeasured 2026-07-01 (permanent mount): the D435 is centered left/right
-    # over the wheel axle, 150mm forward of the axle (same x as the lidar) and
-    # 150mm above it (z=0.15, i.e. 70mm below the lidar's 0.22). Faces straight
-    # ahead (roll=pitch=yaw=0). Matters for RTAB-Map RGBD odometry
-    # (use_rtabmap:=true) and for object_detector's detections being placed
-    # correctly in the map/costmap.
+    # Remeasured 2026-07-21 for the Roomba 879 chassis: the D435 is centred
+    # left/right, 140mm forward of the wheel axle and 500mm above it ->
+    # z = 0.500 + 0.036 (wheel radius) = 0.536, since base_link is on the
+    # floor. Faces straight ahead (roll=pitch=yaw=0). Matters for RTAB-Map
+    # RGBD odometry (use_rtabmap:=true) and for object_detector's detections
+    # being placed correctly in the map/costmap.
     # NOTE: the camera is NOT rotated like the lidar (lidar has yaw=pi because
     # its connector faces back); the D435 faces forward, so yaw=0 here.
     tf_base_camera = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
         name='tf_base_camera',
-        arguments=['--x', '0.15', '--y', '0.0', '--z', '0.15',
+        arguments=['--x', '0.14', '--y', '0.0', '--z', '0.536',
                    '--roll', '0', '--pitch', '0', '--yaw', '0',
                    '--frame-id', 'base_link', '--child-frame-id', 'camera_link'],
     )
 
     # ── Static TF: base_link → arm_base ───────────────────────────
-    # Measured 2026-07-01 once the RoArm-M3 was physically mounted: the arm
-    # base sits exactly at the robot's centre (x=0 over the wheel axle, y=0
-    # centred left/right) at 170mm above the ground, facing straight forward
-    # (roll=pitch=yaw=0). pick_place_node.py uses this TF to convert object
+    # Remeasured 2026-07-21 for the Roomba 879 chassis: the arm base sits
+    # 120mm forward of the wheel axle, centred left/right, 150mm above the
+    # axle -> z = 0.150 + 0.036 (wheel radius) = 0.186, since base_link is on
+    # the floor. Faces straight forward (roll=pitch=yaw=0).
+    # pick_place_node.py uses this TF to convert object
     # positions from object_detector.py (camera_color_optical_frame) into
     # the arm_base frame that arm_driver.py's T:104 cartesian command expects —
     # wrong values here mean wrong reach/grasp targets.
@@ -233,7 +237,7 @@ def generate_launch_description():
         package='tf2_ros',
         executable='static_transform_publisher',
         name='tf_base_arm',
-        arguments=['--x', '0.0', '--y', '0.0', '--z', '0.17',
+        arguments=['--x', '0.12', '--y', '0.0', '--z', '0.186',
                    '--roll', '0', '--pitch', '0', '--yaw', '0',
                    '--frame-id', 'base_link', '--child-frame-id', 'arm_base'],
         condition=IfCondition(use_arm),
