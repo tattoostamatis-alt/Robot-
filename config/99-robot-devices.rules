@@ -7,14 +7,14 @@ SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{seria
 SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", SYMLINK+="roomba", MODE="0666"
 
 # ESP32 + BNO085 IMU (CH340 USB-serial). CH340 clones don't report a usable
-# per-device serial (ATTRS{serial} here is the PCIe USB controller, the same
-# for every CH340 on this bus) — so the only way to disambiguate from a
-# second CH340 device (e.g. the RoArm-M3 below) is the physical USB port
-# path. Confirm with `udevadm info -q path -n /dev/ttyUSBx` if it ever moves
-# (USB enumeration/bus numbering is not stable across reboots/replugs — was
-# 5-1.2 originally, corrected to 3-4 on 2026-06-18, corrected to 1-1.1 on
-# 2026-06-25 after swapping in a new BNO085 module).
-SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", KERNELS=="1-1.1", SYMLINK+="imu", MODE="0666"
+# per-device serial, so this used to be pinned to a physical USB port path
+# (KERNELS==) — but that path is not stable across reboots/replugs and kept
+# breaking (5-1.2 → 3-4 on 2026-06-18 → 1-1.1 on 2026-06-25 → 5-1.4 on
+# 2026-07-21), each time silently leaving no /dev/imu at all. The RoArm-M3
+# turned out to be a CP2102N, not a CH340, so this is the ONLY 1a86:7523 on
+# the machine and VID:PID alone is unambiguous.
+# If a second CH340 device is ever added, re-add a KERNELS== port match here.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", SYMLINK+="imu", MODE="0666"
 
 # Waveshare RoArm-M3 (ESP32 driver board with a Silicon Labs CP2102N, NOT the
 # CH340 the earlier note guessed). Connected 2026-07-01. Same 10c4:ea60 as the

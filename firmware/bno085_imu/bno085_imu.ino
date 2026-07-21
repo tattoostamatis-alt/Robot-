@@ -37,6 +37,14 @@ int gyroReenableAttempts = 0;
 unsigned long diagWindowStartMs = 0;
 unsigned int rotCount = 0, gyroCount = 0;
 
+// False until begin_I2C() has succeeded. Every bno08x.* call must be guarded
+// by this: the library dereferences internal state that only exists after a
+// successful init, so calling e.g. wasReset() on a failed init panics the
+// ESP32 (Guru Meditation / LoadProhibited) instead of retrying.
+bool imuReady = false;
+unsigned long lastInitRetryMs = 0;
+const unsigned long INIT_RETRY_MS = 2000;
+
 void setReports() {
   // GAME_ROTATION_VECTOR = gyro + accel fusion WITHOUT the magnetometer.
   // The magnetometer-fused SH2_ROTATION_VECTOR gave an "absolute" heading
@@ -70,6 +78,25 @@ void setReports() {
   Serial.print(" gyro="); Serial.println(okGyro);
 }
 
+// Try both BNO085 addresses. Which one the chip answers on is set by its
+// ADR/DI pin, so a replacement module can land on 0x4A even though every
+// board used here so far has been 0x4B.
+bool initBno() {
+  const uint8_t addrs[] = {0x4B, 0x4A};
+  for (int attempt = 1; attempt <= 4; attempt++) {
+    for (uint8_t addr : addrs) {
+      Serial.print("Attempt "); Serial.print(attempt);
+      Serial.print(": begin_I2C(0x"); Serial.print(addr, HEX); Serial.println(")...");
+      if (bno08x.begin_I2C(addr, &Wire)) {
+        Serial.print("BNO085 Found at 0x"); Serial.println(addr, HEX);
+        return true;
+      }
+      delay(300);
+    }
+  }
+  return false;
+}
+
 void setup() {
   Serial.begin(115200);
   delay(100);
@@ -78,23 +105,36 @@ void setup() {
   Wire.begin(SDA_PIN, SCL_PIN);
   delay(300);
 
-  bool ok = false;
-  for (int attempt = 1; attempt <= 8 && !ok; attempt++) {
-    Serial.print("Attempt "); Serial.print(attempt); Serial.println(": begin_I2C(0x4B)...");
-    ok = bno08x.begin_I2C(0x4B, &Wire);
-    if (!ok) delay(300);
-  }
-  if (ok) {
-    Serial.println("BNO085 Found!");
+  imuReady = initBno();
+  if (imuReady) {
     setReports();
   } else {
     Serial.println("ERR: BNO085 init failed, will keep retrying in loop()");
   }
   lastReportMs = millis();
   lastGyroMs = millis();
+  lastInitRetryMs = millis();
 }
 
 void loop() {
+  // Init failed (bad wiring, unpowered chip): retry the I2C handshake on a
+  // timer and touch nothing else. Rebooting instead would spin the ESP32 in
+  // a ~1s reset loop that never prints anything useful, and falling through
+  // to the bno08x.* calls below would panic outright.
+  if (!imuReady) {
+    if (millis() - lastInitRetryMs > INIT_RETRY_MS) {
+      lastInitRetryMs = millis();
+      Serial.println("Retrying BNO085 init...");
+      imuReady = initBno();
+      if (imuReady) {
+        setReports();
+        lastReportMs = millis();
+        lastGyroMs = millis();
+      }
+    }
+    return;
+  }
+
   // The chip/bus connection here is flaky (no hardware fix in use) --
   // a manual Wire.end()/bit-bang bus recovery was tried but corrupts
   // the Adafruit_BNO08x library's internal state and crashes (Guru
