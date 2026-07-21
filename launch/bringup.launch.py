@@ -138,24 +138,26 @@ def generate_launch_description():
         output='screen',
     )
 
-    # IMU mounting orientation, measured 2026-07-01 from the BNO085's own
-    # gravity-referenced reading while the robot sat level: the board is
-    # mounted UPSIDE-DOWN (roll ~= -177.3 deg) with a slight -2.8 deg pitch.
-    # These rotations bring imu_link into base_link so the fused orientation
-    # reads level (verified: base_link roll/pitch -> 0.0 deg over 448 samples).
-    # Yaw is left 0 -- the game rotation vector yaw is arbitrary each boot and
-    # AMCL absorbs it via map->odom.
-    # Translation set 2026-07-01 to sit on the same centered sensor stack as the
-    # lidar/camera (x=0.15 forward of the wheel axle, y=0 centered, z=0.15 at the
-    # stack height). NOTE: ekf.yaml fuses ONLY yaw + yaw-rate from this IMU (no
-    # linear acceleration), so the exact translation has no effect on the fused
-    # output -- it is set purely so the TF tree matches the physical layout.
+    # IMU mounting orientation, re-measured 2026-07-21 on the Roomba 879 from
+    # the BNO085's own gravity-referenced reading while the robot sat level.
+    # The board is now mounted RIGHT-SIDE UP (roll ~= -0.4 deg, pitch ~= +1.5
+    # deg) -- on the old 692 it was UPSIDE-DOWN (roll -177.3), so the previous
+    # roll=-3.0952 would have flipped base_link over and inverted the yaw sense,
+    # breaking EKF/AMCL. The static TF roll/pitch is set equal to the measured
+    # raw roll/pitch so the fused base_link reads level (the same rule that gave
+    # 0.0 deg over 448 samples on the 692). Yaw stays 0 -- the game rotation
+    # vector yaw is arbitrary each boot and AMCL absorbs it via map->odom.
+    # Translation: sits on the centred sensor stack (x=0.0 over the wheel axle,
+    # y=0, z=0.536 to match the camera). NOTE: ekf.yaml fuses ONLY yaw +
+    # yaw-rate from this IMU (no linear acceleration), so the exact translation
+    # has no effect on the fused output -- it is set purely so the TF tree
+    # matches the physical layout.
     tf_base_imu = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
         name='tf_base_imu',
-        arguments=['--x', '0.15', '--y', '0.0', '--z', '0.15',
-                   '--roll', '-3.0952', '--pitch', '-0.0490', '--yaw', '0',
+        arguments=['--x', '0.0', '--y', '0.0', '--z', '0.536',
+                   '--roll', '-0.0066', '--pitch', '0.0257', '--yaw', '0',
                    '--frame-id', 'base_link', '--child-frame-id', 'imu_link'],
     )
 
