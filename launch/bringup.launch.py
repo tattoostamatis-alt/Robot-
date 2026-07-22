@@ -919,7 +919,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_slam',      default_value='true'),
         DeclareLaunchArgument('use_localization', default_value='false'),
         DeclareLaunchArgument('localization_map',
-            default_value=PathJoinSubstitution([pkg, 'maps', 'kela3.yaml'])),
+            default_value=PathJoinSubstitution([pkg, 'maps', 'malou.yaml'])),
         DeclareLaunchArgument('use_camera',    default_value='true'),
         DeclareLaunchArgument('use_arm',       default_value='false'),
         DeclareLaunchArgument('pick_drop_x',          default_value='0.15'),

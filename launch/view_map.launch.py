@@ -14,7 +14,7 @@ def generate_launch_description():
 
     map_yaml_arg = DeclareLaunchArgument(
         'map',
-        default_value=PathJoinSubstitution([pkg, 'maps', 'kela3.yaml']),
+        default_value=PathJoinSubstitution([pkg, 'maps', 'malou.yaml']),
         description='Path to the saved map .yaml file',
     )
 

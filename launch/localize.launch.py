@@ -1,6 +1,6 @@
 """One command to open a saved map and localize on it — no manual 2D Pose Estimate.
 
-Loads a saved map (default 'kela3') and brings up AMCL + pose_saver (restores
+Loads a saved map (default 'malou') and brings up AMCL + pose_saver (restores
 the last pose when available) + global_localizer (FFT scan-match only when
 no saved pose) + RViz, by including bringup.launch.py with the heavy
 AI/voice/camera stack switched off.
@@ -13,7 +13,7 @@ The LiDAR runs as a systemd service (ros-sllidar-c1.service) and is always up,
 so it is NOT started here. Wheel odometry + IMU + EKF (odom->base_link) and
 map_server + AMCL (map->odom) come from bringup.
 
-  ros2 launch home_robot localize.launch.py             # uses maps/kela3.yaml
+  ros2 launch home_robot localize.launch.py             # uses maps/malou.yaml
   ros2 launch home_robot localize.launch.py map:=home   # a different saved map
   ros2 launch home_robot localize.launch.py map:=/abs/path/to/my.yaml
 """
@@ -188,7 +188,7 @@ def _launch_setup(context, *args, **kwargs):
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
-            'map', default_value='kela3',
+            'map', default_value='malou',
             description='Saved map name (in maps/) or a full path to a .yaml'),
         DeclareLaunchArgument(
             'use_depth_camera', default_value='true',

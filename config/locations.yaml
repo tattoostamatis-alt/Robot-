@@ -3,6 +3,10 @@ diadromos:
   x: -1.978
   y: -4.786
   yaw: 0.0
+dock:
+  x: -0.995
+  y: -1.706
+  yaw: -2.766
 domatio tou max:
   x: -6.3
   y: -3.523
