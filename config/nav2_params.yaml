@@ -182,9 +182,15 @@ controller_server:
         cost_power: 1
         cost_weight: 5.0
         threshold_to_consider: 0.5
-      # Obstacle avoidance. consider_footprint:true checks the real robot
-      # rectangle (not just a circle) against the costmap — needed for
-      # threading doorways with this 0.5x0.4m footprint.
+      # Obstacle avoidance. consider_footprint MUST stay false while the
+      # costmaps declare `robot_radius` instead of a `footprint` polygon
+      # (they do since 9957842, the Roomba 879 chassis swap): MPPI's
+      # CostCritic throws "Considering footprint in collision checking but no
+      # robot footprint provided in the costmap" on configure, controller_server
+      # fails its transition and lifecycle_manager aborts the whole nav chain.
+      # No loss here — the 879 footprint really is a Ø0.40 m circle, so radius
+      # checking is exact rather than an approximation. Only switch this back
+      # to true together with restoring a polygon footprint.
       CostCritic:
         enabled: true
         cost_power: 1
@@ -195,7 +201,7 @@ controller_server:
         # inflation stays 0.30 per project decision.
         cost_weight: 2.0
         critical_cost: 300.0
-        consider_footprint: true
+        consider_footprint: false
         collision_cost: 1000000.0
         near_goal_distance: 1.0
       PathAlignCritic:
