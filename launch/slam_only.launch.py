@@ -65,8 +65,11 @@ def generate_launch_description():
         package='tf2_ros',
         executable='static_transform_publisher',
         name='tf_base_imu',
+        # roll=pi REQUIRED: BNO085 game-vector yaw is opposite the wheel odom;
+        # without it EKF fuses contradictory yaws and SLAM loses orientation on
+        # turns. See bringup.launch.py note. Verified 2026-07-22.
         arguments=['--x', '0', '--y', '0', '--z', '0',
-                   '--roll', '-0.0066', '--pitch', '0.0257', '--yaw', '0',
+                   '--roll', '3.14159265', '--pitch', '0', '--yaw', '0',
                    '--frame-id', 'base_link', '--child-frame-id', 'imu_link'],
     )
 

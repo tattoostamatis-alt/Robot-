@@ -156,8 +156,14 @@ def generate_launch_description():
         package='tf2_ros',
         executable='static_transform_publisher',
         name='tf_base_imu',
+        # roll=pi REQUIRED: BNO085 game-vector yaw is opposite the calibrated
+        # wheel odom; without it the EKF fuses contradictory yaws and the pose
+        # spins out on turns. 5ffa712 set roll~=0 from the board's raw gravity
+        # reading, but that only says the case is level, not which way yaw turns.
+        # VERIFIED 2026-07-22: turn in place, roll~=0 gave opposite IMU/wheel
+        # signs; roll=pi makes EKF-yaw track wheel-yaw (both +100 for a left turn).
         arguments=['--x', '0.0', '--y', '0.0', '--z', '0.536',
-                   '--roll', '-0.0066', '--pitch', '0.0257', '--yaw', '0',
+                   '--roll', '3.14159265', '--pitch', '0', '--yaw', '0',
                    '--frame-id', 'base_link', '--child-frame-id', 'imu_link'],
     )
 
