@@ -179,7 +179,14 @@ class RoombaDriver(Node):
         # Re-tuned the same day after the lidar remount; settled on
         # 1.14 after results kept oscillating between attempts (manual
         # push/test noise was bigger than the residual drift itself).
-        self.declare_parameter('right_trim', 1.14)
+        # Retuned 2026-07-22 for the 879 with the now-working IMU as the
+        # drift reference (independent of wheel odom). Auto-drove 1.8m
+        # straight via cmd_vel and read IMU-yaw drift: 1.14 veered +31 deg/m
+        # LEFT (692 value badly over-corrected), 1.00 -9 deg/m right, 1.031
+        # -1.5 deg/m. Least-squares zero-crossing over the three points is
+        # 1.033. Drift is ~288 deg/m per trim-unit, so this is touchy —
+        # retune the same way if wheels/tyres change.
+        self.declare_parameter('right_trim', 1.033)
         # Forward and reverse needed different corrections — not a pure
         # proportional motor gain mismatch, more likely asymmetric
         # caster drag or forward/reverse motor controller response.
