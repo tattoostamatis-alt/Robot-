@@ -138,6 +138,10 @@ class RoombaDriver(Node):
         self.declare_parameter('port', '/dev/roomba')
         self.declare_parameter('baud', 115200)
         self.declare_parameter('idle_timeout', 30.0)  # seconds until passive mode
+        # How long to let the Create 2's IR dock seek run before giving up and
+        # resuming keep-awake. The stock behaviour wanders for a while before
+        # finding the beam, so this needs to be generous.
+        self.declare_parameter('dock_timeout', 120.0)
         # Recalibrated 2026-06-17 via calibrate_odom.py (straight-line +
         # in-place rotation tests, after fixing a bug where the script's
         # blocking input() calls starved the /odom subscription callback
@@ -213,6 +217,7 @@ class RoombaDriver(Node):
         baud = self.get_parameter('baud').value
         self.wheel_base = self.get_parameter('wheel_base').value
         self.idle_timeout = self.get_parameter('idle_timeout').value
+        self.dock_timeout = self.get_parameter('dock_timeout').value
         self.mm_per_tick = self.get_parameter('mm_per_tick').value
         self.right_trim = self.get_parameter('right_trim').value
         self.right_trim_reverse = self.get_parameter('right_trim_reverse').value
@@ -246,6 +251,10 @@ class RoombaDriver(Node):
         self._idle = False
         self._stopped = True
         self._estop = False
+        # True between a /dock request and the charger engaging (or timeout):
+        # the Create 2 drives itself and our housekeeping must not interfere.
+        self._docking = False
+        self._dock_started = 0.0
         self._last_cmd_time = time.monotonic()
         self._target_left = 0.0
         self._target_right = 0.0
@@ -275,6 +284,7 @@ class RoombaDriver(Node):
         self.create_timer(2.0,  self._publish_battery)  # 0.5 Hz
         self.create_timer(5.0,  self._check_idle)       # idle watchdog
         self.create_timer(2.0,  self._keep_awake)        # auto-reconnect + BRC keep-alive
+        self.create_timer(2.0,  self._check_docking)     # exit docking state on charge/timeout
 
         self._x = 0.0
         self._y = 0.0
@@ -370,6 +380,8 @@ class RoombaDriver(Node):
         self.bot.drive_direct(round(self._cur_right), round(self._cur_left))
 
     def _check_idle(self):
+        if self._docking:      # drive_direct(0,0) would abort the dock approach
+            return
         if not self._idle and (time.monotonic() - self._last_cmd_time) > self.idle_timeout:
             self._idle = True
             self._target_left = self._target_right = 0.0
@@ -403,6 +415,10 @@ class RoombaDriver(Node):
              with no driver restart needed.
           2. While healthy, pulse BRC at least once a minute so the OI's
              5-minute inactivity sleep timer never expires."""
+        # While docking the robot is deliberately in Passive and driving
+        # itself; _connect_oi()'s full() would cancel the dock seek.
+        if self._docking:
+            return
         now = time.monotonic()
         if (now - self._last_ok_time) > 2.0:
             self._connect_oi()
@@ -432,9 +448,53 @@ class RoombaDriver(Node):
         return None
 
     def _dock_cb(self, msg: Bool):
-        if msg.data:
-            self.bot.seek_dock()
-            self.get_logger().info('Seeking dock...')
+        """Hand the robot over to the Create 2's own IR dock-seeking behaviour.
+
+        pycreate2's Create2 has NO seek_dock() helper (calling it raised
+        AttributeError and killed this node), so send OI opcode 143 raw the
+        same way _safe_get_encoders sends 149.
+
+        Seek Dock drops the OI back to Passive and the robot drives itself.
+        Both of our housekeeping timers would abort that within seconds, so
+        they are suppressed via _docking until the charger engages:
+          - _check_idle would send drive_direct(0,0) after idle_timeout
+          - _keep_awake would re-run _connect_oi() -> full(), and Full/Safe
+            takes back control, cancelling the docking behaviour outright
+        """
+        if not msg.data:
+            return
+        try:
+            self.bot.SCI.write(143)          # OI opcode 143 = Seek Dock
+        except Exception as e:
+            self.get_logger().error(f'Seek Dock command failed: {e!r}')
+            return
+        self._docking = True
+        self._dock_started = time.monotonic()
+        self._idle = True                    # no motor commands are ours now
+        self._target_left = self._target_right = 0.0
+        self._cur_left = self._cur_right = 0.0
+        self.get_logger().info('Seeking dock (OI 143) — housekeeping suspended')
+
+    def _check_docking(self):
+        """Leave the docking state once the charger engages, or give up.
+
+        Without the timeout a failed dock attempt would leave keep-awake
+        suppressed forever and the Roomba would eventually fall asleep with
+        no way back short of a restart."""
+        if not self._docking:
+            return
+        sensors = self._safe_get_sensors()
+        if sensors is not None and getattr(sensors, 'charger_state', 0):
+            self._docking = False
+            self.get_logger().info('Docked — charging, housekeeping resumed')
+            self._connect_oi()
+            return
+        if (time.monotonic() - self._dock_started) > self.dock_timeout:
+            self._docking = False
+            self.get_logger().warn(
+                f'Dock seek gave up after {self.dock_timeout:.0f}s '
+                '(not charging) — housekeeping resumed')
+            self._connect_oi()
 
     # Max plausible per-cycle change at 20Hz (well above the Create 2's
     # ~0.5 m/s top speed) — anything beyond this is a corrupted/misaligned
