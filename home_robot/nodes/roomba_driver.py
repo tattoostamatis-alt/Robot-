@@ -368,6 +368,20 @@ class RoombaDriver(Node):
             self.bot.drive_direct(0, 0)
             return
 
+        # The dock seek drives the robot itself, so stop fighting it. Note the
+        # write below is UNCONDITIONAL: _idle only zeroes the *target*, it
+        # never skips the drive_direct call, so without this guard the driver
+        # keeps commanding the wheels at 20Hz throughout the dock approach.
+        # E-stop above still wins, deliberately.
+        #
+        # Honest status: suppressing this did NOT make docking work (the robot
+        # moved 13cm in 120s before the guard, 21cm after -- both attempts
+        # timed out without charging). Kept because commanding the wheels
+        # while a built-in behaviour owns them is wrong regardless; the real
+        # blocker for docking is still open. See the note in _dock_cb.
+        if self._docking:
+            return
+
         target_left, target_right = self._target_left, self._target_right
         if not self._idle and (now - self._last_cmd_time) > 0.25:
             target_left = target_right = 0.0
@@ -453,6 +467,19 @@ class RoombaDriver(Node):
         pycreate2's Create2 has NO seek_dock() helper (calling it raised
         AttributeError and killed this node), so send OI opcode 143 raw the
         same way _safe_get_encoders sends 149.
+
+        STILL NOT WORKING as of 2026-07-22. The write succeeds and the OI
+        raises no error, but the robot barely moves (13cm/120s, then 21cm/120s
+        once _motor_control stopped fighting it) and never reaches the
+        charger. Ruled out: the AttributeError crash, _check_idle,
+        _keep_awake, _motor_control, and the soft e-stop (/emergency_stop was
+        false throughout). Next things to try, cheapest first:
+          - confirm the charging station actually has power / emits IR at all
+            (press Dock on the robot itself; if that fails too it is not us)
+          - opcode 165 (Buttons) with bit 2 = Dock, i.e. simulate a Dock
+            button press. 143 is a Create 2 command; the 879 is a consumer
+            Roomba and may only honour the button route.
+          - retry on a full battery; these attempts ran at 5-7%.
 
         Seek Dock drops the OI back to Passive and the robot drives itself.
         Both of our housekeeping timers would abort that within seconds, so
