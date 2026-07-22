@@ -32,9 +32,10 @@ from rclpy.node import Node
 from nav_msgs.msg import Odometry
 import tf_transformations as tft
 
-# Current (692) values, for the correction arithmetic printout.
-OLD_MM_PER_TICK = 0.401635
-OLD_WHEEL_BASE = 0.23842
+# Current values, for the correction arithmetic printout.
+# Recalibrated 2026-07-22 for the Roomba 879 chassis.
+OLD_MM_PER_TICK = 0.427692
+OLD_WHEEL_BASE = 0.218405
 
 
 class Calib(Node):

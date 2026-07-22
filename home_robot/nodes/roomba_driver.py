@@ -155,8 +155,18 @@ class RoombaDriver(Node):
         # cmd_vel command (confirmed by direct observation, not a script
         # artifact) — i.e. previous wheel_base values were significantly
         # too large.
-        self.declare_parameter('wheel_base', 0.23842)
-        self.declare_parameter('mm_per_tick', 0.401635)
+        # Recalibrated 2026-07-22 for the Roomba 879 chassis swap (the 692
+        # values above were left in place through the swap). mm_per_tick from
+        # a tape-measured 2.00 m straight run (odom 3.617 m at the old value
+        # -> 0.427692, re-verified at -0.6% over another 2.00 m). wheel_base
+        # from a closed-loop in-place spin (rotate_turns.py drives cmd_vel to
+        # an exact 1800 deg on /odom) checked against the physical heading
+        # mark: it read 5.25 physical turns for 5 odom turns, giving 0.218405,
+        # then confirmed dead-on over a 10-turn spin (a 5% error would show as
+        # a half-turn miss). IMU ground truth was unavailable (BNO085 silent),
+        # so the spin used the floor mark instead.
+        self.declare_parameter('wheel_base', 0.218405)
+        self.declare_parameter('mm_per_tick', 0.427692)
         # Compensates a physical drive bias (this unit veers right when
         # commanded to drive straight) — independent of wheel_base/
         # mm_per_tick, which are about odometry accuracy, not actual
