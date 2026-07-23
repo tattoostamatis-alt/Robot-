@@ -120,6 +120,11 @@ def test_locations_on_free_space_and_in_own_room():
         row = h - 1 - int((p['y'] - oy) / res)
         assert 0 <= row < h and 0 <= col < w, f'{name} outside the map'
         assert grid[row, col] >= 250, f'{name} not on free space (pixel={grid[row, col]})'
+        # Not every location is a room: `dock` is a charger pose, and it sits
+        # inside whichever room holds the charger. room_colors.yaml is what
+        # defines a room, so only those get the own-room check.
+        if name not in colors:
+            continue
         if mask.shape[:2] == grid.shape:  # mask lookup only when dims match
             r, g, b, a = mask[row, col]
             assert a > 50, f'{name} on a transparent mask pixel'

@@ -29,7 +29,13 @@ free = img >= 250  # occupied ~0, unknown ~205, free 254
 locs = yaml.safe_load(open(f'{PKG}/config/locations.yaml'))
 colors = yaml.safe_load(open(f'{PKG}/maps/room_colors.yaml'))
 
-names = sorted(locs)
+# room_colors.yaml is what defines a "room". locations.yaml also holds poses
+# that are not rooms — `dock` is a charger pose against a wall — and seeding
+# BFS from those would carve a bogus region out of the room that contains them.
+names = [n for n in sorted(locs) if n in colors]
+_skipped = [n for n in sorted(locs) if n not in colors]
+if _skipped:
+    print(f'not rooms (no colour in room_colors.yaml), skipped: {", ".join(_skipped)}')
 label = np.full((h, w), -1, dtype=np.int16)   # -1 = unassigned
 q = deque()
 for i, name in enumerate(names):
