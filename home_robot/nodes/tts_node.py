@@ -82,10 +82,14 @@ class TTSNode(Node):
         if not msg.data:
             return
         self._interrupted = True
-        try:
-            sd.stop()   # makes the sd.wait() in the playback thread return now
-        except Exception:
-            pass
+        # Only touch the device when something is actually playing. Calling
+        # sd.stop() against an idle/paused stream is what used to race sd.play()
+        # and leave PortAudio wedged (see _synthesize_and_play).
+        if self._speaking:
+            try:
+                sd.stop()
+            except Exception:
+                pass
         dropped = 0
         try:
             while True:
@@ -122,7 +126,22 @@ class TTSNode(Node):
         device = None if self.device_index < 0 else self.device_index
         self.get_logger().info(f'Speaking: {text}')
         sd.play(audio, samplerate=SAMPLE_RATE, device=device)
-        sd.wait()
+
+        # Bounded wait instead of sd.wait(). sd.wait() blocks forever, and a
+        # sd.stop() arriving from the barge-in callback while sd.play() is still
+        # starting up could leave it hung: the playback thread then never
+        # returned, so the robot went permanently silent AND never published
+        # tts/speaking=False — which also keeps the STT gate closed, so it
+        # stopped hearing commands too. Both symptoms, no error logged, node
+        # still alive. Seen for real on 2026-07-23 after four rapid barge-ins.
+        # Polling to a deadline derived from the audio length cannot hang.
+        deadline = time.monotonic() + len(audio) / SAMPLE_RATE + 2.0
+        while time.monotonic() < deadline and not self._interrupted:
+            time.sleep(0.05)
+        try:
+            sd.stop()
+        except Exception:
+            pass
 
     async def _synthesize(self, text):
         communicate = edge_tts.Communicate(text, self.voice, rate=self.rate, volume=self.volume)

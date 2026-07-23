@@ -731,11 +731,25 @@ def generate_launch_description():
         # Without these the node falls back to defaults (default device, ch0/3ch),
         # which is NOT what the model was trained on. Verified live 2026-07-03:
         # real "Μαξ" scores 1.00 on ch4 at threshold 0.60, 6/6 detections.
+        # 2026-07-23: re-measured all six channels with the mic FREE (the node
+        # holds it exclusively, so any reading taken while it runs is worthless):
+        # ch0 0.0067, ch1 0.0067, ch2 0.0101, ch3 0.0128, ch4 0.0113, ch5 0.0129.
+        # ch4 carries normal signal — the "ch4 went silent" note from 07-07 no
+        # longer holds. What fixed "δεν ακούει" that day was restarting the node
+        # (it caches config at init, so a restart is indistinguishable from a
+        # channel change) — not ch0.
+        #
+        # Do NOT switch to ch0: the model is trained on the beamformed/denoised
+        # ASR beam, so on the raw mic it false-fires constantly — measured 9
+        # triggers in 75 s at scores 0.95-1.00. Each false trigger publishes
+        # tts/stop, so the robot also interrupts its own speech every few
+        # seconds and appears to never answer. On ch4: 0 false triggers in 30 s.
+        # Left as a launch arg only for experiments; the default is the one to use.
         parameters=[{
             'threshold': 0.60,
             'device_name': 'XVF3800',
             'mic_channels': 6,
-            'mic_channel': 4,
+            'mic_channel': LaunchConfiguration('mic_channel', default='4'),
             # Barge-in: saying "Ρομπότ Μαξ" while the robot is talking aborts the
             # TTS and starts a new turn. Safe on the XVF3800 (ch4 = AEC'd ASR beam).
             'allow_barge_in': LaunchConfiguration('allow_barge_in', default='true'),
@@ -937,6 +951,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_wake_word', default_value='false'),
         DeclareLaunchArgument('use_stt',       default_value='false'),
         DeclareLaunchArgument('allow_barge_in', default_value='true'),
+        DeclareLaunchArgument('mic_channel',   default_value='4'),
         DeclareLaunchArgument('delivery_mode',  default_value='start_pose'),
         DeclareLaunchArgument('use_doa',            default_value='false'),
         DeclareLaunchArgument('doa_rotate_on_wake', default_value='true'),

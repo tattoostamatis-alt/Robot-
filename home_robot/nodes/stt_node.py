@@ -110,7 +110,8 @@ class STTNode(Node):
             self._calibrate_energy_thresh()
 
     def _calibrate_energy_thresh(self):
-        # Measure ambient RMS from /mic/audio topic over ~2s, set threshold = max(0.05, rms*3)
+        # Measure ambient RMS from /mic/audio over ~2s and put the threshold
+        # between ambient and speech.
         import time
         chunks = []
         deadline = time.monotonic() + 2.5
@@ -129,7 +130,14 @@ class STTNode(Node):
         if chunks:
             all_audio = np.concatenate(chunks)
             ambient_rms = float(np.sqrt(np.mean(all_audio ** 2)))
-            new_thresh = max(0.05, ambient_rms * 1.4)
+            # The floor used to be 0.05, which on this mic sits ABOVE normal
+            # speech: measured on the XVF3800 ch4 beam 2026-07-23, ambient RMS
+            # is ~0.011 and speech peaks at ~0.051. max() therefore pinned the
+            # threshold at 0.0500 on every boot — calibration was a no-op and
+            # the node logged "No speech detected after wake word" forever
+            # while the wake word itself fired perfectly. 0.018 (~1.6x ambient)
+            # is the value that actually worked live.
+            new_thresh = max(0.012, ambient_rms * 1.6)
             self.energy_thresh = new_thresh
             self.get_logger().info(
                 f'Ambient noise RMS={ambient_rms:.4f} → energy_thresh={new_thresh:.4f}')
