@@ -1,29 +1,29 @@
 # Named navigation goals (map frame).
 diadromos:
-  x: -1.978
-  y: -4.786
+  x: -1.086
+  y: 5.196
   yaw: 0.0
 dock:
   x: 0.77
   y: 0.007
   yaw: -2.768
 domatio tou max:
-  x: -6.3
-  y: -3.523
+  x: 2.937
+  y: 8.224
   yaw: 0.0
 domatio tou mbamba:
-  x: -4.167
-  y: -1.951
+  x: 2.855
+  y: 5.276
   yaw: 0.0
 kouzina:
-  x: -4.391
-  y: -6.245
+  x: -0.575
+  y: 8.288
   yaw: 0.0
 saloni:
-  x: -0.631
-  y: -1.277
+  x: 0.798
+  y: 2.678
   yaw: 0.0
 toualeta:
-  x: -1.726
-  y: -6.385
+  x: -2.467
+  y: 5.845
   yaw: 0.0

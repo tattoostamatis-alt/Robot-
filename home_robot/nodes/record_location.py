@@ -13,6 +13,7 @@ no robot/localization needed — only a map view (view_map.launch.py):
 
     ros2 run home_robot record_location.py --click            # all rooms in --list order
     ros2 run home_robot record_location.py --click kouzina    # just one
+    ros2 run home_robot record_location.py --click kouzina,saloni   # a subset, in order
 
 Writes config/locations.yaml through the install symlink, so the source file
 in the repo is updated in place — commit it when all rooms are re-taught.
@@ -129,7 +130,13 @@ def main():
 
     if args and args[0] == '--click':
         rest = args[1:]
-        names = [' '.join(rest)] if rest else sorted(locations)
+        # One name may contain spaces ("domatio tou max"), so join first and
+        # split on commas — that way a comma-separated list teaches several
+        # rooms in one run without clobbering the ones left out (e.g. dock).
+        if rest:
+            names = [n.strip() for n in ' '.join(rest).split(',') if n.strip()]
+        else:
+            names = sorted(locations)
         if not names:
             print('Το locations.yaml είναι άδειο — δώσε όνομα: --click <όνομα>')
             sys.exit(1)
