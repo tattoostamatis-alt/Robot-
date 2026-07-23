@@ -41,6 +41,13 @@ def generate_launch_description():
     use_person_follower = LaunchConfiguration('use_person_follower', default='true')
     use_llm       = LaunchConfiguration('use_llm',       default='false')
     llm_backend   = LaunchConfiguration('llm_backend',   default='lemonade')
+    # The `lemonade` backend is really "any OpenAI-compatible server". Exposed
+    # because Lemonade 11.0.0 dropped every FLM/NPU model from its catalogue
+    # (2026-07-16), so the NPU path now goes through FastFlowLM's own server on
+    # :52625 instead. Override both together.
+    llm_url       = LaunchConfiguration('llm_url',
+                                        default='http://127.0.0.1:13305/api/v1')
+    llm_model     = LaunchConfiguration('llm_model', default='qwen3vl-it-4b-FLM')
     vision_backend = LaunchConfiguration('vision_backend', default='gemini')
     use_planner   = LaunchConfiguration('use_planner',   default='false')
     use_vision    = LaunchConfiguration('use_vision',    default='false')
@@ -774,7 +781,8 @@ def generate_launch_description():
         package='home_robot',
         executable='llm_bridge_node.py',
         name='llm_bridge_node',
-        parameters=[{'backend': llm_backend, 'memory_enabled': use_memory}],
+        parameters=[{'backend': llm_backend, 'memory_enabled': use_memory,
+                     'lemonade_url': llm_url, 'lemonade_model': llm_model}],
         output='screen',
         condition=IfCondition(use_llm),
     )
@@ -938,6 +946,9 @@ def generate_launch_description():
         DeclareLaunchArgument('use_person_follower', default_value='false'),
         DeclareLaunchArgument('use_llm',       default_value='false'),
         DeclareLaunchArgument('llm_backend',   default_value='lemonade'),
+        DeclareLaunchArgument('llm_url',
+            default_value='http://127.0.0.1:13305/api/v1'),
+        DeclareLaunchArgument('llm_model',     default_value='qwen3vl-it-4b-FLM'),
         DeclareLaunchArgument('vision_backend', default_value='lemonade'),
         DeclareLaunchArgument('use_planner',   default_value='false'),
         DeclareLaunchArgument('use_vision',    default_value='false'),
