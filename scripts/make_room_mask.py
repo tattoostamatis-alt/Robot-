@@ -8,13 +8,14 @@ Re-teach the locations on the new map first (record_location.py --click),
 then run this and review the *_preview.display.png overlay before renaming
 the output to maps/room_mask.png.
 """
+import heapq
 import os
 import sys
-from collections import deque
 
 import numpy as np
 import yaml
 from PIL import Image
+from scipy import ndimage
 
 PKG = os.path.expanduser('~/robot_ws/src/home_robot')
 MAP = sys.argv[1] if len(sys.argv) > 1 else 'kela3'
@@ -37,22 +38,32 @@ _skipped = [n for n in sorted(locs) if n not in colors]
 if _skipped:
     print(f'not rooms (no colour in room_colors.yaml), skipped: {", ".join(_skipped)}')
 label = np.full((h, w), -1, dtype=np.int16)   # -1 = unassigned
-q = deque()
+
+# Distance from every free pixel to the nearest wall — high in the middle of a
+# room, low in a doorway.
+dist = ndimage.distance_transform_edt(free)
+
+heap = []          # (-clearance, row, col): widest pixel is expanded first
 for i, name in enumerate(names):
     col = int((locs[name]['x'] - ox) / res)
     row = h - 1 - int((locs[name]['y'] - oy) / res)
     assert free[row, col], f'seed {name} not on free space!'
     label[row, col] = i
-    q.append((row, col))
+    heapq.heappush(heap, (-dist[row, col], row, col))
 
-# Equal-speed BFS: each free pixel is claimed by whichever seed reaches it first.
-while q:
-    r, c = q.popleft()
+# Watershed on that transform: expanding in order of DECREASING clearance lets
+# each room flood its own open floor first and squeeze through a doorway only
+# once everything wider is taken, so the borders settle in the doorways.
+# An equal-speed BFS instead puts a border halfway between two seeds, which cuts
+# straight across open floor — that is what gave `diadromos` a 4.0 x 3.5 m block
+# of the flat instead of a corridor.
+while heap:
+    _, r, c = heapq.heappop(heap)
     for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
         rr, cc = r + dr, c + dc
         if 0 <= rr < h and 0 <= cc < w and free[rr, cc] and label[rr, cc] == -1:
             label[rr, cc] = label[r, c]
-            q.append((rr, cc))
+            heapq.heappush(heap, (-dist[rr, cc], rr, cc))
 
 # RGBA mask: colored where labeled, transparent elsewhere.
 mask = np.zeros((h, w, 4), dtype=np.uint8)
