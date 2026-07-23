@@ -1,15 +1,27 @@
 // ESP32 + BNO085 (Adafruit BNO08x lib) -> streams "IMU,qw,qi,qj,qk,gx,gy,gz,ax,ay,az"
 // over Serial at 115200, matching the format imu_node.py expects.
 //
-// BNO08X_RESET must stay -1 (no hardware reset pin wired) -- using the
-// chip's RESET pin here previously caused getSensorEvent() to stall
-// forever (~3s timeout, never recovering). The library's I2C soft-reset
-// works correctly instead.
+// BNO08X_RESET stays -1 on purpose: handing the chip's RESET pin to the
+// library previously made getSensorEvent() stall forever (~3s timeout, never
+// recovering). We own the pin ourselves instead (BNO_RESET_PIN) and pulse it
+// only on the recovery path -- the library never touches it.
 #include <Adafruit_BNO08x.h>
 
 #define BNO08X_RESET -1
 #define SDA_PIN 21
 #define SCL_PIN 22
+
+// BNO085 nRESET -> ESP32 GPIO18 (wired 2026-07-23). Active low.
+//
+// Why this exists: the BNO085's protocol state can wedge in a way that keeps
+// it ACKing its I2C address -- a bare bus scan still reports FOUND 0x4B on
+// every pass -- while begin_I2C() fails forever. Nothing on the ESP32 side
+// cleared that before: ESP.restart() reboots us but leaves the sensor powered
+// and still wedged, which is why the only recoveries that ever worked were
+// accidental power cycles (pulling a dupont cuts 3V3) or a reflash. Four
+// outages in three days were all this, not the loose wiring they looked like.
+// With nRESET on a GPIO the firmware can clear it unaided.
+#define BNO_RESET_PIN 18
 
 Adafruit_BNO08x bno08x(BNO08X_RESET);
 sh2_SensorValue_t sensorValue;
@@ -81,9 +93,23 @@ void setReports() {
 // Try both BNO085 addresses. Which one the chip answers on is set by its
 // ADR/DI pin, so a replacement module can land on 0x4A even though every
 // board used here so far has been 0x4B.
+// Hold nRESET low, release, then wait for the sensor to come back. The
+// datasheet wants ~90ms before it answers I2C; 300ms is deliberately generous
+// because this only runs when we are already failing. Harmless no-op if the
+// pin is not wired yet -- the chip simply never sees it.
+void pulseReset() {
+  digitalWrite(BNO_RESET_PIN, LOW);
+  delay(20);
+  digitalWrite(BNO_RESET_PIN, HIGH);
+  delay(300);
+}
+
 bool initBno() {
   const uint8_t addrs[] = {0x4B, 0x4A};
   for (int attempt = 1; attempt <= 4; attempt++) {
+    // Clear a wedged sensor before each round rather than retrying a handshake
+    // that will keep failing for exactly as long as the chip stays powered.
+    pulseReset();
     for (uint8_t addr : addrs) {
       Serial.print("Attempt "); Serial.print(attempt);
       Serial.print(": begin_I2C(0x"); Serial.print(addr, HEX); Serial.println(")...");
@@ -101,6 +127,11 @@ void setup() {
   Serial.begin(115200);
   delay(100);
   Serial.println("Starting BNO085...");
+
+  // Release reset before touching the bus. Drive it HIGH explicitly: left as a
+  // floating input the sensor could sit held in reset and look "dead".
+  pinMode(BNO_RESET_PIN, OUTPUT);
+  digitalWrite(BNO_RESET_PIN, HIGH);
 
   Wire.begin(SDA_PIN, SCL_PIN);
   delay(300);
