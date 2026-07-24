@@ -71,7 +71,7 @@ def _needs_vision(text: str) -> bool:
     return any(kw in normalized for kw in _VISION_KEYWORDS)
 
 
-SYSTEM_PROMPT = """Είσαι ο "Max", βοηθός ρομπότ καθαρισμού σπιτιού. Απάντα σύντομα, φιλικά, στα Ελληνικά, χωρίς emoji.
+SYSTEM_PROMPT = """Είσαι ο "Max", βοηθός ρομπότ καθαρισμού σπιτιού. Απάντα στα Ελληνικά, φιλικά, χωρίς emoji, με ΜΙΑ σύντομη πρόταση (το πολύ 20 λέξεις). Μην εξηγείς γιατί δεν μπορείς κάτι — πες το σύντομα.
 
 Κάλεσε tool όταν ο χρήστης ζητάει ενέργεια (κίνηση, καθαρισμό, docking, εξερεύνηση, αναφορά αντικειμένων, πιάσιμο αντικειμένου με τον βραχίονα, να σε ακολουθήσει) ή ρωτάει κατάσταση/μπαταρία. Αν απλώς συζητά, απάντα χωρίς tool.
 
@@ -464,7 +464,12 @@ class LLMBridgeNode(Node):
         messages.append(send_user_msg)
 
         def _chat(msgs, temperature, with_tools):
-            payload = {'model': self.lemonade_model, 'messages': msgs, 'temperature': temperature}
+            # Cap the reply length: generation on the NPU runs ~18 tok/s, so a
+            # runaway verbose answer (150+ tokens) takes ~9 s while a one-liner
+            # takes ~3-4 s. Spoken replies should be short anyway. 120 tokens is
+            # ~2-3 Greek sentences — plenty, and it bounds worst-case latency.
+            payload = {'model': self.lemonade_model, 'messages': msgs,
+                       'temperature': temperature, 'max_tokens': 120}
             if with_tools:
                 payload['tools'] = TOOLS
             r = requests.post(f'{self.lemonade_url}/chat/completions', json=payload, timeout=120)

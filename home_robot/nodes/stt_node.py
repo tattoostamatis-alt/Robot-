@@ -32,7 +32,11 @@ class STTNode(Node):
     def __init__(self):
         super().__init__('stt_node')
 
-        self.declare_parameter('model_size',        'large-v3')
+        # 2026-07-24: large-v3 → medium for latency. Benchmarked on a 4.2 s Greek
+        # clip (int8, 8 threads): large-v3 beam5 11.7 s vs medium beam5 4.6 s
+        # (~2.5x faster) with identical transcription. large-v3 stays available
+        # via `model_size:=large-v3` if a hard Greek clip needs the accuracy.
+        self.declare_parameter('model_size',        'medium')
         # 8 threads is the sweet spot on this 16-core CPU (~25% faster than the
         # ctranslate2 default of ~4; 12+ regresses from oversubscription). YOLO
         # moved off the CPU to the iGPU, so these cores are free during STT.

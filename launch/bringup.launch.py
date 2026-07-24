@@ -44,10 +44,12 @@ def generate_launch_description():
     # The `lemonade` backend is really "any OpenAI-compatible server". Exposed
     # because Lemonade 11.0.0 dropped every FLM/NPU model from its catalogue
     # (2026-07-16), so the NPU path now goes through FastFlowLM's own server on
-    # :52625 instead. Override both together.
+    # :52625 instead — that is the default here. Note FLM's base path is `/v1`,
+    # not Lemonade's `/api/v1`, and it spells the model `qwen3vl-it:4b`.
+    # Override both together to point somewhere else.
     llm_url       = LaunchConfiguration('llm_url',
-                                        default='http://127.0.0.1:13305/api/v1')
-    llm_model     = LaunchConfiguration('llm_model', default='qwen3vl-it-4b-FLM')
+                                        default='http://127.0.0.1:52625/v1')
+    llm_model     = LaunchConfiguration('llm_model', default='qwen3vl-it:4b')
     vision_backend = LaunchConfiguration('vision_backend', default='gemini')
     use_planner   = LaunchConfiguration('use_planner',   default='false')
     use_vision    = LaunchConfiguration('use_vision',    default='false')
@@ -751,8 +753,12 @@ def generate_launch_description():
             'mic_channels': 6,
             'mic_channel': LaunchConfiguration('mic_channel', default='4'),
             # Barge-in: saying "Ρομπότ Μαξ" while the robot is talking aborts the
-            # TTS and starts a new turn. Safe on the XVF3800 (ch4 = AEC'd ASR beam).
-            'allow_barge_in': LaunchConfiguration('allow_barge_in', default='true'),
+            # TTS and starts a new turn. DEFAULT false: the robot names itself
+            # "Max/Μαξ" in its replies, and that self-speech is a full-band, real
+            # "Max" — the wake model scores it ~1.00, so with barge-in on the
+            # robot interrupts its own every answer (observed 2026-07-24). The
+            # ch4 AEC does not remove it. Pass allow_barge_in:=true to opt back in.
+            'allow_barge_in': LaunchConfiguration('allow_barge_in', default='false'),
         }],
         condition=IfCondition(use_wake_word),
     )
@@ -950,7 +956,7 @@ def generate_launch_description():
         DeclareLaunchArgument('pick_approach_height', default_value='0.10'),
         DeclareLaunchArgument('use_wake_word', default_value='false'),
         DeclareLaunchArgument('use_stt',       default_value='false'),
-        DeclareLaunchArgument('allow_barge_in', default_value='true'),
+        DeclareLaunchArgument('allow_barge_in', default_value='false'),
         DeclareLaunchArgument('mic_channel',   default_value='4'),
         DeclareLaunchArgument('delivery_mode',  default_value='start_pose'),
         DeclareLaunchArgument('use_doa',            default_value='false'),
@@ -962,8 +968,8 @@ def generate_launch_description():
         DeclareLaunchArgument('use_llm',       default_value='false'),
         DeclareLaunchArgument('llm_backend',   default_value='lemonade'),
         DeclareLaunchArgument('llm_url',
-            default_value='http://127.0.0.1:13305/api/v1'),
-        DeclareLaunchArgument('llm_model',     default_value='qwen3vl-it-4b-FLM'),
+            default_value='http://127.0.0.1:52625/v1'),
+        DeclareLaunchArgument('llm_model',     default_value='qwen3vl-it:4b'),
         DeclareLaunchArgument('vision_backend', default_value='lemonade'),
         DeclareLaunchArgument('use_planner',   default_value='false'),
         DeclareLaunchArgument('use_vision',    default_value='false'),

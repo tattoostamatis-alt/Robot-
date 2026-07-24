@@ -67,6 +67,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, String, Int16MultiArray
 import sounddevice as sd
+from scipy.signal import butter, lfilter, lfilter_zi
 from ament_index_python.packages import get_package_share_directory
 
 from home_robot.voice_gate import (
@@ -134,6 +135,14 @@ class WakeWordNode(Node):
         # own voice leaking through imperfect AEC). Higher than `threshold` so a
         # marginal self-echo spike can't interrupt the robot mid-sentence.
         self.declare_parameter('barge_in_threshold', 0.70)
+        # High-pass cutoff (Hz) applied to the mic channel before wake detection.
+        # The XVF3800 ASR beam carries strong low-frequency noise on this rig
+        # (mini-PC fan / mains hum, dominant 50-250 Hz) that the "max" model
+        # scores as a wake at ~1.00 — measured 8-17 false triggers per 20 s of
+        # silence on every channel. Speech formants live at 500-3000 Hz, so a
+        # 2nd-order high-pass at 250 Hz removes the noise (0 false triggers in
+        # 20 s) without touching the wake word. Set to 0 to disable.
+        self.declare_parameter('highpass_hz', 250.0)
 
         device_index = self.get_parameter('device_index').value
         device_name = self.get_parameter('device_name').value
@@ -152,6 +161,23 @@ class WakeWordNode(Node):
         self.barge_in_threshold = self.get_parameter('barge_in_threshold').value
         self._gate = SpeakingGate(
             release_tail=self.get_parameter('tts_release_tail').value)
+
+        # Stateful high-pass filter for the mic channel (see highpass_hz above).
+        # lfilter_zi seeds the filter state so the very first chunks aren't a
+        # transient; the state is carried across callbacks for a continuous IIR.
+        highpass_hz = self.get_parameter('highpass_hz').value
+        if highpass_hz and highpass_hz > 0:
+            self._hp_b, self._hp_a = butter(2, highpass_hz / (SAMPLE_RATE / 2),
+                                            btype='high')
+            # Keep the unit-step steady state as a template; scale it by the very
+            # first sample so the filter starts already settled to the incoming
+            # DC/noise level. Without this the IIR warm-up transient itself
+            # false-triggers the model for the first ~1 s (2 spurious wakes seen).
+            self._hp_zi_template = lfilter_zi(self._hp_b, self._hp_a)
+            self._hp_zi = None
+            self.get_logger().info(f'High-pass filter @ {highpass_hz:.0f} Hz on mic')
+        else:
+            self._hp_b = None
 
         if model_path:
             model_paths = [model_path]
@@ -191,7 +217,18 @@ class WakeWordNode(Node):
 
     def _audio_callback(self, indata, frames, time_info, status):
         chunk = indata[:, self.mic_channel].copy()
-        self._audio_q.put(chunk)
+        # Wake detection runs on the high-pass-filtered signal (kills fan/mains
+        # rumble that false-triggers the model). The STT stream on mic/audio
+        # keeps the raw chunk — Whisper needs the full band for transcription.
+        if self._hp_b is not None:
+            fchunk = chunk.astype(np.float32)
+            if self._hp_zi is None:                 # seed on the first chunk
+                self._hp_zi = self._hp_zi_template * fchunk[0]
+            filt, self._hp_zi = lfilter(self._hp_b, self._hp_a,
+                                        fchunk, zi=self._hp_zi)
+            self._audio_q.put(np.clip(filt, -32768, 32767).astype(np.int16))
+        else:
+            self._audio_q.put(chunk)
         msg = Int16MultiArray()
         msg.data = chunk.tolist()
         self.audio_pub.publish(msg)
