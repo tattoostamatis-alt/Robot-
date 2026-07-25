@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Interactive recorder for REAL "Μαξ"/"Max" wake-word samples on the robot mic.
+"""Interactive recorder for REAL "Έι ρομπότ"/"Hey robot" wake-word samples on the robot mic.
 
 Captures from the reSpeaker XVF3800 ASR-beam channel (ch 4) — the exact signal
 `wake_word_node.py` runs detection on — at 16 kHz mono, auto-trims leading/
@@ -12,8 +12,8 @@ After recording, re-run the pipeline:
     cp max.onnx ../../config/models/max.onnx
 
 Usage:
-    python3 record_real.py --label pos --count 30           # say "Μαξ"
-    python3 record_real.py --label neg --count 30 --tag mac  # hard negatives
+    python3 record_real.py --label pos --count 30           # say "Έι ρομπότ"
+    python3 record_real.py --label neg --count 30 --tag robot  # hard negatives
 """
 
 import argparse
@@ -111,7 +111,7 @@ def main():
 
     os.makedirs('wav', exist_ok=True)
     idx, stem = next_index(args.label, args.tag)
-    word = 'Μαξ / Max' if args.label == 'pos' else (args.tag or 'the negative phrase')
+    word = 'Έι ρομπότ. if args.label == 'pos' else (args.tag or 'the negative phrase')
     print(f'\nRecording {args.count} "{args.label}" samples — say: "{word}"')
     print('After each: [Enter]=keep  r=redo  s=skip  q=quit\n')
 

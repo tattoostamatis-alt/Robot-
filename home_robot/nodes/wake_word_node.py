@@ -8,14 +8,15 @@ planned faster-whisper streaming STT node, the LLM bridge, etc.) can
 stay idle until they see a message here, instead of running
 continuously — see the RAM budget notes in project memory.
 
-Default model is a custom-trained "max" model (`config/models/max.onnx`,
-see `training/wake_word_max/`) for the compound wake phrase "Ρομπότ Μαξ" /
-"Robot Max". A multi-syllable phrase is far more selective than the old
-single-syllable "Μαξ" (which false-triggered on everyday speech); plain
-"Μαξ" or "ρομπότ" alone are trained in as hard negatives so only the two
-together fire. Trained on synthetic edge-tts speech with gain/reverb/noise
-augmentation — see training/wake_word_max/README for evaluation results,
-known limitations and how to improve it with real recordings.
+Default model is a custom-trained "hey_robot" model
+(`config/models/hey_robot.onnx`, see `training/wake_word_hey_robot/`) for
+the wake phrase "Έι ρομπότ" / "Hey robot" — replaced "Ρομπότ Μαξ" on
+2026-07-25. Plain "ρομπότ" (which shows up in ordinary commands) and a
+bare "έι"/"hey" are trained in as hard negatives, as is the retired
+"Ρομπότ Μαξ", so only the two words together fire. Trained on synthetic
+edge-tts speech with gain/reverb/noise augmentation — see
+training/wake_word_hey_robot/README for evaluation results, known
+limitations and how to improve it with real recordings.
 `model_name` can be set to one of
 openWakeWord's bundled pretrained English models (alexa, hey_jarvis,
 hey_mycroft, hey_marvin, timer, weather) for pipeline testing instead.
@@ -115,7 +116,7 @@ class WakeWordNode(Node):
         self.declare_parameter('device_name', '')
         self.declare_parameter('mic_channels', 3)
         self.declare_parameter('mic_channel', 0)
-        self.declare_parameter('model_name', 'max')
+        self.declare_parameter('model_name', 'hey_robot')
         self.declare_parameter('model_path', '')
         self.declare_parameter('threshold', 0.50)
         self.declare_parameter('cooldown', 1.5)
@@ -181,9 +182,9 @@ class WakeWordNode(Node):
 
         if model_path:
             model_paths = [model_path]
-        elif model_name == 'max':
+        elif model_name == 'hey_robot':
             model_paths = [os.path.join(get_package_share_directory('home_robot'),
-                                         'config', 'models', 'max.onnx')]
+                                         'config', 'models', 'hey_robot.onnx')]
         else:
             model_paths = [p for p in openwakeword.get_pretrained_model_paths()
                            if model_name in os.path.basename(p)]

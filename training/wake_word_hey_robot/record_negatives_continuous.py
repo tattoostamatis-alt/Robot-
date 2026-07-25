@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Continuous hard-negative capture for the "Μαξ"/"Max" wake word.
+"""Continuous hard-negative capture for the "Έι ρομπότ"/"Hey robot" wake word.
 
 Records one uninterrupted stretch of REAL general speech from the reSpeaker
 XVF3800 ASR-beam channel (ch 4 — the exact signal wake_word_node.py detects on),
@@ -8,7 +8,7 @@ actually contain voiced speech. Each kept window becomes a negative example
 (`real_neg_<tag>_NNNN.wav`) appended to manifest.tsv.
 
 Unlike record_real.py this needs NO per-take interaction: you just talk normally
-for the whole duration (say anything EXCEPT "Max/Μαξ"). Audio cues:
+for the whole duration (say anything EXCEPT "Έι ρομπότ"). Audio cues:
   3 short beeps + 1 long beep  -> START talking
   2 beeps                      -> STOP
 
@@ -111,7 +111,7 @@ def main():
     idx = next_index(stem)
 
     print(f'\nRecording {args.secs:.0f}s of general speech. Talk normally — '
-          f'ANYTHING EXCEPT "Max/Μαξ".')
+          f'ANYTHING EXCEPT "Έι ρομπότ".')
     print('Cue: 3 short beeps + 1 long beep = START ;  2 beeps at the end = STOP.\n')
     time.sleep(args.lead)
     for _ in range(3):

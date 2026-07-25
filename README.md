@@ -30,7 +30,7 @@ autonomy + voice + LLM stack on an AMD Ryzen AI mini-PC.
 - **Mapping** — `slam_toolbox` (2D) and RTAB-Map (3D).
 - **Perception** — YOLO11n object detector on the iGPU (~63 fps), object
   tracker, face/pose detectors.
-- **Voice / LLM** — openWakeWord wake word ("Ρομπότ Μαξ"), faster-whisper STT
+- **Voice / LLM** — openWakeWord wake word ("Έι ρομπότ"), faster-whisper STT
   (Greek), edge-tts TTS, an LLM bridge to a local Qwen3-VL (Lemonade/NPU) with
   tool-calling, and a ChromaDB RAG long-term memory.
 - **Arm** — MoveIt 3D control + a detection-driven pick-and-place bridge.

@@ -130,8 +130,13 @@ camera + detector + tracker + dynamic-obstacle layers + object memory).
 - **Footprint vs kela3 doorways** — verified offline, robot fits through every door at inscribed
       and inflation radius; no change needed.
 - **IMU translation x/y/z** — left as-is by decision (exact IMU chassis position not needed).
-- **Wake word** — changed "Μαξ" → compound "Ρομπότ Μαξ" 2026-07-05 to kill
-  false-triggers (see Voice UX above); HW-heard confirmation pending.
+- **Wake word** — "Μαξ" → "Ρομπότ Μαξ" 2026-07-05 to kill false-triggers (see
+  Voice UX above), then → **"Έι ρομπότ" / "Hey robot"** 2026-07-25 by user
+  request (new model, `training/wake_word_hey_robot/`). Retraining also fixed a
+  data bug that had been hurting every model: clips longer than the 2s window
+  were left-truncated but kept their label, teaching "ρομπότ" alone as a
+  positive. Held-out eval pos min 0.609 / mean 0.991, neg max 0.382.
+  HW-heard confirmation still pending.
 - **YOLO NPU quantization** — `yolo11n_int8.onnx` left as-is, not integrating; YOLO stays on
       iGPU/ROCm (~63 fps).
 - **Vision Q&A** — stays on Gemini cloud; NPU/Qwen3-VL path not being revisited.

@@ -44,12 +44,27 @@ def load_wav_mono16k(path):
     return audio
 
 
+def trim_silence(audio, thresh=150, pad=800):
+    """Strip edge silence (edge-tts pads every clip) so more clips fit the
+    2s window on their own merits instead of being dropped for length."""
+    loud = np.nonzero(np.abs(audio) > thresh)[0]
+    if len(loud) == 0:
+        return audio
+    lo = max(0, loud[0] - pad)
+    hi = min(len(audio), loud[-1] + pad)
+    return audio[lo:hi]
+
+
 def make_buffer(audio, trailing):
     avail = WINDOW_SAMPLES - trailing
     if len(audio) > avail:
-        if trailing > 0:
-            return None  # doesn't fit with trailing silence — skip this variant
-        audio = audio[-avail:]  # trim leading context, right-align the end
+        # Don't left-truncate to make it fit: that silently relabels the clip.
+        # A slow "Έι ρομπότ!" (2.26s) loses its "Έι" and is still taught as a
+        # positive — i.e. "ρομπότ" alone means wake — while a slow "my robot"
+        # (2.16s) loses its "m" and lands acoustically on top of the wake
+        # phrase as a negative. Those two mislabelings were the whole source
+        # of the near-miss false triggers. Skip anything that doesn't fit.
+        return None
     leading = avail - len(audio)
     buf = np.zeros(WINDOW_SAMPLES, dtype=np.int16)
     buf[leading:leading + len(audio)] = audio
@@ -99,31 +114,40 @@ def main():
 
     buffers = []
     labels = []
+    clean = []  # 1 = untouched TTS buffer, 0 = augmented/synthetic noise
+    n_skipped = 0
     for label, path in manifest:
-        audio = load_wav_mono16k(path)
+        audio = trim_silence(load_wav_mono16k(path))
+        if len(audio) > WINDOW_SAMPLES:
+            n_skipped += 1
         for trailing in TRAILING_VARIANTS:
             buf = make_buffer(audio, trailing)
             if buf is None:
                 continue
             buffers.append(buf)
             labels.append(1 if label == 'pos' else 0)
+            clean.append(1)
             for _ in range(N_AUG):
                 buffers.append(augment(buf, noise_source, rng))
                 labels.append(1 if label == 'pos' else 0)
+                clean.append(0)
 
     for _ in range(N_SILENCE_NEG):
         buffers.append((rng.standard_normal(WINDOW_SAMPLES) * 50).astype(np.int16))
         labels.append(0)
+        clean.append(0)
 
     X = np.stack(buffers)
     y = np.array(labels, dtype=np.float32)
-    print(f'Total examples: {len(y)} (pos={int(y.sum())}, neg={int((1 - y).sum())})')
+    clean = np.array(clean, dtype=np.float32)
+    print(f'Total examples: {len(y)} (pos={int(y.sum())}, neg={int((1 - y).sum())}); '
+          f'{n_skipped} clips longer than the 2s window were dropped')
 
     af = AudioFeatures()
     embeddings = af.embed_clips(X, batch_size=64)
     print('embeddings shape:', embeddings.shape)
 
-    np.savez('features.npz', X=embeddings.astype(np.float32), y=y)
+    np.savez('features.npz', X=embeddings.astype(np.float32), y=y, clean=clean)
     print('Saved features.npz')
 
 

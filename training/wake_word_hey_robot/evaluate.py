@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sanity-check the exported max.onnx via openwakeword.model.Model on
+"""Sanity-check the exported hey_robot.onnx via openwakeword.model.Model on
 held-out manifest clips (right-aligned 2.0s buffers, same as training)
 plus pure noise — print scores grouped by label."""
 
@@ -22,6 +22,15 @@ def load_wav_mono16k(path):
     return audio
 
 
+def trim_silence(audio, thresh=150, pad=800):
+    """Same edge-silence trim as extract_features.py, so eval sees the same
+    buffers the model was trained on."""
+    loud = np.nonzero(np.abs(audio) > thresh)[0]
+    if len(loud) == 0:
+        return audio
+    return audio[max(0, loud[0] - pad):min(len(audio), loud[-1] + pad)]
+
+
 def make_buffer(audio):
     if len(audio) > WINDOW_SAMPLES:
         audio = audio[-WINDOW_SAMPLES:]
@@ -32,15 +41,20 @@ def make_buffer(audio):
 
 
 def main():
-    model = Model(wakeword_model_paths=['max.onnx'])
+    model = Model(wakeword_model_paths=['hey_robot.onnx'])
     name = list(model.models.keys())[0]
     print('model name:', name)
 
     manifest = [line.strip().split('\t') for line in open('manifest.tsv')]
 
     pos_scores, neg_scores = [], []
+    n_skipped = 0
     for label, path in manifest:
-        audio = make_buffer(load_wav_mono16k(path))
+        audio = trim_silence(load_wav_mono16k(path))
+        if len(audio) > WINDOW_SAMPLES:
+            n_skipped += 1  # doesn't fit the window — see extract_features.py
+            continue
+        audio = make_buffer(audio)
         model.reset()
         # feed enough silence first so prediction_buffer warm-up (5 frames) passes,
         # then feed the real buffer in 1280-sample chunks
@@ -51,6 +65,8 @@ def main():
             preds = model.predict(audio[i:i + 1280])
             score = preds[name]
         (pos_scores if label == 'pos' else neg_scores).append((score, path))
+
+    print(f'{n_skipped} clips skipped (longer than the 2s window)')
 
     pos_scores.sort()
     neg_scores.sort(reverse=True)

@@ -737,15 +737,16 @@ def generate_launch_description():
         executable='wake_word_node.py',
         name='wake_word_node',
         output='screen',
-        # 2026-07-03: retrained "max" model with 30 real XVF3800 (ch4/ASR-beam)
-        # "Μαξ" recordings added as positives (training/wake_word_max/record_real.py).
-        # Real positives now score min 0.975 / mean 0.998; clean negatives max
-        # 0.245, pure noise 0.006 — huge separation. Dropped the interim 0.80
-        # (which existed only to tame the synthetic-only model's false triggers)
-        # to 0.60 for better sensitivity to distant/quiet "Μαξ". Raise again if
-        # real-world talking false-triggers (real hard-negatives not yet recorded).
-        # Listen on the XVF3800 ASR-beam channel (ch4) — the exact signal the
-        # "max" model was recorded/trained on (training/wake_word_max/record_real.py).
+        # 2026-07-25: wake phrase changed "Ρομπότ Μαξ" -> "Έι ρομπότ"/"Hey robot",
+        # which needed a fresh model (training/wake_word_hey_robot/). Held-out
+        # synthetic eval: positives min 0.609 / mean 0.991, negatives max 0.382
+        # (next-highest 0.009), pure noise 0.000. Threshold back to 0.50: unlike
+        # the old "max" model this one has NO real XVF3800 recordings in it yet,
+        # and synthetic-only models score lower on real mic audio — 0.60 risks
+        # misses. Raise it if real-world talking false-triggers, or add real
+        # positives with training/wake_word_hey_robot/record_real.py.
+        # Listen on the XVF3800 ASR-beam channel (ch4) — the beamformed/denoised
+        # signal the model's augmentation was designed around.
         # Without these the node falls back to defaults (default device, ch0/3ch),
         # which is NOT what the model was trained on. Verified live 2026-07-03:
         # real "Μαξ" scores 1.00 on ch4 at threshold 0.60, 6/6 detections.
@@ -764,16 +765,17 @@ def generate_launch_description():
         # seconds and appears to never answer. On ch4: 0 false triggers in 30 s.
         # Left as a launch arg only for experiments; the default is the one to use.
         parameters=[{
-            'threshold': 0.60,
+            'threshold': 0.50,
             'device_name': 'XVF3800',
             'mic_channels': 6,
             'mic_channel': LaunchConfiguration('mic_channel', default='4'),
-            # Barge-in: saying "Ρομπότ Μαξ" while the robot is talking aborts the
-            # TTS and starts a new turn. DEFAULT false: the robot names itself
-            # "Max/Μαξ" in its replies, and that self-speech is a full-band, real
-            # "Max" — the wake model scores it ~1.00, so with barge-in on the
-            # robot interrupts its own every answer (observed 2026-07-24). The
-            # ch4 AEC does not remove it. Pass allow_barge_in:=true to opt back in.
+            # Barge-in: saying "Έι ρομπότ" while the robot is talking aborts the
+            # TTS and starts a new turn. DEFAULT false since 2026-07-24, when the
+            # robot's own replies (it named itself "Max") self-fired the detector
+            # at ~1.00 and it interrupted every answer; the ch4 AEC does not
+            # remove self-speech. The new phrase makes that less likely — the
+            # robot says "ρομπότ" but rarely "έι ρομπότ" — so this is worth
+            # retrying: pass allow_barge_in:=true and listen for self-interrupts.
             'allow_barge_in': LaunchConfiguration('allow_barge_in', default='false'),
             # No wake acknowledgement beep — the user finds it grating, and any
             # residual false trigger would beep out loud. Wake still works

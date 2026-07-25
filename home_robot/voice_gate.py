@@ -84,7 +84,7 @@ def wake_decision(score: float, threshold: float, *,
     leaking into the mic ("self-echo"). While TTS plays we only accept a wake as
     a genuine barge-in if it clears a *stricter* `barge_in_threshold` — self-echo
     false positives tend to be brief marginal spikes, whereas a person saying the
-    whole "Ρομπότ Μαξ" scores high and sustained. Anything during the reverb tail
+    whole "Έι ρομπότ" scores high and sustained. Anything during the reverb tail
     (suppressed but no longer speaking) is always dropped.
     """
     if score < threshold:

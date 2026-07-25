@@ -2,10 +2,10 @@ __pycache__/
 *.pyc
 
 # Generated wake-word training artifacts (regenerate via
-# training/wake_word_max/generate_data.py + extract_features.py)
-training/wake_word_max/wav/
-training/wake_word_max/raw/
-training/wake_word_max/features.npz
+# training/wake_word_hey_robot/generate_data.py + extract_features.py)
+training/wake_word_hey_robot/wav/
+training/wake_word_hey_robot/raw/
+training/wake_word_hey_robot/features.npz
 
 # slam_toolbox lifelong-mapping pose-graphs — environment-specific,
 # regenerate via scripts/save_map.sh

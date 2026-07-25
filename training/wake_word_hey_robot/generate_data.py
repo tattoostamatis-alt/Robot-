@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Generate synthetic TTS training data for the "Max"/"Μαξ" wake word.
+"""Generate synthetic TTS training data for the "Έι ρομπότ"/"Hey robot" wake word.
 
 Uses edge-tts (Greek + English neural voices) with rate/pitch variants
-to synthesize positive ("Μαξ"/"Max") and negative (other words/phrases,
-including phonetically-similar hard negatives) clips, then converts
-each to 16kHz mono PCM WAV via ffmpeg.
+to synthesize positive ("Έι ρομπότ"/"Hey robot") and negative (other
+words/phrases, including phonetically-similar hard negatives) clips,
+then converts each to 16kHz mono PCM WAV via ffmpeg.
 
 Output: wav/*.wav + manifest.tsv (label<TAB>path)
 """
@@ -25,32 +25,46 @@ GREEK_VOICES = ['el-GR-AthinaNeural', 'el-GR-NestorasNeural']
 ENGLISH_VOICES = ['en-US-AriaNeural', 'en-US-GuyNeural', 'en-US-JennyNeural',
                   'en-GB-RyanNeural', 'en-GB-SoniaNeural', 'en-US-AndrewNeural']
 
-# Wake phrase is now the compound "Ρομπότ Μαξ" / "Robot Max" — a longer,
-# multi-syllable phrase is far more selective than a single syllable.
-POS_GREEK = ['Ρομπότ Μαξ', 'Ρομπότ Μαξ!', 'Έι ρομπότ Μαξ', 'Ρομπότ Μαξ έλα εδώ',
-             'Ρομπότ Μαξ άκου με', 'Ρομποτ Μαξ']
-POS_ENGLISH = ['Robot Max', 'Robot Max!', 'Hey Robot Max', 'Okay Robot Max']
+# Wake phrase is "Έι ρομπότ" / "Hey robot" (replaced "Ρομπότ Μαξ" on 2026-07-25).
+# Both spellings of the Greek interjection ("Έι" / "Χέι") are synthesized, since
+# the two Greek voices render them slightly differently.
+POS_GREEK = ['Έι ρομπότ', 'Έι ρομπότ!', 'Χέι ρομπότ', 'Έι ρομπότ έλα εδώ',
+             'Έι ρομπότ άκου με', 'Έι ρομποτ']
+# Keep the English positives short and phrase-final: adding trailing-word
+# variants ("Hey robot hello", "…are you there") taught the model that "robot"
+# anywhere in the window is enough, which made "my robot" score 0.8+.
+POS_ENGLISH = ['Hey robot', 'Hey robot!', 'Hey robot come here', 'Hey robot listen to me']
 
 NEG_GREEK = ['Γεια σου', 'Πήγαινε στην κουζίνα', 'Σταμάτα', 'Καθάρισε το δωμάτιο',
              'Τι ώρα είναι', 'Άσε με ήσυχο', 'Πήγαινε στο σαλόνι', 'Επέστρεψε στη βάση',
              'Ένα δύο τρία', 'Ευχαριστώ πολύ', 'Πόσο κάνει αυτό', 'Δεν καταλαβαίνω',
-             'Βοήθεια', 'Άναψε το φως', 'Κλείσε την πόρτα']
-NEG_ENGLISH = ['Hello', 'Stop', 'Mark', 'Mac', 'Mix', 'Tax', 'Fax', 'Mask', 'Sax',
-               'Jack', 'Alex', 'Go to the kitchen', 'What time is it', 'Thank you',
+             'Βοήθεια', 'Άναψε το φως', 'Κλείσε την πόρτα',
+             # phonetically close to "ρομπότ"
+             'Ρόμπα', 'Μπότες', 'Ρόδα', 'Ρόμπερτ']
+NEG_ENGLISH = ['Hello', 'Stop', 'Robert', 'Rowboat', 'Rope', 'Roll it', 'Report',
+               'Rabbit', 'Go to the kitchen', 'What time is it', 'Thank you',
                'Turn on the light']
 
 # Critical hard negatives: either half of the wake phrase spoken ALONE must NOT
 # trigger. Weighted heavily (all voices, 3 variants) so the model learns that
-# only "Ρομπότ" AND "Μαξ" together fire — plain "Μαξ" or "ρομπότ" in normal
-# conversation stays silent.
-NEG_HARD_GREEK = ['Μαξ', 'Μαξ!', 'Έι Μαξ', 'Γεια σου Μαξ', 'Μαξ έλα εδώ', 'Μαξ άκου με',
-                  'Ρομπότ', 'Το ρομπότ', 'ρομπότ μου', 'Έι ρομπότ']
-NEG_HARD_ENGLISH = ['Max', 'Max!', 'Hey Max', 'Okay Max', 'Robot', 'The robot',
-                    'My robot', 'Hey robot']
+# only "Έι" AND "ρομπότ" together fire — plain "ρομπότ" (very common in normal
+# commands to the robot) or a bare "έι"/"hey" stays silent. The retired
+# "Ρομπότ Μαξ" phrase is in here too, so the old wake word no longer fires.
+NEG_HARD_GREEK = ['Ρομπότ', 'Το ρομπότ', 'ρομπότ μου', 'Ένα ρομπότ', 'Το ρομπότ μου',
+                  'Πού είναι το ρομπότ', 'Το ρομπότ καθαρίζει',
+                  'Έι', 'Έι εσύ', 'Έι ακούς', 'Ρομπότ Μαξ', 'Μαξ']
+NEG_HARD_ENGLISH = ['Robot', 'The robot', 'My robot', 'A robot', 'Where is the robot',
+                    'Hey', 'Hey you', 'Hey there', 'Robot Max', 'Hey Max']
 
 VARIANTS_3 = [('-15%', '-25Hz'), ('+0%', '+0Hz'), ('+15%', '+25Hz')]
 VARIANTS_2 = [('-15%', '-25Hz'), ('+15%', '+25Hz')]
 VARIANTS_1 = [('+0%', '+0Hz')]
+# edge-tts only ships two Greek voices, so Greek data is thin compared to the
+# six English ones — the misclassified clips were nearly all Greek, and nearly
+# all from the same voice at the slow rate. Extra rate/pitch variants are the
+# only cheap way to widen Greek coverage.
+VARIANTS_5 = [('-20%', '-40Hz'), ('-10%', '-15Hz'), ('+0%', '+0Hz'),
+              ('+10%', '+15Hz'), ('+20%', '+40Hz')]
 
 jobs = []  # (label, text, voice, rate, pitch, name)
 
@@ -64,12 +78,12 @@ def add_jobs(label, texts, voices, variants):
                 jobs.append((label, t, v, r, p, name))
 
 
-add_jobs('pos', POS_GREEK, GREEK_VOICES, VARIANTS_3)
+add_jobs('pos', POS_GREEK, GREEK_VOICES, VARIANTS_5)
 add_jobs('pos', POS_ENGLISH, ENGLISH_VOICES, VARIANTS_3)
-add_jobs('neg', NEG_GREEK, GREEK_VOICES, VARIANTS_2)
+add_jobs('neg', NEG_GREEK, GREEK_VOICES, VARIANTS_3)
 add_jobs('neg', NEG_ENGLISH, ENGLISH_VOICES, VARIANTS_1)
-add_jobs('neg', NEG_HARD_GREEK, GREEK_VOICES, VARIANTS_3)
-add_jobs('neg', NEG_HARD_ENGLISH, ENGLISH_VOICES, VARIANTS_2)
+add_jobs('neg', NEG_HARD_GREEK, GREEK_VOICES, VARIANTS_5)
+add_jobs('neg', NEG_HARD_ENGLISH, ENGLISH_VOICES, VARIANTS_3)
 
 print(f'Total jobs: {len(jobs)} '
       f'(pos={sum(1 for j in jobs if j[0]=="pos")}, '
