@@ -40,7 +40,6 @@ import serial
 PORT = '/dev/roomba'
 BAUD = 115200
 INTERVAL_S = 60.0
-DRIVER_PATTERN = 'roomba_driver.py'
 
 # OI opcodes (iRobot Open Interface spec).
 OI_START = 128     # enter OI, Passive mode
@@ -49,10 +48,23 @@ OI_SENSORS = 142   # request one sensor packet
 PKT_CHARGE = 25    # battery charge (2 bytes) -- used purely as a liveness probe
 
 
-def driver_running() -> bool:
-    """True when the ROS driver owns the port and is managing OI itself."""
+def port_is_owned() -> bool:
+    """True when another process holds the serial port open.
+
+    Asks the kernel who has the device open rather than matching process names.
+    ``pgrep -f roomba_driver.py`` (what this used to do) matches the *whole
+    command line* of every process, so anything that merely mentions the string
+    -- a grep, an editor, a shell one-liner during debugging -- looked like a
+    running driver and made this daemon stand down while nothing was actually
+    keeping the robot awake. Observed 2026-07-25, where one of our own diagnostic
+    commands produced exactly that false positive.
+
+    Owning the port is also the question that actually matters: the reason to
+    stand down is that two processes cannot share the serial line, not that some
+    file is named roomba_driver.py.
+    """
     return subprocess.run(
-        ['pgrep', '-f', DRIVER_PATTERN],
+        ['fuser', '-s', PORT],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     ).returncode == 0
@@ -102,10 +114,10 @@ def main() -> int:
     # the one line that matters under a day of "still fine".
     state = None
     while True:
-        if driver_running():
+        if port_is_owned():
             if state != 'driver':
-                log('roomba_driver.py is running — standing down (it keeps the '
-                    'robot awake itself)')
+                log(f'{PORT} is owned by another process (the ROS driver) — '
+                    'standing down; it keeps the robot awake itself')
                 state = 'driver'
         else:
             try:
