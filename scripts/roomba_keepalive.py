@@ -93,35 +93,40 @@ def log(msg: str) -> None:
 def main() -> int:
     log(f'roomba keep-alive started (hold Full mode, port={PORT}, '
         f'every {INTERVAL_S:.0f}s)')
-    # None = unknown, so the first cycle always reports where it found things.
-    # Only transitions are logged after that: at once a minute, logging every
-    # cycle would bury the one line that matters in a day of "still fine".
-    was_awake = None
+    # Track three distinct states, not a bool: 'driver' (stood down), 'awake'
+    # (we are holding it) and 'asleep'. Folding the first two into True hides
+    # the handover -- when the ROS driver stops, the very line you want is
+    # "keep-alive has taken over and the robot still answers". None = unknown,
+    # so the first cycle after a restart always reports what it found. Only
+    # transitions are logged: at once a minute, logging every cycle would bury
+    # the one line that matters under a day of "still fine".
+    state = None
     while True:
         if driver_running():
-            if was_awake is not True:
+            if state != 'driver':
                 log('roomba_driver.py is running — standing down (it keeps the '
                     'robot awake itself)')
-                was_awake = True
+                state = 'driver'
         else:
             try:
                 awake = assert_full_mode()
-                if awake != was_awake:
+                new_state = 'awake' if awake else 'asleep'
+                if new_state != state:
                     if awake:
-                        log('robot is AWAKE and held in Full mode')
+                        log('robot is AWAKE and held in Full mode by keep-alive')
                     else:
                         log('robot is ASLEEP — it ignores serial entirely and '
                             'BRC is not wired, so only a CLEAN press wakes it. '
                             'Keep-alive cannot recover this on its own.')
-                    was_awake = awake
+                    state = new_state
             except serial.SerialException as e:
                 # Port missing (robot unplugged) or briefly grabbed by someone
                 # else: not fatal, retry next cycle.
                 log(f'keep-alive skipped: {e}')
-                was_awake = None
+                state = None
             except Exception as e:                       # noqa: BLE001
                 log(f'keep-alive failed unexpectedly: {e!r}')
-                was_awake = None
+                state = None
         time.sleep(INTERVAL_S)
 
 
