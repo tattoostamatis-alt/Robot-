@@ -91,11 +91,27 @@ SAMPLE_RATE = 16000
 CHUNK_SIZE = 1280  # 80ms @ 16kHz — openWakeWord's expected frame size
 
 
-def _play_beep(freq=880, duration=0.35, sample_rate=44100):
+# "I'm listening" chime, in the spirit of Hey Siri's two-note acknowledgement.
+# The old cue was a single 880 Hz sine at 0.6 amplitude held for 350 ms, which
+# the user found grating — a bare sine that starts and stops abruptly clicks at
+# both ends and rings for far too long. This is two short notes a fifth apart
+# (E6 -> B6), each 80/110 ms, at a third of the volume, each shaped by a
+# raised-cosine envelope so it fades in and out instead of clicking. Total
+# ~0.2 s, so it never gets in the way of the command you speak next.
+CHIME_NOTES = [(1319.0, 0.08), (1976.0, 0.11)]  # (Hz, seconds)
+CHIME_GAIN = 0.20
+
+
+def _play_beep(sample_rate=44100):
     try:
         import sounddevice as sd
-        t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
-        tone = (0.6 * np.sin(2 * np.pi * freq * t)).astype(np.float32)
+        parts = []
+        for freq, duration in CHIME_NOTES:
+            t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
+            # Raised-cosine (Hann) envelope — zero at both ends, so no click.
+            env = 0.5 * (1 - np.cos(2 * np.pi * np.arange(len(t)) / max(1, len(t) - 1)))
+            parts.append(CHIME_GAIN * env * np.sin(2 * np.pi * freq * t))
+        tone = np.concatenate(parts).astype(np.float32)
         # Use pulse (index 7) — works with any PulseAudio output device
         sd.play(tone, samplerate=sample_rate, device=7)
         sd.wait()

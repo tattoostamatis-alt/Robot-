@@ -777,10 +777,13 @@ def generate_launch_description():
             # robot says "ρομπότ" but rarely "έι ρομπότ" — so this is worth
             # retrying: pass allow_barge_in:=true and listen for self-interrupts.
             'allow_barge_in': LaunchConfiguration('allow_barge_in', default='false'),
-            # No wake acknowledgement beep — the user finds it grating, and any
-            # residual false trigger would beep out loud. Wake still works
-            # silently. Pass beep_on_wake:=true to bring it back.
-            'beep_on_wake': LaunchConfiguration('beep_on_wake', default='false'),
+            # Wake acknowledgement ON again 2026-07-25: without any cue you
+            # cannot tell whether the robot heard you, which the user asked for
+            # explicitly ("like Hey Siri"). It was switched off because the old
+            # cue — one 880 Hz sine, 0.6 amplitude, 350 ms, no envelope — was
+            # grating; the sound is now a soft two-note chime (~0.2 s, a third
+            # of the volume, fades in/out). Pass beep_on_wake:=false for silent.
+            'beep_on_wake': LaunchConfiguration('beep_on_wake', default='true'),
         }],
         condition=IfCondition(use_wake_word),
     )
@@ -979,7 +982,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_wake_word', default_value='false'),
         DeclareLaunchArgument('use_stt',       default_value='false'),
         DeclareLaunchArgument('allow_barge_in', default_value='false'),
-        DeclareLaunchArgument('beep_on_wake',  default_value='false'),
+        DeclareLaunchArgument('beep_on_wake',  default_value='true'),
         DeclareLaunchArgument('mic_channel',   default_value='4'),
         DeclareLaunchArgument('delivery_mode',  default_value='start_pose'),
         DeclareLaunchArgument('use_doa',            default_value='false'),
