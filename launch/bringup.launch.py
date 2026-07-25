@@ -578,18 +578,34 @@ def generate_launch_description():
     )
 
     # ── Intel RealSense D435 ──────────────────────────────────────
-    realsense_node = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource([
-            FindPackageShare('realsense2_camera'), '/launch/rs_launch.py'
-        ]),
-        launch_arguments={
-            'enable_color':    'true',
-            'enable_depth':    'true',
-            'enable_infra1':   'false',
-            'enable_infra2':   'false',
-            'align_depth.enable': 'true',
-            'pointcloud.enable':  'true',
-        }.items(),
+    # Wrapped in a non-forwarding GroupAction: rs_launch.py prints a warning —
+    # with the full 80-entry list of supported parameters — for every launch
+    # configuration it does not recognise, and an included launch file inherits
+    # the parent's. So each of our own `use_*` args (use_tts, use_stt, use_llm,
+    # use_slam, use_rviz, …) produced a screenful of noise that buried the real
+    # errors in the log. They never reached the camera node (rs_launch only
+    # passes its own declared parameters), so this is cosmetic upstream chatter;
+    # scoped + forwarding=False just hands the include a clean scope. The
+    # arguments below are still passed explicitly, and `condition` sits on the
+    # group so `use_camera` is resolved in the parent scope.
+    realsense_node = GroupAction(
+        actions=[
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource([
+                    FindPackageShare('realsense2_camera'), '/launch/rs_launch.py'
+                ]),
+                launch_arguments={
+                    'enable_color':    'true',
+                    'enable_depth':    'true',
+                    'enable_infra1':   'false',
+                    'enable_infra2':   'false',
+                    'align_depth.enable': 'true',
+                    'pointcloud.enable':  'true',
+                }.items(),
+            )
+        ],
+        scoped=True,
+        forwarding=False,
         condition=IfCondition(use_camera),
     )
 
