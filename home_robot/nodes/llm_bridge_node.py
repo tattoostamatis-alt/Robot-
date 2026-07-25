@@ -292,7 +292,14 @@ class LLMBridgeNode(Node):
             active_model = self.lemonade_model
         else:
             active_model = self.model
-        self.get_logger().info(f'LLM bridge started — backend={self.backend} model={active_model} | vision=Gemini Flash Lite')
+        # Vision path differs per backend: `lemonade` (FastFlowLM/NPU) attaches the
+        # frame to the same Qwen3-VL call, so no cloud key is involved; the ollama
+        # path pre-describes the frame with Gemini Flash Lite first. Say which one
+        # is actually live — a hardcoded "vision=Gemini" here sends future debugging
+        # hunting for a GEMINI_API_KEY that the NPU path never reads.
+        vision_path = ('Qwen3-VL on NPU (same call)' if self.backend == 'lemonade'
+                       else 'Gemini Flash Lite')
+        self.get_logger().info(f'LLM bridge started — backend={self.backend} model={active_model} | vision={vision_path}')
 
         # Warm up the NPU model at boot so the first real voice command isn't a
         # ~cold-load stall (FastFlowLM loads the 4B from disk on first use; this
