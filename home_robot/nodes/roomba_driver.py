@@ -15,6 +15,7 @@ import os
 import select
 import struct
 import termios
+import threading
 import time
 
 
@@ -137,6 +138,29 @@ class RoombaDriver(Node):
 
         self.declare_parameter('port', '/dev/roomba')
         self.declare_parameter('baud', 115200)
+        # ── BRC (wake) line ────────────────────────────────────────────────
+        # The Roomba sleeps after ~5 min and then ignores serial completely;
+        # only a button press or a low pulse on BRC (mini-DIN pin 5) brings it
+        # back. On this robot BRC is NOT wired (proven 2026-07-25: 282 wake()
+        # calls over 14 min moved nothing on a 99.9% battery, one CLEAN press
+        # woke it instantly), so all of this is dormant until someone runs the
+        # wire. It is written so that the day the wire exists, nothing else has
+        # to change.
+        #
+        # brc_port: '' means BRC is wired to this same adapter's DTR. Set it to
+        # another tty (e.g. a cheap USB-TTL dongle whose DTR goes to pin 5) to
+        # drive the line from there instead -- that route leaves the working
+        # data cable untouched.
+        self.declare_parameter('brc_port', '')
+        self.declare_parameter('brc_pulse_s', 0.6)      # OI wants >500ms low
+        # ‼️ SAFETY, not tuning: per the OI spec, pulsing BRC low THREE times
+        # within 5 seconds switches the robot to 19200 baud. pycreate2's wake()
+        # does two pulses per call and _keep_awake called it every 2s while the
+        # robot was unresponsive -- harmless only because the pin is unwired.
+        # With the wire in, that pattern would silently reconfigure the robot
+        # and it would look far more broken than merely asleep. One pulse per
+        # call, and never more often than this, keeps us well clear.
+        self.declare_parameter('brc_min_interval_s', 10.0)
         self.declare_parameter('idle_timeout', 30.0)  # seconds until passive mode
         # How long to let the Create 2's IR dock seek run before giving up and
         # resuming keep-awake. The stock behaviour wanders for a while before
@@ -223,6 +247,10 @@ class RoombaDriver(Node):
         self.right_trim_reverse = self.get_parameter('right_trim_reverse').value
         self.max_accel = self.get_parameter('max_accel').value
         self.reverse_speed_scale = self.get_parameter('reverse_speed_scale').value
+        self.brc_port = self.get_parameter('brc_port').value
+        self.brc_pulse_s = self.get_parameter('brc_pulse_s').value
+        self.brc_min_interval_s = self.get_parameter('brc_min_interval_s').value
+        self._brc_thread = None
         self.add_on_set_parameters_callback(self._on_set_parameters)
 
         self.bot = pycreate2.Create2(port, baud)
@@ -406,18 +434,62 @@ class RoombaDriver(Node):
                 f'Roomba: idle {self.idle_timeout:.0f}s → passive mode (low power)'
             )
 
+    def _set_brc_low(self, fd: int, low: bool):
+        """Drive the BRC line. On a USB-TTL adapter, asserting DTR pulls the
+        pin to 0V, which is the active (wake) level BRC wants."""
+        fcntl.ioctl(fd,
+                    termios.TIOCMBIS if low else termios.TIOCMBIC,
+                    struct.pack('I', termios.TIOCM_DTR))
+
+    def _do_brc_pulse(self):
+        """One low pulse, long enough for the OI to notice. Runs on its own
+        thread: pycreate2's wake() blocks for 3 SECONDS inside what used to be
+        a 2s timer callback, which stalled odometry publishing and every other
+        timer on this node for as long as the robot stayed asleep."""
+        try:
+            if self.brc_port:
+                fd = os.open(self.brc_port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+                try:
+                    self._set_brc_low(fd, True)
+                    time.sleep(self.brc_pulse_s)
+                    self._set_brc_low(fd, False)
+                finally:
+                    os.close(fd)
+            else:
+                # Same adapter as the data line: _RawTermiosSerial exposes the
+                # modem bits, and toggling them does not disturb bytes in flight.
+                self.bot.SCI.ser.dtr = True
+                time.sleep(self.brc_pulse_s)
+                self.bot.SCI.ser.dtr = False
+        except Exception as e:
+            self.get_logger().warn(f'BRC pulse failed: {e!r}')
+
+    def _brc_pulse(self):
+        """Request a BRC pulse, rate-limited and non-blocking.
+
+        The rate limit is a safety interlock, not a nicety: three pulses inside
+        5 seconds put the robot on 19200 baud (OI spec). Skipping a pulse costs
+        nothing -- the sleep timer is 5 minutes wide."""
+        now = time.monotonic()
+        if now - self._last_brc_pulse < self.brc_min_interval_s:
+            return
+        if self._brc_thread is not None and self._brc_thread.is_alive():
+            return
+        self._last_brc_pulse = now
+        self._brc_thread = threading.Thread(target=self._do_brc_pulse, daemon=True)
+        self._brc_thread.start()
+
     def _connect_oi(self):
         """(Re)initialise the Open Interface: wake → Passive → Full. Safe to
         call repeatedly. Called at startup and by _keep_awake to recover
         automatically after the Roomba has gone to sleep (it ignores serial
         while asleep, so a single boot-time init is not enough)."""
         try:
-            self.bot.wake()      # pulse BRC low — wakes the robot from sleep
+            self._brc_pulse()    # pulse BRC low — wakes the robot from sleep
             self.bot.start()     # enter OI (Passive)
             time.sleep(0.3)
             self.bot.full()      # Full mode: the OI never auto-sleeps in Full
             time.sleep(0.2)
-            self._last_brc_pulse = time.monotonic()
         except Exception as e:
             self.get_logger().warn(f'OI (re)connect failed: {e!r}')
 
@@ -438,11 +510,7 @@ class RoombaDriver(Node):
             self._connect_oi()
             return
         if (now - self._last_brc_pulse) > 60.0:
-            try:
-                self.bot.wake()
-                self._last_brc_pulse = now
-            except Exception as e:
-                self.get_logger().warn(f'keep-awake BRC pulse failed: {e!r}')
+            self._brc_pulse()
 
     def _safe_get_sensors(self):
         """get_sensors() με retry — το Roomba μερικές φορές επιστρέφει 0 bytes."""

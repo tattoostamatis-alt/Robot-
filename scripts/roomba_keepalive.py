@@ -47,6 +47,8 @@ OI_FULL = 132      # Full mode: full control, and NO 5-minute sleep timer
 OI_SENSORS = 142   # request one sensor packet
 PKT_CHARGE = 25    # battery charge (2 bytes) -- used purely as a liveness probe
 
+BRC_PULSE_S = 0.6  # OI wants the BRC line held low >500ms to register
+
 
 def port_is_owned() -> bool:
     """True when another process holds the serial port open.
@@ -79,11 +81,14 @@ def assert_full_mode() -> bool:
     proves nothing on its own -- the reply is the only evidence the OI is live.
     """
     with serial.Serial(PORT, BAUD, timeout=0.4) as ser:
-        # BRC wake (works on some cables, no-op on others -- harmless either way).
-        ser.rts = True
+        # BRC wake. A no-op today (the line is unwired), but sized so it will
+        # actually work the day it is: the OI wants the line held low for
+        # >500ms, and the 0.1s this used to hold would have been ignored.
+        # DTR only -- asserting it pulls the pin to 0V on a USB-TTL adapter.
+        # One pulse per 60s call also stays far clear of the OI's "three pulses
+        # within 5 seconds switches to 19200 baud" rule.
         ser.dtr = True
-        time.sleep(0.1)
-        ser.rts = False
+        time.sleep(BRC_PULSE_S)
         ser.dtr = False
         time.sleep(0.1)
         # Enter OI, then Full mode (no auto-sleep).
