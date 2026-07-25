@@ -15,7 +15,13 @@ Wants=dev-roomba.device
 [Service]
 Type=simple
 User=dimi
-Group=dialout
+# NO `Group=dialout` here. Setting Group= makes systemd use it as the primary
+# group and drop the user's supplementary groups -- and dimi is already in
+# dialout, so it bought nothing while breaking the stand-down check: `fuser`
+# could no longer read the file descriptors of roomba_driver (which runs as
+# dimi:dimi), always reported the port free, and the daemon happily opened it
+# alongside the running ROS driver. Two owners on one serial line is exactly
+# the framing corruption this is supposed to avoid. Found 2026-07-25.
 Environment=HOME=/home/dimi
 ExecStart=/usr/bin/python3 /home/dimi/robot_ws/src/home_robot/scripts/roomba_keepalive.py
 Restart=always
