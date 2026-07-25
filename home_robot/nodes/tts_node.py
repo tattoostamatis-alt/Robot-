@@ -2,8 +2,8 @@
 """Streaming text-to-speech — edge-tts, triggered by speech_response.
 
 Subscribes to `speech_response` (std_msgs/String, from llm_bridge_node) and
-speaks each message with an edge-tts neural voice (default Greek, "Max"
-persona). Messages are queued and played back sequentially on a background
+speaks each message with an edge-tts neural voice (default Greek female,
+"Max" persona). Messages are queued and played back sequentially on a background
 thread so the ROS callback never blocks.
 
 edge-tts returns MP3 audio; ffmpeg (already used for wake-word training data
@@ -33,7 +33,9 @@ class TTSNode(Node):
     def __init__(self):
         super().__init__('tts_node')
 
-        self.declare_parameter('voice', 'el-GR-NestorasNeural')
+        # el-GR-AthinaNeural (female) by user preference 2026-07-25; the male
+        # el-GR-NestorasNeural is the only other Greek edge-tts voice.
+        self.declare_parameter('voice', 'el-GR-AthinaNeural')
         self.declare_parameter('rate', '+0%')
         self.declare_parameter('volume', '+0%')
         self.declare_parameter('device_index', 7)  # pulse — works with any PulseAudio output
