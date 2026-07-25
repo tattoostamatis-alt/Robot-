@@ -759,6 +759,10 @@ def generate_launch_description():
             # robot interrupts its own every answer (observed 2026-07-24). The
             # ch4 AEC does not remove it. Pass allow_barge_in:=true to opt back in.
             'allow_barge_in': LaunchConfiguration('allow_barge_in', default='false'),
+            # No wake acknowledgement beep — the user finds it grating, and any
+            # residual false trigger would beep out loud. Wake still works
+            # silently. Pass beep_on_wake:=true to bring it back.
+            'beep_on_wake': LaunchConfiguration('beep_on_wake', default='false'),
         }],
         condition=IfCondition(use_wake_word),
     )
@@ -957,6 +961,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_wake_word', default_value='false'),
         DeclareLaunchArgument('use_stt',       default_value='false'),
         DeclareLaunchArgument('allow_barge_in', default_value='false'),
+        DeclareLaunchArgument('beep_on_wake',  default_value='false'),
         DeclareLaunchArgument('mic_channel',   default_value='4'),
         DeclareLaunchArgument('delivery_mode',  default_value='start_pose'),
         DeclareLaunchArgument('use_doa',            default_value='false'),
