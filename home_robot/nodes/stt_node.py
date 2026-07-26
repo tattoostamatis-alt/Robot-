@@ -21,6 +21,7 @@ from rclpy.node import Node
 from rcl_interfaces.msg import SetParametersResult
 from std_msgs.msg import Bool, String, Int16MultiArray
 
+from home_robot.stt_postprocess import clean
 from home_robot.voice_gate import SpeakingGate, TOPIC as SPEAKING_TOPIC
 
 
@@ -218,16 +219,29 @@ class STTNode(Node):
             # beam_size=5 + a domain initial_prompt biases the decoder toward
             # the command vocabulary (room names / "πήγαινε στο…"), which
             # markedly improves Greek accuracy over greedy beam_size=1.
+            # condition_on_previous_text=False: each utterance is an
+            # independent command, so carrying decoder context across them buys
+            # nothing and is a known driver of runaway repetition.
+            # The prompt no longer opens with "Εντολές προς το ρομπότ Μαξ:" —
+            # that framing sentence was the single most leaked string (7× in
+            # one session), and it is meta-text the user can never say, so it
+            # earned nothing while being maximally confusing when echoed.
             segments, _ = self._whisper.transcribe(
                 audio, language=self.lang, beam_size=5,
                 no_speech_threshold=0.3, vad_filter=True,
-                initial_prompt='Εντολές προς το ρομπότ Μαξ: πήγαινε στην κουζίνα, '
-                               'στο σαλόνι, στον διάδρομο, στην τουαλέτα, στο δωμάτιο '
-                               'του Μαξ, στο δωμάτιο του μπαμπά, πήγαινε στη βάση.')
-            text = ' '.join(s.text for s in segments).strip()
+                condition_on_previous_text=False,
+                initial_prompt='πήγαινε στην κουζίνα, στο σαλόνι, στον διάδρομο, '
+                               'στην τουαλέτα, στο δωμάτιο του Μαξ, στο δωμάτιο '
+                               'του μπαμπά, πήγαινε στη βάση.')
+            raw = ' '.join(s.text for s in segments).strip()
+            text = clean(raw)
             if text:
+                if text != raw:
+                    self.get_logger().warn(f'Prompt leakage trimmed: {raw!r} -> {text!r}')
                 self.get_logger().info(f'Heard: {text}')
                 self.text_pub.publish(String(data=text))
+            elif raw:
+                self.get_logger().warn(f'Discarded prompt echo: {raw!r}')
             else:
                 self.get_logger().info('Transcription empty')
         finally:
