@@ -145,13 +145,35 @@ class TTSNode(Node):
         except Exception:
             pass
 
-    async def _synthesize(self, text):
-        communicate = edge_tts.Communicate(text, self.voice, rate=self.rate, volume=self.volume)
-        chunks = []
-        async for chunk in communicate.stream():
-            if chunk['type'] == 'audio':
-                chunks.append(chunk['data'])
-        return b''.join(chunks)
+    async def _synthesize(self, text, attempts=3):
+        # edge-tts talks to a free, unauthenticated Microsoft endpoint that
+        # throttles: it intermittently closes the stream having sent no audio
+        # ("NoAudioReceived"), or returns an empty one. Measured 2026-07-26 —
+        # 5 failures in one session, and the *same* text that failed
+        # synthesised fine on the next call, so it is server-side flakiness,
+        # not the text or the parameters. Without a retry a single hiccup left
+        # the robot mute for that whole answer, which reads exactly like "it
+        # isn't responding" since the LLM reply only ever reached the log.
+        last = None
+        for i in range(attempts):
+            try:
+                communicate = edge_tts.Communicate(
+                    text, self.voice, rate=self.rate, volume=self.volume)
+                chunks = []
+                async for chunk in communicate.stream():
+                    if chunk['type'] == 'audio':
+                        chunks.append(chunk['data'])
+                data = b''.join(chunks)
+                if data:
+                    if i:
+                        self.get_logger().warn(f'TTS synth recovered on attempt {i + 1}')
+                    return data
+                last = 'empty audio stream'
+            except Exception as e:                       # noqa: BLE001
+                last = e
+            if i < attempts - 1:
+                await asyncio.sleep(0.4 * (i + 1))
+        raise RuntimeError(f'no audio after {attempts} attempts: {last}')
 
     def _decode_mp3(self, mp3_bytes):
         proc = subprocess.run(
