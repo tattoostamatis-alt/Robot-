@@ -769,6 +769,14 @@ def generate_launch_description():
             'device_name': 'XVF3800',
             'mic_channels': 6,
             'mic_channel': LaunchConfiguration('mic_channel', default='4'),
+            # ...but transcribe from ch0. 2026-07-26: captured all six channels
+            # during real speech and ch0 measured 39.5 dB SNR / peak 0.470 vs
+            # ch4's 21.2 dB / 0.077 — ch4 is a raw capsule, not the ASR beam the
+            # comment above assumed. Feeding Whisper the raw capsule is what
+            # produced plausible-but-wrong Greek. ch0's AGC is exactly why it
+            # cannot drive wake detection (it lifts the noise floor in silence),
+            # so the two are split rather than switched.
+            'stt_channel': LaunchConfiguration('stt_channel', default='0'),
             # Barge-in: saying "Έι ρομπότ" while the robot is talking aborts the
             # TTS and starts a new turn. DEFAULT false since 2026-07-24, when the
             # robot's own replies (it named itself "Max") self-fired the detector
@@ -789,10 +797,19 @@ def generate_launch_description():
     )
 
     # ── Speech-to-text (faster-whisper, wake-word triggered) ─────
+    # energy_thresh is pinned instead of auto-calibrated. The boot calibration
+    # measures ambient RMS for a moment and scales it, and on 2026-07-26 it
+    # produced an unusable value BOTH times it ran: 0.065 (above the user's
+    # speech, so nothing was ever recorded) and 0.012 (inside the room noise,
+    # so every fan spike started a recording that closed 1.5 s later on
+    # silence). One noisy moment at startup poisons the whole session. Measured
+    # that evening: room noise 0.008-0.015, speech 0.042-0.095 → 0.030 sits
+    # cleanly between them.
     stt_node = Node(
         package='home_robot',
         executable='stt_node.py',
         name='stt_node',
+        parameters=[{'energy_thresh': 0.030, 'calibrate_on_start': False}],
         output='screen',
         condition=IfCondition(use_stt),
     )
@@ -984,6 +1001,7 @@ def generate_launch_description():
         DeclareLaunchArgument('allow_barge_in', default_value='false'),
         DeclareLaunchArgument('beep_on_wake',  default_value='true'),
         DeclareLaunchArgument('mic_channel',   default_value='4'),
+        DeclareLaunchArgument('stt_channel',   default_value='0'),
         DeclareLaunchArgument('delivery_mode',  default_value='start_pose'),
         DeclareLaunchArgument('use_doa',            default_value='false'),
         DeclareLaunchArgument('doa_rotate_on_wake', default_value='true'),

@@ -24,10 +24,21 @@ hey_mycroft, hey_marvin, timer, weather) for pipeline testing instead.
 .onnx/.tflite file (e.g. a newly retrained model before it's copied
 into `config/models/`).
 
-Mic capture targets the reSpeaker XVF3800 6-channel firmware:
-  ch 0-3 = raw mics, ch 4 = ASR beam (beamformed+noise-suppressed),
-  ch 5 = AEC reference.  mic_channel=4 is the right input for wake word.
-For testing on a plain mono/stereo mic, set mic_channels=1, mic_channel=0.
+Mic capture targets the reSpeaker XVF3800 6-channel firmware. Measured on this
+unit 2026-07-26 (8 s of speech, all channels captured simultaneously):
+
+  ch0  peak 0.470  SNR 39.5 dB   processed/AGC beam
+  ch1  peak 0.157  SNR 25.1 dB   |
+  ch2  peak 0.060  SNR 23.9 dB   | raw capsules — all cluster together
+  ch3  peak 0.132  SNR 21.6 dB   |
+  ch4  peak 0.077  SNR 21.2 dB   |
+  ch5  peak 0.074  SNR 23.9 dB   AEC reference
+
+An earlier version of this docstring claimed ch4 was the ASR beam; the numbers
+say otherwise — ch0 is the only channel that stands apart. The two consumers
+therefore read different channels: wake detection on `mic_channel` (4, flat
+and false-trigger-free) and transcription on `stt_channel` (0, 18 dB cleaner).
+For a plain mono/stereo mic set mic_channels=1, mic_channel=0.
 """
 
 import os
@@ -132,6 +143,10 @@ class WakeWordNode(Node):
         self.declare_parameter('device_name', '')
         self.declare_parameter('mic_channels', 3)
         self.declare_parameter('mic_channel', 0)
+        # Channel forwarded to STT. -1 = same as mic_channel (single-channel
+        # mics); on the XVF3800 set it to the processed beam. See the channel
+        # measurements in _audio_callback for why this differs from mic_channel.
+        self.declare_parameter('stt_channel', -1)
         self.declare_parameter('model_name', 'hey_robot')
         self.declare_parameter('model_path', '')
         self.declare_parameter('threshold', 0.50)
@@ -165,6 +180,9 @@ class WakeWordNode(Node):
         device_name = self.get_parameter('device_name').value
         self.mic_channels = self.get_parameter('mic_channels').value
         self.mic_channel = self.get_parameter('mic_channel').value
+        stt_ch = self.get_parameter('stt_channel').value
+        self.stt_channel = (self.mic_channel if stt_ch is None or stt_ch < 0
+                            else min(stt_ch, self.mic_channels - 1))
 
         if device_index < 0 and device_name:
             device_index = _find_device_by_name(device_name) or -1
@@ -234,9 +252,28 @@ class WakeWordNode(Node):
 
     def _audio_callback(self, indata, frames, time_info, status):
         chunk = indata[:, self.mic_channel].copy()
-        # Wake detection runs on the high-pass-filtered signal (kills fan/mains
-        # rumble that false-triggers the model). The STT stream on mic/audio
-        # keeps the raw chunk — Whisper needs the full band for transcription.
+        # Wake detection and STT read DIFFERENT channels on purpose — they want
+        # opposite things from the array. Measured 2026-07-26 over 8 s of real
+        # speech, all six channels at once:
+        #
+        #     ch0  peak 0.470  SNR 39.5 dB   <- processed/AGC beam
+        #     ch1  peak 0.157  SNR 25.1 dB
+        #     ch2  peak 0.060  SNR 23.9 dB
+        #     ch3  peak 0.132  SNR 21.6 dB
+        #     ch4  peak 0.077  SNR 21.2 dB   <- what both used to read
+        #     ch5  peak 0.074  SNR 23.9 dB
+        #
+        # ch0 stands alone; ch1-5 cluster together like raw capsules. So the
+        # module docstring had it backwards: ch0 is the processed beam, not ch4.
+        # Whisper was being fed a raw capsule 18 dB noisier and 6x quieter than
+        # what the array can produce, which is why transcriptions came back as
+        # plausible-but-wrong Greek ("Πάση μπανταριά έχεις", "Σας ευχαριστώ").
+        #
+        # But ch0 must NOT drive wake detection: its AGC lifts the noise floor
+        # during silence and the model false-fires on it — 9 triggers in 75 s at
+        # 0.95-1.00 (2026-07-25), each one publishing tts/stop so the robot cut
+        # off its own speech. ch4 stays flat and gave 0 false triggers in 30 s.
+        # Hence: detect on ch4, transcribe on ch0.
         if self._hp_b is not None:
             fchunk = chunk.astype(np.float32)
             if self._hp_zi is None:                 # seed on the first chunk
@@ -246,8 +283,11 @@ class WakeWordNode(Node):
             self._audio_q.put(np.clip(filt, -32768, 32767).astype(np.int16))
         else:
             self._audio_q.put(chunk)
+        # STT gets the full band (Whisper needs it) off the transcription channel.
+        stt_chunk = (chunk if self.stt_channel == self.mic_channel
+                     else indata[:, self.stt_channel].copy())
         msg = Int16MultiArray()
-        msg.data = chunk.tolist()
+        msg.data = stt_chunk.tolist()
         self.audio_pub.publish(msg)
 
     def _on_tts_speaking(self, msg: Bool):
