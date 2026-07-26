@@ -42,6 +42,7 @@ from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
 from dotenv import load_dotenv
 from geometry_msgs.msg import Quaternion, Twist
+from home_robot.stop_command import is_stop_command, strip_accents
 from nav2_msgs.action import NavigateToPose
 from rclpy.action import ActionClient
 from rclpy.node import Node
@@ -62,13 +63,7 @@ _VISION_KEYWORDS = {
 
 def _needs_vision(text: str) -> bool:
     """Return True if the text appears to be a vision-related question."""
-    import unicodedata
-    # Strip accents for robust matching
-    normalized = ''.join(
-        c for c in unicodedata.normalize('NFD', text.lower())
-        if unicodedata.category(c) != 'Mn'
-    )
-    return any(kw in normalized for kw in _VISION_KEYWORDS)
+    return any(kw in strip_accents(text) for kw in _VISION_KEYWORDS)
 
 
 SYSTEM_PROMPT = """Είσαι ο "Max", βοηθός ρομπότ καθαρισμού σπιτιού. Απάντα στα Ελληνικά, φιλικά, χωρίς emoji, με ΜΙΑ σύντομη πρόταση (το πολύ 20 λέξεις). Μην εξηγείς γιατί δεν μπορείς κάτι — πες το σύντομα.
@@ -268,6 +263,9 @@ class LLMBridgeNode(Node):
 
         self._history = []
         self._busy = threading.Lock()
+        # Kept on self (not just as a _navigate local) so _emergency_stop can
+        # cancel the goal from the speech callback thread.
+        self._nav_goal_handle = None
         self._latest_objects = None
         self._latest_battery = None
         self._memory_event = threading.Event()
@@ -417,10 +415,51 @@ class LLMBridgeNode(Node):
         text = msg.data.strip()
         if not text:
             return
+
+        # "Stop" is handled here, ahead of BOTH the busy lock and the LLM.
+        # Ahead of the LLM because it does not reliably emit the tool call
+        # (see _is_stop_command). Ahead of the lock because the lock is held
+        # for the whole blocking _navigate() — up to nav_timeout (60 s) — so
+        # during a goto, the exact moment the user most needs to halt the
+        # robot, every utterance was being dropped with "Already handling a
+        # request". Stop must never queue behind the thing it is stopping.
+        if is_stop_command(text):
+            self.get_logger().warn(f'STOP command (keyword gate): {text}')
+            threading.Thread(target=self._emergency_stop, daemon=True).start()
+            return
+
         if not self._busy.acquire(blocking=False):
             self.get_logger().warn('Already handling a request, ignoring speech_text')
             return
         threading.Thread(target=self._handle_text, args=(text,), daemon=True).start()
+
+    def _emergency_stop(self):
+        """Halt everything: wheels, navigation, and any background behaviour."""
+        # Wheels first and repeatedly — a single Twist can be lost in a DDS
+        # hiccup, and Nav2's controller may still be publishing over us until
+        # the goal cancel below lands.
+        for _ in range(3):
+            self.cmd_vel_pub.publish(Twist())
+            time.sleep(0.05)
+
+        # Cancel the in-flight NavigateToPose goal, otherwise the controller
+        # simply overwrites our zero Twist on its next cycle.
+        gh = self._nav_goal_handle
+        if gh is not None:
+            try:
+                gh.cancel_goal_async()
+                self.get_logger().info('Cancelled active Nav2 goal')
+            except Exception as exc:                     # noqa: BLE001
+                self.get_logger().warn(f'Nav2 goal cancel failed: {exc}')
+
+        # Background behaviours run in their own nodes and ignore cmd_vel.
+        self.patrol_pub.publish(Bool(data=False))
+        self.explore_pub.publish(Bool(data=False))
+        self.follow_pub.publish(Bool(data=False))
+        self.mission_pub.publish(String(data='cancel'))
+
+        self.cmd_vel_pub.publish(Twist())
+        self.response_pub.publish(String(data='Σταμάτησα.'))
 
     def _handle_text(self, text):
         try:
@@ -706,15 +745,25 @@ class LLMBridgeNode(Node):
         if gh is None or not gh.accepted:
             return False, 'ο στόχος απορρίφθηκε'
 
-        gh.get_result_async().add_done_callback(_on_result)
+        self._nav_goal_handle = gh
+        try:
+            gh.get_result_async().add_done_callback(_on_result)
 
-        if not done_ev.wait(timeout=self.nav_timeout):
-            return False, 'λήξη χρόνου πλοήγησης'
+            if not done_ev.wait(timeout=self.nav_timeout):
+                return False, 'λήξη χρόνου πλοήγησης'
 
-        result = result_box[0]
-        if result is None or result.status != GoalStatus.STATUS_SUCCEEDED:
-            return False, 'η πλοήγηση απέτυχε'
-        return True, None
+            result = result_box[0]
+            if result is None:
+                return False, 'η πλοήγηση απέτυχε'
+            if result.status == GoalStatus.STATUS_CANCELED:
+                # The user said "σταμάτα" mid-goto; _emergency_stop already
+                # spoke, so don't let the caller report a failure on top.
+                return False, None
+            if result.status != GoalStatus.STATUS_SUCCEEDED:
+                return False, 'η πλοήγηση απέτυχε'
+            return True, None
+        finally:
+            self._nav_goal_handle = None
 
     # ── tool dispatch ──────────────────────────────────────────────────────
 
@@ -734,6 +783,8 @@ class LLMBridgeNode(Node):
                 return {'status': 'error', 'reason': f'unknown location: {location}'}
             ok, reason = self._navigate(loc)
             if not ok:
+                if reason is None:      # cancelled by the user's "σταμάτα"
+                    return {'status': 'cancelled', 'action': 'goto', 'location': location}
                 return {'status': 'error', 'action': 'goto', 'location': location, 'reason': reason}
             return {'status': 'ok', 'action': 'goto', 'location': location}
 

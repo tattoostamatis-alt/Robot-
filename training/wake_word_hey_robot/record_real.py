@@ -111,7 +111,7 @@ def main():
 
     os.makedirs('wav', exist_ok=True)
     idx, stem = next_index(args.label, args.tag)
-    word = 'Έι ρομπότ. if args.label == 'pos' else (args.tag or 'the negative phrase')
+    word = 'Έι ρομπότ' if args.label == 'pos' else (args.tag or 'the negative phrase')
     print(f'\nRecording {args.count} "{args.label}" samples — say: "{word}"')
     print('After each: [Enter]=keep  r=redo  s=skip  q=quit\n')
 
