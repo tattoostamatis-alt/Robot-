@@ -13,7 +13,9 @@ word so the first syllable is not lost.
 """
 
 import collections
+import os
 import threading
+import time
 
 import numpy as np
 import rclpy
@@ -50,6 +52,11 @@ class STTNode(Node):
         self.declare_parameter('preroll_seconds',    0.5)
         self.declare_parameter('wakeword_flush_ms', 300)
         self.declare_parameter('calibrate_on_start', True)
+        # Diagnosis aid: when set to a directory, every buffer sent to Whisper
+        # is also written there as a wav, so a bad transcription can be
+        # replayed offline instead of guessed at. Empty = disabled (default);
+        # this records the room, so it stays off unless explicitly requested.
+        self.declare_parameter('debug_audio_dir', '')
         # Don't treat the robot's own TTS as user speech (barge-in / self-echo).
         self.declare_parameter('suppress_on_tts', True)
         self.declare_parameter('tts_release_tail', 0.3)
@@ -58,6 +65,7 @@ class STTNode(Node):
         self.lang             = self.get_parameter('language').value
         self.energy_thresh    = self.get_parameter('energy_thresh').value
         self.calibrate_on_start = self.get_parameter('calibrate_on_start').value
+        self.debug_audio_dir  = self.get_parameter('debug_audio_dir').value
         start_timeout         = self.get_parameter('start_timeout').value
         silence_limit         = self.get_parameter('silence_limit').value
         max_record_seconds    = self.get_parameter('max_record_seconds').value
@@ -213,9 +221,33 @@ class STTNode(Node):
                     self._state = 'idle'
                     threading.Thread(target=self._transcribe, args=(audio,), daemon=True).start()
 
+    def _dump_audio(self, audio: np.ndarray) -> str | None:
+        """Write the exact buffer handed to Whisper, for offline diagnosis.
+
+        Set the `debug_audio_dir` parameter to enable. Off by default — this is
+        a microphone recording of the room, so it is never written unless
+        somebody explicitly asks for it.
+        """
+        if not self.debug_audio_dir:
+            return None
+        try:
+            import wave
+            os.makedirs(self.debug_audio_dir, exist_ok=True)
+            path = os.path.join(self.debug_audio_dir, f'utt_{time.time():.0f}.wav')
+            with wave.open(path, 'wb') as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(SAMPLE_RATE)
+                w.writeframes((np.clip(audio, -1, 1) * 32767).astype(np.int16).tobytes())
+            return path
+        except Exception as exc:                          # noqa: BLE001
+            self.get_logger().warn(f'audio dump failed: {exc}')
+            return None
+
     def _transcribe(self, audio: np.ndarray):
         try:
             self.get_logger().info(f'Transcribing {len(audio)/SAMPLE_RATE:.1f}s rms={float(np.sqrt(np.mean(audio**2))):.4f}')
+            dumped = self._dump_audio(audio)
             # beam_size=5 + a domain initial_prompt biases the decoder toward
             # the command vocabulary (room names / "πήγαινε στο…"), which
             # markedly improves Greek accuracy over greedy beam_size=1.
@@ -230,15 +262,16 @@ class STTNode(Node):
                 audio, language=self.lang, beam_size=5,
                 no_speech_threshold=0.3, vad_filter=True,
                 condition_on_previous_text=False,
-                initial_prompt='πήγαινε στην κουζίνα, στο σαλόνι, στον διάδρομο, '
-                               'στην τουαλέτα, στο δωμάτιο του Μαξ, στο δωμάτιο '
-                               'του μπαμπά, πήγαινε στη βάση.')
+                initial_prompt='σταμάτα, στοπ, πήγαινε στην κουζίνα, στο σαλόνι, '
+                               'στον διάδρομο, στην τουαλέτα, στο δωμάτιο του Μαξ, '
+                               'στο δωμάτιο του μπαμπά, πήγαινε στη βάση, '
+                               'ακολούθησέ με, τι ώρα είναι, πόση μπαταρία έχεις.')
             raw = ' '.join(s.text for s in segments).strip()
             text = clean(raw)
             if text:
                 if text != raw:
                     self.get_logger().warn(f'Prompt leakage trimmed: {raw!r} -> {text!r}')
-                self.get_logger().info(f'Heard: {text}')
+                self.get_logger().info(f'Heard: {text}' + (f'  [{dumped}]' if dumped else ''))
                 self.text_pub.publish(String(data=text))
             elif raw:
                 self.get_logger().warn(f'Discarded prompt echo: {raw!r}')
