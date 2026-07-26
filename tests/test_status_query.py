@@ -55,35 +55,31 @@ def test_battery_specific_detection(utterance, expected):
     assert wants_battery(utterance) is expected
 
 
-# ── formatting: never invent a number ─────────────────────────────────
+# ── formatting: the battery reading is never quoted ───────────────────
+# The pack was removed 2026-07-26; the robot runs off a power bank. The OI
+# still reports a figure and it is nonsense (41% at 14.44 V, a full-pack
+# voltage), so it must never reach the user.
 
-def test_battery_reported_when_known():
-    assert format_status({'battery_percent': 87.0}, battery_only=True) == 'Έχω 87% μπαταρία.'
-
-
-def test_battery_charging_is_mentioned():
-    out = format_status({'battery_percent': 42.0, 'battery_charging': True},
-                        battery_only=True)
-    assert 'φορτίζω' in out and '42' in out
-
-
-def test_missing_battery_says_so_instead_of_guessing():
-    out = format_status({'cpu_percent': 10.0}, battery_only=True)
-    assert 'CLEAN' in out
-    assert not any(c.isdigit() for c in out.replace('CLEAN', ''))
+def test_battery_question_says_there_is_no_battery():
+    out = format_status({'battery_percent': 87.0}, battery_only=True)
+    assert 'powerbank' in out
+    assert '87' not in out
 
 
-def test_general_status_lists_what_it_has():
+def test_battery_figure_never_leaks_even_when_present():
+    out = format_status({'battery_percent': 41.3, 'battery_charging': True,
+                         'cpu_percent': 12.0}, battery_only=False)
+    assert '41' not in out
+    assert 'μπαταρ' not in out.lower()
+
+
+def test_general_status_lists_machine_telemetry():
     out = format_status({'battery_percent': 50.0, 'cpu_percent': 12.0,
                          'cpu_temp_c': 55.0, 'ram_percent': 71.0},
                         battery_only=False)
-    for token in ('50', '12', '55', '71'):
+    for token in ('12', '55', '71'):
         assert token in out
-
-
-def test_general_status_flags_absent_battery():
-    out = format_status({'cpu_percent': 12.0}, battery_only=False)
-    assert 'μπαταρίας δεν έχω' in out
+    assert '50' not in out          # the battery figure stays out
 
 
 def test_empty_telemetry_is_honest():

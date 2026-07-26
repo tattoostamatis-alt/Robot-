@@ -52,29 +52,27 @@ def format_status(status: dict, battery_only: bool) -> str:
 
     `status` is the dict produced by the system_status tool. Missing keys are
     reported as missing — never guessed.
-    """
-    pct = status.get('battery_percent')
-    charging = status.get('battery_charging')
 
+    ‼️ The Roomba's battery reading is NEVER reported. The pack has been
+    removed from this robot (2026-07-26) and it runs off a power bank, so
+    battery_percent/charger_state are meaningless leftovers: the OI still
+    publishes a figure and it is nonsense — 41% at 14.44 V, when 14.44 V is a
+    full pack. Quoting it would be exactly the confidently-wrong number this
+    whole module exists to prevent.
+    """
     if battery_only:
-        if pct is None:
-            return ('Δεν έχω ένδειξη μπαταρίας — η βάση δεν στέλνει δεδομένα. '
-                    'Πάτα το CLEAN για να ξυπνήσει.')
-        tail = ', φορτίζω' if charging else ''
-        return f'Έχω {pct:.0f}% μπαταρία{tail}.'
+        return ('Δεν έχω μπαταρία — δουλεύω με powerbank, οπότε δεν μετράω '
+                'στάθμη.')
 
     bits = []
-    if pct is not None:
-        bits.append(f'μπαταρία {pct:.0f}%')
     if status.get('cpu_percent') is not None:
         bits.append(f'CPU {status["cpu_percent"]:.0f}%')
     if status.get('cpu_temp_c') is not None:
         bits.append(f'θερμοκρασία {status["cpu_temp_c"]:.0f} βαθμοί')
     if status.get('ram_percent') is not None:
         bits.append(f'μνήμη {status["ram_percent"]:.0f}%')
+    if status.get('disk_percent') is not None:
+        bits.append(f'δίσκος {status["disk_percent"]:.0f}%')
     if not bits:
         return 'Δεν μπορώ να διαβάσω την κατάστασή μου αυτή τη στιγμή.'
-    out = 'Είμαι εντάξει: ' + ', '.join(bits) + '.'
-    if pct is None:
-        out += ' Ένδειξη μπαταρίας δεν έχω.'
-    return out
+    return 'Είμαι εντάξει: ' + ', '.join(bits) + '.'

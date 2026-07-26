@@ -166,6 +166,12 @@ class RoombaDriver(Node):
         # resuming keep-awake. The stock behaviour wanders for a while before
         # finding the beam, so this needs to be generous.
         self.declare_parameter('dock_timeout', 120.0)
+        # This robot's battery pack is removed (power bank instead), so
+        # charger_state never fires and docking could only ever time out. When
+        # true, a stationary robot still seeing the dock's IR beams counts as
+        # docked. Set false if a real pack is ever refitted.
+        self.declare_parameter('dock_without_battery', True)
+        self.declare_parameter('dock_settle_s', 6.0)
         # Recalibrated 2026-06-17 via calibrate_odom.py (straight-line +
         # in-place rotation tests, after fixing a bug where the script's
         # blocking input() calls starved the /odom subscription callback
@@ -242,6 +248,10 @@ class RoombaDriver(Node):
         self.wheel_base = self.get_parameter('wheel_base').value
         self.idle_timeout = self.get_parameter('idle_timeout').value
         self.dock_timeout = self.get_parameter('dock_timeout').value
+        self.dock_without_battery = self.get_parameter('dock_without_battery').value
+        self.dock_settle_s = self.get_parameter('dock_settle_s').value
+        self._dock_last_pose = (None, None)
+        self._dock_still_since = 0.0
         self.mm_per_tick = self.get_parameter('mm_per_tick').value
         self.right_trim = self.get_parameter('right_trim').value
         self.right_trim_reverse = self.get_parameter('right_trim_reverse').value
@@ -570,6 +580,36 @@ class RoombaDriver(Node):
         self._cur_left = self._cur_right = 0.0
         self.get_logger().info('Seeking dock (OI 143) — housekeeping suspended')
 
+    def _dock_seated(self) -> bool:
+        """True when the robot looks parked on the base without charging.
+
+        Two conditions together, because either alone is noisy: the odometry
+        pose has not moved for `dock_settle_s` (the Create 2's own seek stops
+        driving once it seats), AND an IR receiver still sees the dock. Dock
+        beams are 161/164/165/168/169/172/173 in the OI's Infrared Character
+        packets; a virtual wall would read 162.
+        """
+        pose = (round(self._x, 3), round(self._y, 3))
+        now = time.monotonic()
+        if pose != self._dock_last_pose:
+            self._dock_last_pose = pose
+            self._dock_still_since = now
+            return False
+        if (now - self._dock_still_since) < self.dock_settle_s:
+            return False
+        try:
+            ir = [self.bot.SCI.ser, ]  # keep the port reference alive
+            vals = []
+            for pkt in (17, 52, 53):
+                self.bot.SCI.ser.reset_input_buffer()
+                self.bot.SCI.ser.write(bytes([142, pkt]))
+                time.sleep(0.05)
+                b = self.bot.SCI.ser.read(1)
+                vals.append(b[0] if b else 0)
+        except Exception:                                  # noqa: BLE001
+            return False
+        return any(v in (161, 164, 165, 168, 169, 172, 173) for v in vals)
+
     def _check_docking(self):
         """Leave the docking state once the charger engages, or give up.
 
@@ -582,6 +622,21 @@ class RoombaDriver(Node):
         if sensors is not None and getattr(sensors, 'charger_state', 0):
             self._docking = False
             self.get_logger().info('Docked — charging, housekeeping resumed')
+            self._connect_oi()
+            return
+        # ‼️ On THIS robot the battery pack has been removed (2026-07-26) — it
+        # runs off a power bank — so charger_state can never become non-zero
+        # and the branch above is dead. Docking therefore always ran the full
+        # timeout and was logged as a failure even when the robot parked
+        # perfectly on the base; _connect_oi() then drove it back out. That is
+        # the whole of the long-standing "dock never reaches the charger" bug.
+        # With no pack, "docked" has to be judged some other way: the Create 2
+        # stops driving once seated, so treat a stationary robot that is still
+        # seeing the dock's IR beams as parked.
+        if self.dock_without_battery and self._dock_seated():
+            self._docking = False
+            self.get_logger().info('Docked — seated on base (no battery pack '
+                                   'to charge, judged by IR + no motion)')
             self._connect_oi()
             return
         if (time.monotonic() - self._dock_started) > self.dock_timeout:
