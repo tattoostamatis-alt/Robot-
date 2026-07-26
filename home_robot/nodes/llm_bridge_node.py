@@ -42,6 +42,7 @@ from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
 from dotenv import load_dotenv
 from geometry_msgs.msg import Quaternion, Twist
+from home_robot.status_query import format_status, is_status_query, wants_battery
 from home_robot.stop_command import is_stop_command, strip_accents
 from nav2_msgs.action import NavigateToPose
 from rclpy.action import ActionClient
@@ -428,10 +429,37 @@ class LLMBridgeNode(Node):
             threading.Thread(target=self._emergency_stop, daemon=True).start()
             return
 
+        # Status questions are answered from telemetry, not by the model. Same
+        # failure mode as stop: it replies conversationally instead of calling
+        # system_status, and having no data it makes a number up — "85%" and
+        # "87%" on the same question hours apart, both while the Roomba was
+        # asleep and publishing no battery topic at all. Unlike stop this still
+        # takes the busy lock: it reads sensors and speaks, so it should queue
+        # behind an in-flight request rather than interleave with it.
+        if is_status_query(text) and self._busy.acquire(blocking=False):
+            self.get_logger().info(f'Status query (keyword gate): {text}')
+            threading.Thread(target=self._answer_status, args=(text,),
+                             daemon=True).start()
+            return
+
         if not self._busy.acquire(blocking=False):
             self.get_logger().warn('Already handling a request, ignoring speech_text')
             return
         threading.Thread(target=self._handle_text, args=(text,), daemon=True).start()
+
+    def _answer_status(self, text):
+        """Answer a status question from the system_status tool's real data."""
+        try:
+            status = self._dispatch_tool('system_status', {})
+            reply = format_status(status, battery_only=wants_battery(text))
+            self.get_logger().info(f'Max: {reply}')
+            self.response_pub.publish(String(data=reply))
+        except Exception as exc:                         # noqa: BLE001
+            self.get_logger().error(f'status query failed: {exc}')
+            self.response_pub.publish(
+                String(data='Δεν μπορώ να διαβάσω την κατάστασή μου.'))
+        finally:
+            self._busy.release()
 
     def _emergency_stop(self):
         """Halt everything: wheels, navigation, and any background behaviour."""
