@@ -9,6 +9,12 @@ thread so the ROS callback never blocks.
 edge-tts returns MP3 audio; ffmpeg (already used for wake-word training data
 in this project) decodes it to PCM via a subprocess pipe before playback
 with sounddevice.
+
+edge-tts is a free, unauthenticated endpoint that fails ~20% of the time, so
+there are two layers of protection: _synthesize retries 3x, and if that still
+comes back empty a local piper voice speaks instead
+(home_robot/tts_fallback.py). Sample rate is therefore per-utterance, not a
+constant — the local voice runs at 16 kHz against edge-tts's 24 kHz.
 """
 
 import asyncio
@@ -24,6 +30,7 @@ import sounddevice as sd
 from rclpy.node import Node
 from std_msgs.msg import Bool, String
 
+from home_robot import tts_fallback
 from home_robot.voice_gate import TOPIC as SPEAKING_TOPIC, STOP_TOPIC
 
 SAMPLE_RATE = 24000  # edge-tts default output rate
@@ -42,12 +49,27 @@ class TTSNode(Node):
         # Hold `tts/speaking` True this long after playback ends so the listeners
         # ride out the room-reverb tail before re-arming (see voice_gate.py).
         self.declare_parameter('speaking_tail', 0.3)
+        # Local voice used only when edge-tts fails outright (see
+        # home_robot/tts_fallback.py). Empty string disables it.
+        self.declare_parameter('fallback_model', tts_fallback.DEFAULT_MODEL)
 
         self.voice = self.get_parameter('voice').value
         self.rate = self.get_parameter('rate').value
         self.volume = self.get_parameter('volume').value
         self.device_index = self.get_parameter('device_index').value
         self.speaking_tail = self.get_parameter('speaking_tail').value
+
+        fallback_model = self.get_parameter('fallback_model').value
+        self._fallback = (tts_fallback.PiperFallback(fallback_model,
+                                                     self.get_logger())
+                          if fallback_model else None)
+        # Say so at startup: discovering there is no fallback in the middle of
+        # an outage is exactly when it is least useful to find out.
+        if self._fallback and self._fallback.available():
+            self.get_logger().info(f'Local TTS fallback ready: {fallback_model}')
+        else:
+            self.get_logger().warn(
+                'No local TTS fallback — the robot goes mute if edge-tts fails')
 
         # State is re-published on every transition (and True again at the start
         # of each utterance); the listeners co-start at bringup so plain volatile
@@ -119,15 +141,29 @@ class TTSNode(Node):
                         self._set_speaking(False)
 
     def _synthesize_and_play(self, text):
-        mp3 = asyncio.run(self._synthesize(text))
-        pcm = self._decode_mp3(mp3)
-        audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+        # Rate is per-utterance because the local fallback speaks at its own
+        # (16 kHz for the Greek piper voice, vs edge-tts's 24 kHz).
+        rate = SAMPLE_RATE
+        try:
+            mp3 = asyncio.run(self._synthesize(text))
+            pcm = self._decode_mp3(mp3)
+            audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+        except Exception as e:                              # noqa: BLE001
+            # Network TTS is out. Falling back matters more than it sounds:
+            # everything upstream worked and only the audio is missing, so
+            # staying silent here reads to the user as "the robot is broken".
+            local = self._fallback.synthesize(text) if self._fallback else None
+            if local is None:
+                raise
+            audio, rate = local
+            self.get_logger().warn(
+                f'edge-tts unavailable ({e}) — speaking with the local voice')
 
         if self._interrupted:   # barge-in landed during synthesis — don't start playing
             return
         device = None if self.device_index < 0 else self.device_index
         self.get_logger().info(f'Speaking: {text}')
-        sd.play(audio, samplerate=SAMPLE_RATE, device=device)
+        sd.play(audio, samplerate=rate, device=device)
 
         # Bounded wait instead of sd.wait(). sd.wait() blocks forever, and a
         # sd.stop() arriving from the barge-in callback while sd.play() is still
@@ -137,7 +173,7 @@ class TTSNode(Node):
         # stopped hearing commands too. Both symptoms, no error logged, node
         # still alive. Seen for real on 2026-07-23 after four rapid barge-ins.
         # Polling to a deadline derived from the audio length cannot hang.
-        deadline = time.monotonic() + len(audio) / SAMPLE_RATE + 2.0
+        deadline = time.monotonic() + len(audio) / rate + 2.0
         while time.monotonic() < deadline and not self._interrupted:
             time.sleep(0.05)
         try:
