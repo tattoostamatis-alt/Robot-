@@ -9,6 +9,8 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import BatteryState
 from std_msgs.msg import Bool, Float32
 import pycreate2
+from home_robot import ir_homing
+from home_robot.ir_homing import IrHoming
 import fcntl
 import math
 import os
@@ -172,6 +174,18 @@ class RoombaDriver(Node):
         # docked. Set false if a real pack is ever refitted.
         self.declare_parameter('dock_without_battery', True)
         self.declare_parameter('dock_settle_s', 6.0)
+        # Closed-loop IR homing instead of OI 143. The stock seek was measured
+        # driving this 879 OUT of the approach corridor and never recovering
+        # (omni 172 -> 161, both directional receivers to 0), so we steer the
+        # final approach ourselves off the same beams. Set false to go back to
+        # the built-in behaviour. See home_robot/ir_homing.py.
+        self.declare_parameter('use_ir_homing', True)
+        # Which buoy is on which side is a property of the station; guessing
+        # wrong steers away from it. Flip this if the robot consistently veers
+        # off to one side during the approach — no rebuild needed.
+        self.declare_parameter('ir_swap_buoys', False)
+        self.declare_parameter('ir_forward_mm_s', 100.0)
+        self.declare_parameter('ir_search_timeout_s', 20.0)
         # Recalibrated 2026-06-17 via calibrate_odom.py (straight-line +
         # in-place rotation tests, after fixing a bug where the script's
         # blocking input() calls starved the /odom subscription callback
@@ -252,6 +266,10 @@ class RoombaDriver(Node):
         self.dock_settle_s = self.get_parameter('dock_settle_s').value
         self._dock_last_pose = (None, None)
         self._dock_still_since = 0.0
+        self.use_ir_homing = self.get_parameter('use_ir_homing').value
+        self._homing = None                  # IrHoming while an approach runs
+        self._homing_last_status = None      # log transitions, not every tick
+        self._dock_last_odom = None
         self.mm_per_tick = self.get_parameter('mm_per_tick').value
         self.right_trim = self.get_parameter('right_trim').value
         self.right_trim_reverse = self.get_parameter('right_trim_reverse').value
@@ -323,6 +341,7 @@ class RoombaDriver(Node):
         self.create_timer(5.0,  self._check_idle)       # idle watchdog
         self.create_timer(2.0,  self._keep_awake)        # auto-reconnect + BRC keep-alive
         self.create_timer(2.0,  self._check_docking)     # exit docking state on charge/timeout
+        self.create_timer(0.1,  self._ir_homing_step)    # 10 Hz closed-loop dock approach
 
         self._x = 0.0
         self._y = 0.0
@@ -511,8 +530,11 @@ class RoombaDriver(Node):
              with no driver restart needed.
           2. While healthy, pulse BRC at least once a minute so the OI's
              5-minute inactivity sleep timer never expires."""
-        # While docking the robot is deliberately in Passive and driving
-        # itself; _connect_oi()'s full() would cancel the dock seek.
+        # Hands off during a dock approach. On the legacy 143 path the robot
+        # is in Passive driving itself and _connect_oi()'s full() would cancel
+        # the seek; on the IR homing path we are mid-approach in Full and a
+        # re-init would stutter the wheels. The homing loop's own 10Hz reads
+        # keep _last_ok_time fresh, and Full mode never auto-sleeps.
         if self._docking:
             return
         now = time.monotonic()
@@ -540,34 +562,54 @@ class RoombaDriver(Node):
         return None
 
     def _dock_cb(self, msg: Bool):
-        """Hand the robot over to the Create 2's own IR dock-seeking behaviour.
+        """Start the final dock approach.
 
-        pycreate2's Create2 has NO seek_dock() helper (calling it raised
-        AttributeError and killed this node), so send OI opcode 143 raw the
-        same way _safe_get_encoders sends 149.
+        Two routes, chosen by `use_ir_homing`:
 
-        STILL NOT WORKING as of 2026-07-22. The write succeeds and the OI
-        raises no error, but the robot barely moves (13cm/120s, then 21cm/120s
-        once _motor_control stopped fighting it) and never reaches the
-        charger. Ruled out: the AttributeError crash, _check_idle,
-        _keep_awake, _motor_control, and the soft e-stop (/emergency_stop was
-        false throughout). Next things to try, cheapest first:
-          - confirm the charging station actually has power / emits IR at all
-            (press Dock on the robot itself; if that fails too it is not us)
-          - opcode 165 (Buttons) with bit 2 = Dock, i.e. simulate a Dock
-            button press. 143 is a Create 2 command; the 879 is a consumer
-            Roomba and may only honour the button route.
-          - retry on a full battery; these attempts ran at 5-7%.
+        * **IR homing (default)** — we steer, in Full mode, from the dock's own
+          IR beams via home_robot/ir_homing.py. This exists because the stock
+          seek below does not work on this robot.
+        * **OI 143 (legacy)** — hand over to the Create 2's built-in seek.
+          Measured 2026-07-22/26: the write succeeds and the OI raises no
+          error, but the robot crawls (13cm/120s, 21cm/120s once
+          _motor_control stopped fighting it) and never reaches the charger.
+          Worse, it steers *out* of the approach corridor: omni went 172
+          (Red+Green) to 161 (force field only) with both directional
+          receivers at 0, and it never re-acquired. Ruled out along the way:
+          an AttributeError crash (pycreate2 has no seek_dock()), _check_idle,
+          _keep_awake, _motor_control and the soft e-stop. 143 is a Create 2
+          command and this is a consumer Roomba 879, which may simply not
+          honour it properly.
 
-        Seek Dock drops the OI back to Passive and the robot drives itself.
-        Both of our housekeeping timers would abort that within seconds, so
-        they are suppressed via _docking until the charger engages:
+        Either way our housekeeping timers would abort the approach within
+        seconds, so they are suppressed via _docking until it ends:
           - _check_idle would send drive_direct(0,0) after idle_timeout
-          - _keep_awake would re-run _connect_oi() -> full(), and Full/Safe
-            takes back control, cancelling the docking behaviour outright
+          - _keep_awake would re-run _connect_oi(); on the 143 path Full/Safe
+            takes back control and cancels the built-in behaviour outright
         """
         if not msg.data:
             return
+
+        if self.use_ir_homing:
+            # We steer, so we need Full mode — the opposite of the 143 path,
+            # which drops to Passive and hands the wheels to the robot.
+            self._connect_oi()
+            self._homing = IrHoming(
+                forward_mm_s=self.get_parameter('ir_forward_mm_s').value,
+                search_timeout_s=self.get_parameter('ir_search_timeout_s').value,
+                swap_buoys=self.get_parameter('ir_swap_buoys').value,
+            )
+            self._homing.reset()
+            self._homing_last_status = None
+            self._dock_last_odom = None
+            self._docking = True
+            self._dock_started = time.monotonic()
+            self._idle = True                # _motor_control must not fight us
+            self._target_left = self._target_right = 0.0
+            self._cur_left = self._cur_right = 0.0
+            self.get_logger().info('Docking by IR homing — housekeeping suspended')
+            return
+
         try:
             self.bot.SCI.write(143)          # OI opcode 143 = Seek Dock
         except Exception as e:
@@ -618,6 +660,19 @@ class RoombaDriver(Node):
         no way back short of a restart."""
         if not self._docking:
             return
+        if self._homing is not None:
+            # IR homing owns this approach and decides seated/lost from the
+            # beams itself, on a stricter test than _dock_seated below. Only
+            # the timeout at the bottom still applies, as a backstop.
+            if (time.monotonic() - self._dock_started) > self.dock_timeout:
+                self.bot.drive_direct(0, 0)
+                self._docking = False
+                self._homing = None
+                self.get_logger().warn(
+                    f'IR homing gave up after {self.dock_timeout:.0f}s '
+                    '— housekeeping resumed')
+                self._connect_oi()
+            return
         sensors = self._safe_get_sensors()
         if sensors is not None and getattr(sensors, 'charger_state', 0):
             self._docking = False
@@ -655,6 +710,72 @@ class RoombaDriver(Node):
     # Packets 19/20 (Distance/Angle) read as 0 on this unit's firmware, so
     # odometry is computed from raw left/right encoder counts (43/44)
     # instead, scaled by the mm_per_tick parameter.
+
+    def _safe_get_ir(self):
+        """Read the three IR receivers (17 omni, 52 left, 53 right) at once.
+
+        One Query List, not three individual reads: the homing loop runs at
+        10Hz and three round trips cost ~150ms, which would starve the 20Hz
+        odometry timer sharing this port. Returns (omni, left, right) or None.
+        """
+        try:
+            self.bot.SCI.ser.reset_input_buffer()
+            self.bot.SCI.write(149, (3, 17, 52, 53))
+            data = self.bot.SCI.read(3)
+            if len(data) != 3:
+                return None
+            self._last_ok_time = time.monotonic()
+            return (data[0], data[1], data[2])
+        except Exception:                                  # noqa: BLE001
+            return None
+
+    def _ir_homing_step(self):
+        """Drive the final dock approach ourselves, 10Hz closed loop.
+
+        Replaces OI 143, which on this 879 drove out of the approach corridor
+        and stayed there (measured 2026-07-26). All the judgement lives in
+        home_robot/ir_homing.py so it is testable without the robot; this
+        method only does I/O.
+        """
+        if not self._docking or self._homing is None:
+            return
+        ir = self._safe_get_ir()
+        if ir is None:
+            return                      # a dropped read is not a decision
+        omni, left, right = ir
+
+        # "moved" comes from the odometry the 20Hz timer already maintains,
+        # rather than a second encoder read competing for the same port.
+        pose = (round(self._x, 3), round(self._y, 3))
+        moved = self._dock_last_odom is None or pose != self._dock_last_odom
+        self._dock_last_odom = pose
+
+        l_mm, r_mm, status = self._homing.step(omni, left, right, moved,
+                                               time.monotonic())
+
+        if status == ir_homing.SEATED:
+            self.bot.drive_direct(0, 0)
+            self._docking = False
+            self._homing = None
+            self.get_logger().info(
+                'Docked — driven onto the base by IR homing (stalled while '
+                'centred on both buoys)')
+            self._connect_oi()
+            return
+        if status == ir_homing.LOST:
+            self.bot.drive_direct(0, 0)
+            self._docking = False
+            self._homing = None
+            self.get_logger().warn(
+                'IR homing gave up — no dock beam found. Is the base powered?')
+            self._connect_oi()
+            return
+
+        if status != self._homing_last_status:
+            self.get_logger().info(f'IR homing: {status} '
+                                   f'(omni={omni} L={left} R={right})')
+            self._homing_last_status = status
+        self.bot.drive_direct(round(r_mm), round(l_mm))
 
     def _safe_get_encoders(self):
         """Read packets 43/44 (left/right encoder counts) με retry."""
