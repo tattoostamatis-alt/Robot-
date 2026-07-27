@@ -33,6 +33,36 @@ _STATUS_RE = re.compile(
 # ("πήγαινε να φορτίσεις", "πήγαινε στη βάση"), so leave those alone.
 _COMMAND_RE = re.compile(r'\b(πηγαιν\w*|παμε|παω|τακτοποι\w*|καθαρ\w*|ακολουθ\w*)')
 
+# "Where are you" is the same trap as the battery question. Measured
+# 2026-07-27 with no AMCL running at all: "Σε ποιο δωμάτιο είσαι τώρα;" ->
+# "Είμαι στη βάση φόρτισης." — no tool call, pure invention, and stated with
+# the same confidence as a real answer. Position is what you would act on
+# before sending the robot somewhere, so it gets the same treatment.
+_LOCATION_RE = re.compile(
+    r'(\bπου\s+(εισαι|βρισκεσαι)|\bσε\s+ποιο\s+(δωματιο|σημειο)|'
+    r'\bποια\s+ειναι\s+η\s+θεση|\bσε\s+ποιον\s+χωρο)')
+
+
+def is_location_query(text: str) -> bool:
+    """True if the user is asking where the robot currently is."""
+    n = _norm(text)
+    if _COMMAND_RE.search(n):
+        return False
+    return bool(_LOCATION_RE.search(n))
+
+
+def format_location(room: str) -> str:
+    """One short Greek sentence about position, or an honest admission.
+
+    `room` is whatever arrived on /current_room, which room_markers_node
+    derives from /amcl_pose. Empty means localization is not running or has
+    not converged — say so rather than pick a plausible room.
+    """
+    if not room:
+        return ('Δεν ξέρω πού βρίσκομαι — ο εντοπισμός δεν είναι ενεργός '
+                'αυτή τη στιγμή.')
+    return f'Βρίσκομαι στο {room}.'
+
 
 def is_status_query(text: str) -> bool:
     """True if the user is asking about the robot's own condition."""

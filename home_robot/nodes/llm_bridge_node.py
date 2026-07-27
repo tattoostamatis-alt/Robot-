@@ -42,7 +42,9 @@ from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
 from dotenv import load_dotenv
 from geometry_msgs.msg import Quaternion, Twist
-from home_robot.status_query import format_status, is_status_query, wants_battery
+from home_robot.status_query import (format_location, format_status,
+                                     is_location_query, is_status_query,
+                                     wants_battery)
 from home_robot.stop_command import is_stop_command, strip_accents
 from nav2_msgs.action import NavigateToPose
 from rclpy.action import ActionClient
@@ -279,6 +281,12 @@ class LLMBridgeNode(Node):
         self._latest_frame_jpg: bytes | None = None
 
         self.create_subscription(String, 'speech_text', self._on_speech_text, 10)
+        # Real position, for the location gate. room_markers_node derives this
+        # from /amcl_pose, so an empty string genuinely means "not localized"
+        # — which is the honest answer, not a room to guess at.
+        self._current_room = ''
+        self.create_subscription(String, '/current_room',
+                                 self._on_current_room, 10)
         self.create_subscription(String, 'detected_objects', self._on_detected_objects, 10)
         self.create_subscription(BatteryState, 'battery/state', self._on_battery_state, 10)
         self.create_subscription(String, 'memory/answer', self._on_memory_answer, 10)
@@ -442,10 +450,25 @@ class LLMBridgeNode(Node):
                              daemon=True).start()
             return
 
+        # "Where are you" is the same trap. Measured 2026-07-27 with no AMCL
+        # running: it answered "Είμαι στη βάση φόρτισης" with no tool call at
+        # all — a room invented as confidently as a real one. Answered from
+        # /current_room, which room_markers_node derives from /amcl_pose.
+        # No lock needed: this reads one cached string and speaks.
+        if is_location_query(text):
+            self.get_logger().info(f'Location query (keyword gate): {text}')
+            reply = format_location(self._current_room)
+            self.get_logger().info(f'Max: {reply}')
+            self.response_pub.publish(String(data=reply))
+            return
+
         if not self._busy.acquire(blocking=False):
             self.get_logger().warn('Already handling a request, ignoring speech_text')
             return
         threading.Thread(target=self._handle_text, args=(text,), daemon=True).start()
+
+    def _on_current_room(self, msg: String):
+        self._current_room = msg.data.strip()
 
     def _answer_status(self, text):
         """Answer a status question from the system_status tool's real data."""

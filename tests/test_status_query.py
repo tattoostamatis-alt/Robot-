@@ -6,7 +6,8 @@ import os
 
 import pytest
 
-from home_robot.status_query import (format_status, is_status_query,
+from home_robot.status_query import (format_location, format_status,
+                                     is_location_query, is_status_query,
                                      wants_battery)
 
 PKG = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -103,3 +104,42 @@ def test_status_answer_uses_the_real_tool():
     assert "_dispatch_tool('system_status'" in body, \
         'must read real telemetry, not compose a number'
     assert 'self._busy.release()' in body, 'must not leak the busy lock'
+
+
+# ── location questions (added 2026-07-27) ─────────────────────────────
+# Measured live with no AMCL running: "Σε ποιο δωμάτιο είσαι τώρα;" produced
+# "Είμαι στη βάση φόρτισης." with NO tool call — a room invented as
+# confidently as a real one, the same failure the battery gate exists for.
+@pytest.mark.parametrize('text', [
+    'Πού είσαι;',
+    'Που βρίσκεσαι;',
+    'Σε ποιο δωμάτιο είσαι τώρα;',
+    'Σε ποιο σημείο είσαι;',
+    'Ποια είναι η θέση σου;',
+    'Σε ποιον χώρο βρίσκεσαι;',
+])
+def test_location_questions_are_gated(text):
+    assert is_location_query(text)
+
+
+@pytest.mark.parametrize('text', [
+    'Πήγαινε στην κουζίνα.',          # command, not a question
+    'Σε ποιο δωμάτιο να πάω;',        # asking the robot to choose
+    'Πού είναι τα κλειδιά;',          # about an object, belongs to RAG recall
+    'Πόση μπαταρία έχεις;',           # the battery gate's business
+    'Τι ώρα είναι;',
+])
+def test_non_location_questions_pass_through(text):
+    assert not is_location_query(text)
+
+
+def test_unlocalized_admits_it_rather_than_guessing():
+    reply = format_location('')
+    assert 'Δεν ξέρω' in reply
+    # must not name any room
+    for room in ('σαλόνι', 'saloni', 'κουζίνα', 'βάση'):
+        assert room not in reply.lower()
+
+
+def test_localized_reports_the_real_room():
+    assert 'saloni' in format_location('saloni')
