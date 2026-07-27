@@ -63,6 +63,33 @@ camera + detector + tracker + dynamic-obstacle layers + object memory).
       person). Unit-tested (17/17). Still HW-untested end-to-end; carry-pose arm stability + the
       full resolve→approach→pick→carry→place chain remain the live-test items.
 
+## 🔌 Docking (rewritten 2026-07-27 — HW-untested)
+
+- [ ] **The dock pose was 0.96 m from the real base.** Root cause of "stops near the
+      base but not on it", and of the "the dock is unreachable on the map" finding —
+      Nav2 was being sent to a cramped spot on the far side of the room. The taught
+      in-front-of-the-tag pose gives it away: it points at the tag (3.6° off) and
+      **161° away** from the recorded dock. `dock`/`dock_staging` are now *derived*
+      from the AprilTag calibration (`scripts/derive_dock_pose.py`), since the station
+      sits directly under the tag — re-run it after every remap instead of re-teaching.
+- [ ] **The dock mission never started IR homing.** `_mission_dock` navigated and then
+      announced "Έφτασα στη βάση φόρτισης" whatever happened; it never published `dock`.
+      Meanwhile `llm_bridge` published `dock` *directly*, starting IR homing from
+      wherever the robot stood — no beam in range from another room, 20 s sweep, give up.
+      Now one chain: Nav2 → `dock_staging` (0.85 m out, clearance 0.30) → relocalize on
+      the tag → aim → IR homing → wait for a real outcome.
+- [ ] **`use_mission` was false in `localize.launch.py`** — the launch `robot max` uses.
+      Now true, else the voice command publishes to nobody.
+- [ ] **`dock_status` topic** (latched) so the outcome is knowable: homing / searching /
+      seated / lost / timeout. Speech now distinguishes "κάθισα στη βάση" from
+      "δεν βρίσκω τη δέσμη — είναι στην πρίζα;".
+- [ ] ‼️ **OPEN — unexplained obstacle in front of the base.** The map shows solid
+      occupancy from 0.15 m to 0.55 m out along the tag normal, ~40 cm deep, directly
+      in the approach path. If that is real (power station? furniture?) IR homing will
+      drive into it. If it is map cruft, that corner needs remapping. **Check physically
+      before the first dock run.** Staging at 0.85 m is clear either way, so the run can
+      be aborted there.
+
 ## 🧪 Needs the robot live (do these together in one session)
 
 - [x] **Spin/oscillation fix — HW re-test on kela3.** CONFIRMED 2026-07-06: `/cmd_vel_safe`

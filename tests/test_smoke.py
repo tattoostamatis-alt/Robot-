@@ -119,10 +119,18 @@ def test_locations_on_free_space_and_in_own_room():
         col = int((p['x'] - ox) / res)
         row = h - 1 - int((p['y'] - oy) / res)
         assert 0 <= row < h and 0 <= col < w, f'{name} outside the map'
-        assert grid[row, col] >= 250, f'{name} not on free space (pixel={grid[row, col]})'
-        # Not every location is a room: `dock` is a charger pose, and it sits
-        # inside whichever room holds the charger. room_colors.yaml is what
-        # defines a room, so only those get the own-room check.
+        # `dock` is the seated pose ON the base, so it lands on occupied
+        # pixels by definition — the base is an obstacle to the lidar. It is
+        # never a Nav2 goal (that is `dock_staging`, checked like any other
+        # pose), so free space is the wrong requirement for it. Demanding it
+        # is how the old, wrong dock entry looked healthy: 0.96 m from the
+        # real base, but out in the open, so this test passed.
+        if name != 'dock':
+            assert grid[row, col] >= 250, \
+                f'{name} not on free space (pixel={grid[row, col]})'
+        # Not every location is a room: the charger poses sit inside whichever
+        # room holds the charger. room_colors.yaml is what defines a room, so
+        # only those get the own-room check.
         if name not in colors:
             continue
         if mask.shape[:2] == grid.shape:  # mask lookup only when dims match

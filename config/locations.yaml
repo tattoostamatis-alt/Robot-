@@ -1,12 +1,22 @@
 # Named navigation goals (map frame).
+#
+# dock / dock_staging are GENERATED — scripts/derive_dock_pose.py.
+# They come from the AprilTag calibration, since the station sits
+# under the tag; re-run it after a remap instead of re-teaching them.
+# `dock` is the seated pose and is NOT plannable (the base is an
+# obstacle) — navigate to `dock_staging` and let IR homing finish.
 diadromos:
   x: -1.086
   y: 5.196
   yaw: 0.0
 dock:
-  x: 0.77
-  y: 0.007
-  yaw: -2.768
+  x: 0.134
+  y: -0.226
+  yaw: -2.645
+dock_staging:
+  x: 0.539
+  y: 0.187
+  yaw: -2.443
 domatio tou max:
   x: 2.937
   y: 8.224

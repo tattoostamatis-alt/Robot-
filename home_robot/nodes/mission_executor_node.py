@@ -45,12 +45,15 @@ import rclpy
 import tf2_ros
 from rclpy.node import Node
 from rclpy.action import ActionClient
+from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSHistoryPolicy
 from action_msgs.msg import GoalStatus
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseStamped, Twist
 from nav2_msgs.action import NavigateToPose
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
+from std_srvs.srv import Empty
 
+from home_robot import dock_geometry
 from home_robot.fetch_planner import (approach_pose, memory_target,
                                       nearest_detection, homing_twist)
 
@@ -83,6 +86,12 @@ LOCATION_NAMES_EL = {
     'dock':        'βάση φόρτισης',
 }
 
+# locations.yaml holds poses that are not rooms, and a patrol or a room sweep
+# that treated them as rooms would drive the robot at the charger over and
+# over. `dock` is the seated pose on the base and `dock_staging` the handover
+# point in front of it — both charger machinery, neither a place to inspect.
+NON_ROOMS = frozenset({'dock', 'dock_staging'})
+
 CANCEL_PHRASES = {'ακύρωσε', 'ακυρωσε', 'σταμάτα', 'σταματα', 'σταμάτησε', 'σταματησε', 'cancel'}
 
 
@@ -104,6 +113,11 @@ class MissionExecutorNode(Node):
         self.declare_parameter('deliver_distance', 0.8)      # m — how close to get to the user
         self.declare_parameter('homing_timeout', 25.0)       # s — give up homing, place anyway
         self.declare_parameter('search_speed', 0.4)          # rad/s — rotate to find the user
+        # docking
+        self.declare_parameter('dock_timeout', 150.0)        # s — longer than the driver's own 120 s,
+                                                             # so its terminal status always wins
+        self.declare_parameter('dock_settle', 1.5)           # s — let AMCL settle after the tag fix
+        self.declare_parameter('aim_timeout', 8.0)           # s — give up squaring up, IR will sweep
         self._fetch_approach_dist = self.get_parameter('fetch_approach_dist').value
         self._fetch_grasp_range   = self.get_parameter('fetch_grasp_range').value
         self._memory_max_age      = self.get_parameter('memory_max_age').value
@@ -115,6 +129,9 @@ class MissionExecutorNode(Node):
         self._deliver_distance    = self.get_parameter('deliver_distance').value
         self._homing_timeout      = self.get_parameter('homing_timeout').value
         self._search_speed        = self.get_parameter('search_speed').value
+        self._dock_timeout        = self.get_parameter('dock_timeout').value
+        self._dock_settle         = self.get_parameter('dock_settle').value
+        self._aim_timeout         = self.get_parameter('aim_timeout').value
 
         self._locations  = _load_locations()
         self._state      = State.IDLE
@@ -133,6 +150,11 @@ class MissionExecutorNode(Node):
         self._pick_event  = threading.Event(); self._pick_value = None
         self._place_event = threading.Event(); self._place_value = None
         self._vision_event = threading.Event(); self._vision_value = None
+        self._dock_event  = threading.Event(); self._dock_value  = None
+
+        # One-shot AMCL fix off the tag above the base, before the final approach.
+        self._reloc_cli = self.create_client(Empty,
+                                             '/apriltag_relocalizer/relocalize')
 
         # Subscribers
         self.create_subscription(String, 'mission/start',     self._on_mission_start,   10)
@@ -143,6 +165,13 @@ class MissionExecutorNode(Node):
         self.create_subscription(String, 'pick_result',       self._on_pick_result,     10)
         self.create_subscription(String, 'place_result',      self._on_place_result,    10)
         self.create_subscription(String, 'vision/answer',     self._on_vision_answer,    10)
+        # Latched by the driver, so a status published before we subscribed
+        # (a fast 'lost') still reaches us.
+        self.create_subscription(
+            String, 'dock_status', self._on_dock_status,
+            QoSProfile(depth=1,
+                       history=QoSHistoryPolicy.KEEP_LAST,
+                       durability=QoSDurabilityPolicy.TRANSIENT_LOCAL))
 
         # Publishers
         self._status_pub  = self.create_publisher(String, 'mission/status', 10)
@@ -155,6 +184,8 @@ class MissionExecutorNode(Node):
         # closes the last metre onto the user). obstacle_safety relays it to
         # cmd_vel_safe, same as person_follower.
         self._cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
+        # Hands the final approach to the driver's closed-loop IR homing.
+        self._dock_pub = self.create_publisher(Bool, 'dock', 10)
 
         self.get_logger().info('Mission executor ready — topics: mission/start, mission/status')
 
@@ -165,6 +196,10 @@ class MissionExecutorNode(Node):
             self._latest_objects = json.loads(msg.data) or []
         except json.JSONDecodeError:
             pass
+
+    def _on_dock_status(self, msg: String):
+        self._dock_value = msg.data
+        self._dock_event.set()
 
     def _on_mem_answer(self, msg: String):
         try:
@@ -234,7 +269,7 @@ class MissionExecutorNode(Node):
 
     def _mission_patrol(self):
         self.get_logger().info('Mission: patrol')
-        locs = [n for n in self._locations if n != 'dock']
+        locs = [n for n in self._locations if n not in NON_ROOMS]
         if not locs:
             self._speak('Δεν έχω καταχωρισμένα δωμάτια ακόμα.')
             return
@@ -275,7 +310,7 @@ class MissionExecutorNode(Node):
 
     def _mission_find(self, label: str):
         self.get_logger().info(f'Mission: find "{label}"')
-        locs = [n for n in self._locations if n != 'dock']
+        locs = [n for n in self._locations if n not in NON_ROOMS]
         if not locs:
             self._speak('Δεν έχω καταχωρισμένα δωμάτια.')
             return
@@ -379,7 +414,7 @@ class MissionExecutorNode(Node):
         if t:
             return t
         self._speak('Δεν το έχω στη μνήμη, ψάχνω στα δωμάτια.')
-        for room in [n for n in self._locations if n != 'dock']:
+        for room in [n for n in self._locations if n not in NON_ROOMS]:
             if self._cancel_flag.is_set():
                 return None
             if not self._navigate_to(room):
@@ -462,24 +497,144 @@ class MissionExecutorNode(Node):
     # ── Mission: dock ────────────────────────────────────────────────
 
     def _mission_dock(self):
-        if 'dock' not in self._locations:
+        """Drive to the base and park on it, in three handovers.
+
+        This used to be a single `_navigate_to('dock')` that announced "Έφτασα
+        στη βάση φόρτισης" the moment Nav2 returned — it never published
+        `dock`, so the IR homing that actually parks the robot was never
+        started, and the mission reported success from wherever Nav2 happened
+        to stop. Two things have to be true for a dock to work, and neither was:
+
+        1. **Nav2 cannot do the final approach.** The corridor into the base
+           measures 0.05-0.22 m of clearance against a 0.30 m inflation radius,
+           so no plan into it will ever be accepted. Nav2's job ends at
+           `dock_staging`, roughly 0.85 m out, which it can reach.
+        2. **Something has to steer the last stretch.** That is `ir_homing`,
+           driving on the dock's own beams with the costmap out of the loop —
+           legitimate here because the robot physically fits (0.17 m inscribed)
+           even where Nav2 refuses to plan.
+
+        Between the two, a relocalization off the tag above the base: AMCL can
+        have drifted on the way over, and the whole approach is aimed from the
+        map pose. The tag is the one thing in the room that fixes it to
+        millimetres.
+        """
+        staging = 'dock_staging' if 'dock_staging' in self._locations else 'dock'
+        if staging not in self._locations:
             self._speak('Δεν έχω καταχωρίσει τη βάση φόρτισης.')
             return
+
         self._set_state(State.NAVIGATING)
         self._speak('Πηγαίνω στη βάση φόρτισης.')
-        ok = self._navigate_to('dock')
-        if ok and not self._cancel_flag.is_set():
-            self._finish(State.DONE, 'Έφτασα στη βάση φόρτισης.')
-        elif self._cancel_flag.is_set():
+
+        if not self._navigate_to(staging):
+            if self._cancel_flag.is_set():
+                self._finish(State.CANCELLED, 'Ακύρωση πλεύσης προς βάση.')
+            else:
+                self._finish(State.FAILED,
+                             'Δεν μπόρεσα να πλησιάσω τη βάση φόρτισης.')
+            return
+        if self._cancel_flag.is_set():
             self._finish(State.CANCELLED, 'Ακύρωση πλεύσης προς βάση.')
+            return
+
+        # Re-fix on the tag before aiming. Best-effort: a dock attempt from a
+        # slightly stale pose is worth trying, a refusal to dock is not.
+        self._relocalize_on_tag()
+        self._aim_at_dock()
+        if self._cancel_flag.is_set():
+            self._finish(State.CANCELLED, 'Ακύρωση πλεύσης προς βάση.')
+            return
+
+        self._set_state(State.INSPECTING)
+        outcome = self._run_ir_homing()
+
+        if outcome == 'seated':
+            self._finish(State.DONE, 'Κάθισα στη βάση φόρτισης.')
+        elif outcome == 'cancelled':
+            self._finish(State.CANCELLED, 'Ακύρωση πλεύσης προς βάση.')
+        elif outcome == 'lost':
+            self._finish(State.FAILED,
+                         'Δεν βρίσκω τη δέσμη της βάσης. Είναι στην πρίζα;')
         else:
-            self._finish(State.FAILED, 'Δεν μπόρεσα να φτάσω στη βάση.')
+            self._finish(State.FAILED,
+                         'Έφτασα μπροστά στη βάση αλλά δεν κατάφερα να καθίσω.')
+
+    def _relocalize_on_tag(self):
+        """Ask the relocalizer for a one-shot fix off the tag above the base.
+
+        Silent no-op when the service is absent — the relocalizer is optional
+        in some launches, and its absence should cost accuracy, not the dock.
+        """
+        if not self._reloc_cli.wait_for_service(timeout_sec=2.0):
+            self.get_logger().info(
+                'apriltag relocalizer not available — docking on the AMCL pose')
+            return
+        future = self._reloc_cli.call_async(Empty.Request())
+        if self._await_future(future, 5.0) is None:
+            self.get_logger().warn('relocalize call timed out — carrying on')
+            return
+        # AMCL needs a moment to settle on the seeded pose before we read a
+        # heading off it.
+        time.sleep(self._dock_settle)
+        self.get_logger().info('Relocalized on the dock tag')
+
+    def _aim_at_dock(self):
+        """Turn to face the base, so IR homing starts inside the beam cone.
+
+        Skipped entirely when the pose is unknown: IR homing sweeps for the
+        beam on its own, so a missing TF costs time, not the attempt.
+        """
+        target = self._locations.get('dock')
+        if target is None:
+            return
+        deadline = time.monotonic() + self._aim_timeout
+        while time.monotonic() < deadline and not self._cancel_flag.is_set():
+            pose = self._lookup_base_pose()
+            if pose is None:
+                return
+            x, y, yaw = pose
+            desired = math.atan2(float(target['y']) - y, float(target['x']) - x)
+            wz = dock_geometry.align_twist(yaw, desired)
+            if wz == 0.0:
+                break
+            twist = Twist()
+            twist.angular.z = wz
+            self._cmd_vel_pub.publish(twist)
+            time.sleep(0.1)
+        self._cmd_vel_pub.publish(Twist())
+
+    def _run_ir_homing(self):
+        """Hand over to IR homing and wait for how it actually ended.
+
+        Returns 'seated' | 'lost' | 'timeout' | 'cancelled'. The driver's own
+        `dock_timeout` bounds the approach; the wait here is longer so a
+        terminal status always beats the local deadline, and only a driver
+        that died silently falls through to 'timeout'.
+        """
+        self._dock_event.clear()
+        self._dock_value = None
+        self._speak('Μπαίνω στη βάση.')
+        self._dock_pub.publish(Bool(data=True))
+
+        deadline = time.monotonic() + self._dock_timeout
+        while time.monotonic() < deadline:
+            if self._cancel_flag.is_set():
+                self._cmd_vel_pub.publish(Twist())
+                return 'cancelled'
+            if self._dock_event.wait(0.2):
+                self._dock_event.clear()
+                status = self._dock_value
+                if status in ('seated', 'lost', 'timeout'):
+                    return status
+                # 'homing' / 'searching' are progress, keep waiting
+        return 'timeout'
 
     # ── Mission: check_rooms ─────────────────────────────────────────
 
     def _mission_check_rooms(self):
         self.get_logger().info('Mission: check_rooms')
-        locs = [n for n in self._locations if n != 'dock']
+        locs = [n for n in self._locations if n not in NON_ROOMS]
         if not locs:
             self._speak('Δεν έχω δωμάτια.')
             return

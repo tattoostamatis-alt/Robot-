@@ -7,7 +7,7 @@ from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSHistoryPolicy
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import BatteryState
-from std_msgs.msg import Bool, Float32
+from std_msgs.msg import Bool, Float32, String
 import pycreate2
 from home_robot import ir_homing
 from home_robot.ir_homing import IrHoming
@@ -334,6 +334,17 @@ class RoombaDriver(Node):
         self.odom_pub = self.create_publisher(Odometry, 'odom', 10)
         self.battery_pub = self.create_publisher(BatteryState, 'battery/state', 10)
         self.charge_ratio_pub = self.create_publisher(Float32, 'battery/charge_ratio', 10)
+        # How the approach is going, for whoever asked for it. IR homing used
+        # to decide seated/lost purely in the log, so a caller that had driven
+        # the robot to the handover point had no way to tell success from a
+        # 120 s timeout — and the mission that requested the dock reported
+        # "arrived at the base" either way. Latched, so a subscriber that comes
+        # up late still sees how the last attempt ended.
+        self.dock_status_pub = self.create_publisher(
+            String, 'dock_status',
+            QoSProfile(depth=1,
+                       history=QoSHistoryPolicy.KEEP_LAST,
+                       durability=QoSDurabilityPolicy.TRANSIENT_LOCAL))
 
         self.create_timer(0.05, self._publish_odom)     # 20 Hz
         self.create_timer(0.05, self._motor_control)     # 20 Hz ramped output + watchdog
@@ -608,12 +619,14 @@ class RoombaDriver(Node):
             self._target_left = self._target_right = 0.0
             self._cur_left = self._cur_right = 0.0
             self.get_logger().info('Docking by IR homing — housekeeping suspended')
+            self._publish_dock_status('homing')
             return
 
         try:
             self.bot.SCI.write(143)          # OI opcode 143 = Seek Dock
         except Exception as e:
             self.get_logger().error(f'Seek Dock command failed: {e!r}')
+            self._publish_dock_status('lost')
             return
         self._docking = True
         self._dock_started = time.monotonic()
@@ -621,6 +634,16 @@ class RoombaDriver(Node):
         self._target_left = self._target_right = 0.0
         self._cur_left = self._cur_right = 0.0
         self.get_logger().info('Seeking dock (OI 143) — housekeeping suspended')
+        self._publish_dock_status('homing')
+
+    def _publish_dock_status(self, status: str):
+        """Announce where the dock approach has got to.
+
+        Terminal values are `seated`, `lost` (no beam to follow) and `timeout`;
+        `homing` and `searching` are progress. A caller should wait for a
+        terminal one rather than assuming the approach worked.
+        """
+        self.dock_status_pub.publish(String(data=status))
 
     def _dock_seated(self) -> bool:
         """True when the robot looks parked on the base without charging.
@@ -671,12 +694,14 @@ class RoombaDriver(Node):
                 self.get_logger().warn(
                     f'IR homing gave up after {self.dock_timeout:.0f}s '
                     '— housekeeping resumed')
+                self._publish_dock_status('timeout')
                 self._connect_oi()
             return
         sensors = self._safe_get_sensors()
         if sensors is not None and getattr(sensors, 'charger_state', 0):
             self._docking = False
             self.get_logger().info('Docked — charging, housekeeping resumed')
+            self._publish_dock_status('seated')
             self._connect_oi()
             return
         # ‼️ On THIS robot the battery pack has been removed (2026-07-26) — it
@@ -692,6 +717,7 @@ class RoombaDriver(Node):
             self._docking = False
             self.get_logger().info('Docked — seated on base (no battery pack '
                                    'to charge, judged by IR + no motion)')
+            self._publish_dock_status('seated')
             self._connect_oi()
             return
         if (time.monotonic() - self._dock_started) > self.dock_timeout:
@@ -699,6 +725,7 @@ class RoombaDriver(Node):
             self.get_logger().warn(
                 f'Dock seek gave up after {self.dock_timeout:.0f}s '
                 '(not charging) — housekeeping resumed')
+            self._publish_dock_status('timeout')
             self._connect_oi()
 
     # Max plausible per-cycle change at 20Hz (well above the Create 2's
@@ -760,6 +787,7 @@ class RoombaDriver(Node):
             self.get_logger().info(
                 'Docked — driven onto the base by IR homing (stalled while '
                 'centred on both buoys)')
+            self._publish_dock_status('seated')
             self._connect_oi()
             return
         if status == ir_homing.LOST:
@@ -768,6 +796,7 @@ class RoombaDriver(Node):
             self._homing = None
             self.get_logger().warn(
                 'IR homing gave up — no dock beam found. Is the base powered?')
+            self._publish_dock_status('lost')
             self._connect_oi()
             return
 
@@ -775,6 +804,7 @@ class RoombaDriver(Node):
             self.get_logger().info(f'IR homing: {status} '
                                    f'(omni={omni} L={left} R={right})')
             self._homing_last_status = status
+            self._publish_dock_status(status)
         self.bot.drive_direct(round(r_mm), round(l_mm))
 
     def _safe_get_encoders(self):

@@ -84,7 +84,12 @@ def _launch_setup(context, *args, **kwargs):
             'use_prediction':      perc,      # /predicted_obstacles costmap layer
             'use_semantic_costmap': perc,     # /semantic_obstacles costmap layer
             'use_object_memory':   perc,      # remembers where objects are (map frame)
-            'use_mission':         'false',
+            # Docking is a mission (navigate to the handover point in front of
+            # the base, relocalize on the tag above it, then hand over to IR
+            # homing), and this is the launch `robot max` uses — with the
+            # executor off, "πήγαινε να φορτίσεις" would publish mission/start
+            # to nobody. It needs no extra hardware.
+            'use_mission':         'true',
             'use_recovery':        'true' if use_recovery else 'false',
             'use_obstacle_safety': 'true' if use_obstacle_safety else 'false',
             'use_rviz':            'true',

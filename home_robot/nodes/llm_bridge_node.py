@@ -252,7 +252,6 @@ class LLMBridgeNode(Node):
             self.locations = yaml.safe_load(f)
 
         self.response_pub = self.create_publisher(String, 'speech_response', 10)
-        self.dock_pub = self.create_publisher(Bool, 'dock', 10)
         self.cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
         self.tidy_pub = self.create_publisher(String, 'tidy_command', 10)
@@ -818,6 +817,19 @@ class LLMBridgeNode(Node):
 
     # ── tool dispatch ──────────────────────────────────────────────────────
 
+    def _start_docking(self):
+        """Run the whole dock sequence, not just the last 60 cm of it.
+
+        This used to publish `dock` directly, which starts the driver's IR
+        homing wherever the robot happens to be standing. From another room
+        there is no beam to find, so it swept for 20 s and gave up — while the
+        reply had already said it was on its way. Docking is a mission
+        (navigate to the handover point, relocalize on the tag, then IR home),
+        so it goes to the mission executor like the other multi-step jobs.
+        """
+        self.mission_pub.publish(String(data='dock'))
+        return {'status': 'started', 'action': 'dock'}
+
     def _dispatch_tool(self, name, args):
         if name == 'tidy':
             room = args.get('room', 'all')
@@ -827,8 +839,7 @@ class LLMBridgeNode(Node):
         elif name == 'goto':
             location = args.get('location')
             if location == 'dock':
-                self.dock_pub.publish(Bool(data=True))
-                return {'status': 'started', 'action': 'dock'}
+                return self._start_docking()
             loc = self.locations.get(location)
             if loc is None:
                 return {'status': 'error', 'reason': f'unknown location: {location}'}
@@ -840,8 +851,7 @@ class LLMBridgeNode(Node):
             return {'status': 'ok', 'action': 'goto', 'location': location}
 
         elif name == 'dock':
-            self.dock_pub.publish(Bool(data=True))
-            return {'status': 'started', 'action': 'dock'}
+            return self._start_docking()
 
         elif name == 'stop':
             self.cmd_vel_pub.publish(Twist())
