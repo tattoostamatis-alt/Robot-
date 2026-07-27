@@ -60,6 +60,33 @@ def merge_runs(mask, w, h):
     return runs
 
 
+def merge_rects(runs):
+    """Stack identical runs from consecutive rows into one box.
+
+    merge_runs() alone emits a separate wall per image ROW, so a plain vertical
+    wall 40 cells tall becomes 40 boxes. On the malou map that produced 1551
+    links and Gazebo sat at 4 GB and 100% CPU without ever stepping physics —
+    the sim never started. Merging vertically as well costs one pass and turns
+    every straight wall into a single box.
+
+    Returns (row0, row1, c0, c1) inclusive.
+    """
+    by_row = {}
+    for row, c0, c1 in runs:
+        by_row.setdefault(row, []).append((c0, c1))
+
+    rects, consumed = [], set()
+    for row, c0, c1 in runs:
+        if (row, c0, c1) in consumed:
+            continue
+        last = row
+        while (c0, c1) in by_row.get(last + 1, ()):
+            last += 1
+            consumed.add((last, c0, c1))
+        rects.append((row, last, c0, c1))
+    return rects
+
+
 def build_world(meta, img, wall_height, wall_thick):
     res = float(meta['resolution'])
     ox, oy = float(meta['origin'][0]), float(meta['origin'][1])
@@ -67,27 +94,30 @@ def build_world(meta, img, wall_height, wall_thick):
     negate = int(meta.get('negate', 0))
 
     mask, w, h = occupied_mask(img, occ_thresh, negate)
-    runs = merge_runs(mask, w, h)
+    rects = merge_rects(merge_runs(mask, w, h))
 
     boxes = []
-    for (row, c0, c1) in runs:
-        n = c1 - c0 + 1
-        length = n * res
+    for (r0, r1, c0, c1) in rects:
+        ncols = c1 - c0 + 1
+        nrows = r1 - r0 + 1
         # map_server convention: origin = bottom-left of image, y flips.
-        cx = ox + (c0 + n / 2.0) * res
-        cy = oy + (h - 1 - row + 0.5) * res
-        boxes.append((cx, cy, length))
+        cx = ox + (c0 + ncols / 2.0) * res
+        cy = oy + (h - 1 - r1 + nrows / 2.0) * res
+        boxes.append((cx, cy, ncols * res, nrows * res))
 
     links = []
-    for i, (cx, cy, length) in enumerate(boxes):
+    for i, (cx, cy, sx, sy) in enumerate(boxes):
+        # sy is the merged vertical extent; wall_thick is only a floor for
+        # single-row runs so a one-cell wall still has substance.
+        depth = max(sy, wall_thick)
         links.append(f"""
       <link name="wall_{i}">
         <pose>{cx:.4f} {cy:.4f} {wall_height / 2:.4f} 0 0 0</pose>
         <collision name="c">
-          <geometry><box><size>{length:.4f} {wall_thick:.4f} {wall_height:.4f}</size></box></geometry>
+          <geometry><box><size>{sx:.4f} {depth:.4f} {wall_height:.4f}</size></box></geometry>
         </collision>
         <visual name="v">
-          <geometry><box><size>{length:.4f} {wall_thick:.4f} {wall_height:.4f}</size></box></geometry>
+          <geometry><box><size>{sx:.4f} {depth:.4f} {wall_height:.4f}</size></box></geometry>
           <material><ambient>0.5 0.5 0.55 1</ambient><diffuse>0.6 0.6 0.65 1</diffuse></material>
         </visual>
       </link>""")
