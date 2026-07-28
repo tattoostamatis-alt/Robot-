@@ -274,6 +274,14 @@ class RoombaDriver(Node):
         # again. Docking is the known case — touching the charging contacts
         # ends Safe mode.
         self.declare_parameter('oi_mode', 'safe')
+        # Bumper protection. HW-verified 2026-07-28: packet 7 reports [1, 3] and
+        # the light bumper (45) reports too — despite the stale comment in
+        # obstacle_safety_node claiming this robot has no bump sensors. Nothing
+        # was reading them, so the robot drove into furniture at full speed.
+        self.declare_parameter('bump_stop', True)
+        # Keep forward blocked this long after the bumper releases, so the
+        # rebound doesn't drive straight back into the same obstacle.
+        self.declare_parameter('bump_block_s', 1.0)
         # Reverse felt too fast at the same scale_linear.x as forward —
         # scales the commanded speed down (not a calibration trim like
         # right_trim_reverse above, just a deliberate speed cap) whenever
@@ -297,6 +305,11 @@ class RoombaDriver(Node):
         self.right_trim = self.get_parameter('right_trim').value
         self.right_trim_reverse = self.get_parameter('right_trim_reverse').value
         self.max_accel = self.get_parameter('max_accel').value
+        self.bump_stop = self.get_parameter('bump_stop').value
+        self.bump_block_s = self.get_parameter('bump_block_s').value
+        self._bump = False
+        self._bump_warned = False
+        self._last_bump_time = 0.0
         self.oi_mode = str(self.get_parameter('oi_mode').value).lower()
         if self.oi_mode not in ('safe', 'full'):
             self.get_logger().warn(
@@ -484,6 +497,22 @@ class RoombaDriver(Node):
         if not self._idle and (now - self._last_cmd_time) > 0.25:
             target_left = target_right = 0.0
             self._stopped = True
+
+        # Bumper: block FORWARD motion while the bumper is pressed, and for
+        # bump_block_s after it releases so a rebound doesn't immediately drive
+        # back into the same obstacle. Reversing and turning stay available —
+        # that is how the robot gets out. Safe mode does NOT cover the bumper
+        # (only cliff/wheel-drop/charger), so this is the only bump protection
+        # the robot has, in teleop and under Nav2 alike.
+        if self.bump_stop and (now - self._last_bump_time) < self.bump_block_s:
+            if target_left > 0 and target_right > 0:
+                target_left = target_right = 0.0
+                if not self._bump_warned:
+                    self._bump_warned = True
+                    self.get_logger().warn('Bumper pressed — forward motion blocked')
+        elif self._bump_warned:
+            self._bump_warned = False
+            self.get_logger().info('Bumper clear')
 
         step = self.max_accel * dt
         self._cur_left  += max(-step, min(step, target_left  - self._cur_left))
@@ -873,18 +902,30 @@ class RoombaDriver(Node):
         self.bot.drive_direct(round(r_mm), round(l_mm))
 
     def _safe_get_encoders(self):
-        """Read packets 43/44 (left/right encoder counts) με retry."""
+        """Read packets 43/44 (encoder counts) + 7 (bumps/wheel drops), με retry.
+
+        Packet 7 rides along in the SAME Query List as the encoders: one extra
+        byte on a round-trip we already make every 50 ms, so the bumper costs
+        nothing. A separate poll would add a second serial transaction at 20 Hz
+        and starve odometry on this shared port.
+        """
         for attempt in range(3):
             try:
                 self.bot.SCI.ser.reset_input_buffer()
-                self.bot.SCI.write(149, (2, 43, 44))  # Query List: 2 packets, IDs 43+44
+                self.bot.SCI.write(149, (3, 43, 44, 7))  # encoders + bumps
                 # No fixed post-write sleep needed: _RawTermiosSerial.read()
-                # blocks (up to its timeout) until all 4 bytes have arrived, so
+                # blocks (up to its timeout) until all 5 bytes have arrived, so
                 # it no longer races the FTDI latency timer.
-                data = self.bot.SCI.read(4)
-                if len(data) != 4:
-                    raise Exception(f'Encoder data not 4 bytes long, it is: {len(data)}')
-                result = struct.unpack('>hh', data)
+                data = self.bot.SCI.read(5)
+                if len(data) != 5:
+                    raise Exception(f'Encoder data not 5 bytes long, it is: {len(data)}')
+                left, right, bumps = struct.unpack('>hhB', data)
+                # bit0 = bump right, bit1 = bump left (bits 2/3 are wheel drops,
+                # which Safe mode already handles by dropping to Passive).
+                self._bump = bool(bumps & 0x03)
+                if self._bump:
+                    self._last_bump_time = time.monotonic()
+                result = (left, right)
                 self._last_ok_time = time.monotonic()
                 return result
             except Exception as e:

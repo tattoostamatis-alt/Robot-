@@ -18,8 +18,14 @@ exactly this purpose) — same safety behavior, roughly half the CPU/RAM.
 
 Fail-safe: if object_detector.py stops publishing (crashed, use_camera off,
 etc.) for longer than `detection_timeout`, forward motion is blocked rather
-than silently assumed clear — this Roomba has no physical bump/cliff
-sensors, so software is the only obstacle protection it has.
+than silently assumed clear.
+
+‼️ CORRECTION 2026-07-28: this docstring used to claim the robot "has no
+physical bump/cliff sensors". That is false — measured live, OI packet 7
+reports bumps (values 1 and 3) and packet 45 (light bumper) reports too.
+Nothing was reading them, so the robot drove into furniture at full speed.
+The bumper is now handled in roomba_driver.py (`bump_stop`), which covers
+teleop as well; this node stays as the camera-based look-ahead layer.
 """
 import json
 import time
