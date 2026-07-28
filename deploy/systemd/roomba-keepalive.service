@@ -1,16 +1,21 @@
 [Unit]
-# Holds the Roomba in OI Full mode, which has no 5-minute inactivity sleep, so
-# the robot never sleeps. A BRC-pulse keep-alive was tried first but this
-# robot/cable ignores the RTS/DTR wake, so once asleep only a CLEAN press wakes
-# it -- Full mode avoids ever getting there. Trade-off (user-accepted): Full
-# mode does not charge on the dock, so the battery slowly drains while idle.
+# Wakes the Roomba when this PC comes up, then holds it in OI Full mode, which
+# has no inactivity sleep timer, so the robot stays awake for as long as the PC
+# is on. Trade-off (user-accepted): Full mode does not charge on the dock, so
+# the battery slowly drains while idle.
 #
 # Unlike the other robot services (moved off boot to on-demand), this one is
-# deliberately always-on: it is idle for ~59 of every 60 seconds, and its whole
+# deliberately always-on: it is idle for ~29 of every 30 seconds, and its whole
 # purpose is to cover the stretches when nothing else is running.
-Description=Roomba keep-alive (hold Full mode, never sleep)
+#
+# The robot is on a USB serial adapter, so dev-roomba.device only appears once
+# udev has processed it. After= alone would let us start before the port exists
+# and burn the whole boot-time wake burst on ENOENT; BindsTo= additionally stops
+# us if the adapter is unplugged, and systemd restarts us when it comes back --
+# which re-runs the wake burst, exactly what a just-replugged robot needs.
+Description=Roomba wake + keep-alive (hold Full mode, never sleep)
 After=dev-roomba.device
-Wants=dev-roomba.device
+BindsTo=dev-roomba.device
 
 [Service]
 Type=simple
@@ -23,6 +28,10 @@ User=dimi
 # alongside the running ROS driver. Two owners on one serial line is exactly
 # the framing corruption this is supposed to avoid. Found 2026-07-25.
 Environment=HOME=/home/dimi
+# For the notify-send popup when the robot needs a CLEAN press. Harmless when
+# no desktop session is logged in -- notify() is best-effort.
+Environment=DISPLAY=:0
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
 ExecStart=/usr/bin/python3 /home/dimi/robot_ws/src/home_robot/scripts/roomba_keepalive.py
 Restart=always
 RestartSec=10

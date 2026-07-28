@@ -72,6 +72,12 @@ class _RawTermiosSerial:
         termios.tcsetattr(self._fd, termios.TCSANOW, attrs)
         flags = fcntl.fcntl(self._fd, fcntl.F_GETFL)
         fcntl.fcntl(self._fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)  # blocking mode
+        # ‼️ os.open() asserts DTR by default on Linux, i.e. the BRC line is
+        # already pulled low the moment the port opens. Leaving it there makes
+        # every later `.dtr = True` a no-op -- the robot never sees a falling
+        # edge, so _do_brc_pulse pulses nothing (found 2026-07-28). Release it
+        # here so the line idles HIGH and self._dtr tells the truth.
+        self.dtr = False
 
     @property
     def is_open(self):
@@ -155,6 +161,12 @@ class RoombaDriver(Node):
         # data cable untouched.
         self.declare_parameter('brc_port', '')
         self.declare_parameter('brc_pulse_s', 0.6)      # OI wants >500ms low
+        # How long BRC must sit high before a pulse, so the falling edge is
+        # real. See _do_brc_pulse -- without this the pulse is a no-op.
+        self.declare_parameter('brc_idle_high_s', 0.2)
+        # Settle time between the wake edge and the OI handshake. The robot
+        # does not accept 128 the instant BRC goes back high.
+        self.declare_parameter('brc_wake_settle_s', 0.5)
         # ‼️ SAFETY, not tuning: per the OI spec, pulsing BRC low THREE times
         # within 5 seconds switches the robot to 19200 baud. pycreate2's wake()
         # does two pulses per call and _keep_awake called it every 2s while the
@@ -277,6 +289,8 @@ class RoombaDriver(Node):
         self.reverse_speed_scale = self.get_parameter('reverse_speed_scale').value
         self.brc_port = self.get_parameter('brc_port').value
         self.brc_pulse_s = self.get_parameter('brc_pulse_s').value
+        self.brc_idle_high_s = self.get_parameter('brc_idle_high_s').value
+        self.brc_wake_settle_s = self.get_parameter('brc_wake_settle_s').value
         self.brc_min_interval_s = self.get_parameter('brc_min_interval_s').value
         self._brc_thread = None
         self.add_on_set_parameters_callback(self._on_set_parameters)
@@ -486,10 +500,18 @@ class RoombaDriver(Node):
         thread: pycreate2's wake() blocks for 3 SECONDS inside what used to be
         a 2s timer callback, which stalled odometry publishing and every other
         timer on this node for as long as the robot stayed asleep."""
+        # ‼️ Always release the line and let it settle HIGH first. BRC wakes on
+        # a falling edge, and os.open() already asserts DTR (= line low), so
+        # driving it low again from low is a no-op: the robot sees BRC held low
+        # forever and never a pulse. Verified 2026-07-28 with TIOCMGET
+        # read-back -- before this, the only real edge the robot ever got was
+        # the port being opened.
         try:
             if self.brc_port:
                 fd = os.open(self.brc_port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
                 try:
+                    self._set_brc_low(fd, False)
+                    time.sleep(self.brc_idle_high_s)
                     self._set_brc_low(fd, True)
                     time.sleep(self.brc_pulse_s)
                     self._set_brc_low(fd, False)
@@ -498,6 +520,8 @@ class RoombaDriver(Node):
             else:
                 # Same adapter as the data line: _RawTermiosSerial exposes the
                 # modem bits, and toggling them does not disturb bytes in flight.
+                self.bot.SCI.ser.dtr = False
+                time.sleep(self.brc_idle_high_s)
                 self.bot.SCI.ser.dtr = True
                 time.sleep(self.brc_pulse_s)
                 self.bot.SCI.ser.dtr = False
@@ -512,12 +536,13 @@ class RoombaDriver(Node):
         nothing -- the sleep timer is 5 minutes wide."""
         now = time.monotonic()
         if now - self._last_brc_pulse < self.brc_min_interval_s:
-            return
+            return None
         if self._brc_thread is not None and self._brc_thread.is_alive():
-            return
+            return None
         self._last_brc_pulse = now
         self._brc_thread = threading.Thread(target=self._do_brc_pulse, daemon=True)
         self._brc_thread.start()
+        return self._brc_thread
 
     def _connect_oi(self):
         """(Re)initialise the Open Interface: wake → Passive → Full. Safe to
@@ -525,7 +550,19 @@ class RoombaDriver(Node):
         automatically after the Roomba has gone to sleep (it ignores serial
         while asleep, so a single boot-time init is not enough)."""
         try:
-            self._brc_pulse()    # pulse BRC low — wakes the robot from sleep
+            pulse = self._brc_pulse()   # pulse BRC low — wakes the robot
+            if pulse is not None:
+                # ‼️ WAIT for the pulse to finish. _brc_pulse runs it on its own
+                # thread and returns immediately, so start(128) used to go out
+                # ~0.8 s BEFORE the falling edge had even been delivered — the
+                # handshake reached a robot that was still asleep, failed, and
+                # the next read then looked exactly like "BRC does nothing".
+                # Combined with the 10 s rate limit, the 2 s watchdog meant the
+                # handshake was NEVER sent at a moment when the robot could
+                # hear it. Found 2026-07-28.
+                pulse.join(timeout=self.brc_idle_high_s + self.brc_pulse_s + 1.0)
+                # The OI needs a moment after the edge before it listens.
+                time.sleep(self.brc_wake_settle_s)
             self.bot.start()     # enter OI (Passive)
             time.sleep(0.3)
             self.bot.full()      # Full mode: the OI never auto-sleeps in Full

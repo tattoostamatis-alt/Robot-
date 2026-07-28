@@ -1,0 +1,17 @@
+[Unit]
+# Restarting the keep-alive after suspend re-runs its boot-time wake burst.
+#
+# Without this, resuming looks fine but is not: the daemon's process survives
+# suspend with state=='awake', so its next cycle skips the BRC pulse entirely --
+# while the robot, unpowered by us for the whole suspend, has long dozed off. It
+# would take a full cycle just to notice, and then only pulse once. "Wake the
+# robot when I open the mini PC" has to cover the lid, not only cold boots.
+Description=Re-run Roomba wake burst after resume
+After=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl restart roomba-keepalive.service
+
+[Install]
+WantedBy=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target

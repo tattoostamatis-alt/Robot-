@@ -32,6 +32,10 @@ echo "── systemd units → /etc/systemd/system (sudo)"
 sudo cp -v systemd/*.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable ros-sllidar-c1.service ros-foxglove-bridge.service
+# The keep-alive is the one robot service that must be on at boot: it wakes the
+# robot with the PC and holds it awake. The -resume companion re-runs its wake
+# burst after suspend.
+sudo systemctl enable roomba-keepalive.service roomba-keepalive-resume.service
 
 echo
 echo "Done. Start now with:"
