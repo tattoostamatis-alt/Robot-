@@ -265,6 +265,15 @@ class RoombaDriver(Node):
         # 2026-07-28: 600 -> 1200 mm/s². At 600 the robot took ~0.8 s to reach
         # full speed and felt sluggish under teleop even at max scale.
         self.declare_parameter('max_accel', 1200.0)  # mm/s^2
+        # OI mode we drive in. 'safe' (default, 2026-07-28 at the user's
+        # request) keeps the Roomba's own protections live: it aborts motion by
+        # itself on a cliff, a lifted wheel, or the charger. 'full' disables all
+        # of that and lets us drive off a step.
+        # ‼️ The trade-off is real: those same protections drop the robot back to
+        # PASSIVE, where it ignores drive commands until _connect_oi() runs
+        # again. Docking is the known case — touching the charging contacts
+        # ends Safe mode.
+        self.declare_parameter('oi_mode', 'safe')
         # Reverse felt too fast at the same scale_linear.x as forward —
         # scales the commanded speed down (not a calibration trim like
         # right_trim_reverse above, just a deliberate speed cap) whenever
@@ -288,6 +297,11 @@ class RoombaDriver(Node):
         self.right_trim = self.get_parameter('right_trim').value
         self.right_trim_reverse = self.get_parameter('right_trim_reverse').value
         self.max_accel = self.get_parameter('max_accel').value
+        self.oi_mode = str(self.get_parameter('oi_mode').value).lower()
+        if self.oi_mode not in ('safe', 'full'):
+            self.get_logger().warn(
+                f"oi_mode '{self.oi_mode}' not recognised — falling back to 'safe'")
+            self.oi_mode = 'safe'
         self.reverse_speed_scale = self.get_parameter('reverse_speed_scale').value
         self.brc_port = self.get_parameter('brc_port').value
         self.brc_pulse_s = self.get_parameter('brc_pulse_s').value
@@ -416,8 +430,8 @@ class RoombaDriver(Node):
         self._stopped = False
         if self._idle:
             self._idle = False
-            self.bot.full()
-            self.get_logger().info('Roomba: waking up (full mode)')
+            self._enter_drive_mode()
+            self.get_logger().info(f'Roomba: waking up ({self.oi_mode} mode)')
 
         linear = msg.linear.x * 1000   # m/s → mm/s
         if linear < 0:
@@ -546,6 +560,18 @@ class RoombaDriver(Node):
         self._brc_thread.start()
         return self._brc_thread
 
+    def _enter_drive_mode(self):
+        """Put the OI into the mode we drive in — see the `oi_mode` param.
+
+        Safe keeps the Roomba's cliff/wheel-drop/charger aborts active; Full
+        turns them off. Both accept drive_direct(); the difference is only who
+        is allowed to stop the robot.
+        """
+        if self.oi_mode == 'full':
+            self.bot.full()
+        else:
+            self.bot.safe()
+
     def _connect_oi(self):
         """(Re)initialise the Open Interface: wake → Passive → Full. Safe to
         call repeatedly. Called at startup and by _keep_awake to recover
@@ -567,7 +593,7 @@ class RoombaDriver(Node):
                 time.sleep(self.brc_wake_settle_s)
             self.bot.start()     # enter OI (Passive)
             time.sleep(0.3)
-            self.bot.full()      # Full mode: the OI never auto-sleeps in Full
+            self._enter_drive_mode()
             time.sleep(0.2)
         except Exception as e:
             self.get_logger().warn(f'OI (re)connect failed: {e!r}')
