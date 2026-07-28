@@ -6,20 +6,22 @@ teleop_twist_joy_node:
     axis_linear:
       x: 1      # left stick vertical (up = forward)
     scale_linear:
-      x: 0.16   # 2026-07-28: user asked for a faster forward drive. RUNBOOK_remap
-                # asks for 0.10 — above that the walls start to smear, so keep
-                # turns slow and don't push this much higher.
+      x: 0.50   # 2026-07-28: user asked for flat-out driving. 0.50 is the
+                # Roomba's mechanical ceiling (500 mm/s in the OI), so there is
+                # nothing above this — the driver would clamp it anyway.
+                # ‼️ For MAPPING runs drop back to 0.10 (RUNBOOK_remap): driving
+                # this fast smears the walls and ruins the map.
     scale_linear_turbo:
-      x: 0.26
+      x: 0.50
 
     axis_angular:
       yaw: 0    # left stick horizontal
     scale_angular:
-      yaw: 0.40   # ‼️ was 0.06, which is BELOW the Roomba 879's ~0.31 rad/s
-                  # rotation floor — the wheels never moved on a pure turn.
-                  # Raised 2026-07-28; do not drop below ~0.35 again.
+      yaw: 2.50   # 2026-07-28: user asked for flat-out turning (was 0.40).
+                  # ‼️ NEVER go below ~0.35: the 879 has a ~0.31 rad/s rotation
+                  # floor and the wheels simply don't move under it.
     scale_angular_turbo:
-      yaw: 0.55
+      yaw: 3.00
 
     # Soft e-stop (joystick_estop_node, separate from this teleop): Circle (1)
     # latches the robot stopped, Share+Options (8+9) together resets. Distinct

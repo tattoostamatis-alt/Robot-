@@ -262,7 +262,9 @@ class RoombaDriver(Node):
         # both the abrupt lurch on start/reverse and turns the watchdog's
         # stop-on-stale-command into a smooth decel instead of a hard stop
         # (useful since /joy under CPU load sometimes gaps past 0.1s).
-        self.declare_parameter('max_accel', 600.0)  # mm/s^2
+        # 2026-07-28: 600 -> 1200 mm/s². At 600 the robot took ~0.8 s to reach
+        # full speed and felt sluggish under teleop even at max scale.
+        self.declare_parameter('max_accel', 1200.0)  # mm/s^2
         # Reverse felt too fast at the same scale_linear.x as forward —
         # scales the commanded speed down (not a calibration trim like
         # right_trim_reverse above, just a deliberate speed cap) whenever

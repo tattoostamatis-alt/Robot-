@@ -112,7 +112,7 @@ controller_server:
     # ~2000 candidate trajectories every cycle and picks the lowest-cost one
     # that BOTH follows the path AND steers clear of obstacles in the local
     # costmap — i.e. real reactive obstacle avoidance. Limits match the robot:
-    # vx_max 0.20, reverse to -0.10, wz_max 0.6, DiffDrive. The
+    # vx_max 0.45, reverse to -0.10, wz_max 1.4, DiffDrive. The
     # velocity_smoother below still applies the final gentle accel ramp.
     FollowPath:
       plugin: "nav2_mppi_controller::MPPIController"
@@ -122,7 +122,9 @@ controller_server:
       vx_std: 0.2
       vy_std: 0.0               # DiffDrive: no lateral motion
       wz_std: 0.4
-      vx_max: 0.20
+      vx_max: 0.45            # 2026-07-28: 0.20 -> 0.45 at the user's request;
+                              # the Roomba tops out near 0.5, this keeps margin
+                              # for the local costmap to react to obstacles.
       # 2026-07-05: was -0.10 (reverse allowed). At a near-wall/unreachable goal
       # (e.g. toualeta) MPPI couldn't complete the forward approach (CostCritic
       # conservatism) and REVERSED to re-approach — but the collision_monitor is
@@ -133,7 +135,10 @@ controller_server:
       # reverses when genuinely needed (separate path, goes through smoother).
       vx_min: 0.0
       vy_max: 0.0
-      wz_max: 0.6
+      wz_max: 1.4            # 2026-07-28: 0.6 -> 1.4 at the user's request.
+                              # Watch doorways: the 879 overshoots turns ~14%
+                              # (project_robot_rotation_floor), and faster turns
+                              # leave the local costmap less time to react.
       # 2026-07-05 ROOT-CAUSE FIX for the "spins in place, v≈0" bug. These are
       # the accel limits MPPI integrates its candidate trajectories with — the
       # FIRST commanded velocity can be at most ax_max*model_dt. The 2026-07-04
@@ -145,9 +150,9 @@ controller_server:
       # velocity_smoother below does the separate gentle output ramp. Verified in
       # the Gazebo sim (launch/sim.launch.py): robot now drives to goal at
       # 0.20 m/s and stops cleanly. (nav2 defaults are ax_max 2.5 / az_max 3.2.)
-      ax_max: 2.0
+      ax_max: 2.5
       ax_min: -2.0
-      az_max: 3.0
+      az_max: 3.5
       iteration_count: 1
       prune_distance: 1.7
       transform_tolerance: 0.1
@@ -240,8 +245,9 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: false
     feedback: "OPEN_LOOP"
-    max_velocity: [0.20, 0.0, 0.6]
-    min_velocity: [-0.10, 0.0, -0.6]
+    max_velocity: [0.45, 0.0, 1.4]   # must track FollowPath.vx_max above, or
+                                     # the smoother silently caps the controller
+    min_velocity: [-0.10, 0.0, -1.4]
     deadband_velocity: [0.0, 0.0, 0.0]
     velocity_timeout: 1.0
     # 2026-07-04: raised from [0.05,0,0.5]/[-0.1,0,-0.8]. 0.05 m/s² was 10x
@@ -250,8 +256,11 @@ velocity_smoother:
     # spin-in-place oscillation. 0.25 still ramps gently (0.8s to full
     # speed on a 0.2 m/s robot). MUST stay equal to MPPI ax_max/ax_min/
     # az_max above — the controller assumes these are executable.
-    max_accel: [0.25, 0.0, 1.0]
-    max_decel: [-0.5, 0.0, -1.0]
+    # 2026-07-28: 0.25 -> 1.0 m/s². The old value took ~2 s to reach top
+    # speed, which is what actually made the robot feel slow — the velocity
+    # ceiling was never the binding constraint.
+    max_accel: [1.0, 0.0, 2.5]
+    max_decel: [-1.2, 0.0, -2.5]
     odom_topic: "odom"
     odom_duration: 0.1
 
