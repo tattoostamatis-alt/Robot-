@@ -669,6 +669,24 @@ class RoombaDriver(Node):
     def _dock_cb(self, msg: Bool):
         """Start the final dock approach.
 
+        ‼️ 2026-07-28 — DOCKING CANNOT WORK UNTIL THE BASE IS REPAIRED. Measured
+        with the robot parked 1 m away, square on, in Full mode, homing driven
+        directly (no Nav2 in the way): Red Buoy (168) seen 100 times, Force
+        Field (161) 69 times, **Green Buoy (164) ZERO times**, and never both
+        beams together (172). The station emits only one of its two beams.
+
+        A dock needs both: the robot parks where the red and green cones
+        overlap, so with one beam missing there is no centre to find. This is
+        why the stock OI 143 seek also failed back on 2026-07-22 (13 cm and
+        21 cm of travel in 120 s), and why the homing below oscillates — it is
+        hunting a signal that is not being transmitted.
+
+        Ruled out by measurement, so do not re-investigate: the map/staging
+        pose, the robot's own IR receivers (they read Red cleanly),
+        `ir_swap_buoys`, Safe vs Full mode, and serial errors. The fix is
+        hardware — inspect the base's emitter with a phone camera (IR shows up
+        white/purple on the sensor), clean its window, or replace the base.
+
         Two routes, chosen by `use_ir_homing`:
 
         * **IR homing (default)** — we steer, in Full mode, from the dock's own
