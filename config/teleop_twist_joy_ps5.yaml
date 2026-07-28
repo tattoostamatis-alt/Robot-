@@ -6,16 +6,20 @@ teleop_twist_joy_node:
     axis_linear:
       x: 1      # left stick vertical (up = forward)
     scale_linear:
-      x: 0.20   # raised from 0.10 (teleop_twist_keyboard convention) 2026-06-22 — mapping speed felt too slow
+      x: 0.16   # 2026-07-28: user asked for a faster forward drive. RUNBOOK_remap
+                # asks for 0.10 — above that the walls start to smear, so keep
+                # turns slow and don't push this much higher.
     scale_linear_turbo:
-      x: 0.30
+      x: 0.26
 
     axis_angular:
       yaw: 0    # left stick horizontal
     scale_angular:
-      yaw: 0.06   # lowered from 0.10 2026-06-22 — turns felt too fast
+      yaw: 0.40   # ‼️ was 0.06, which is BELOW the Roomba 879's ~0.31 rad/s
+                  # rotation floor — the wheels never moved on a pure turn.
+                  # Raised 2026-07-28; do not drop below ~0.35 again.
     scale_angular_turbo:
-      yaw: 0.35   # lowered from 0.60 2026-06-22, same reason
+      yaw: 0.55
 
     # Soft e-stop (joystick_estop_node, separate from this teleop): Circle (1)
     # latches the robot stopped, Share+Options (8+9) together resets. Distinct
