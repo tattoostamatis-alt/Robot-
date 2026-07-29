@@ -265,6 +265,18 @@ class RoombaDriver(Node):
         # 2026-07-28: 600 -> 1200 mm/s². At 600 the robot took ~0.8 s to reach
         # full speed and felt sluggish under teleop even at max scale.
         self.declare_parameter('max_accel', 1200.0)  # mm/s^2
+        # Soft start. The jolt you feel is entirely in the first fraction of a
+        # second: a single ramp rate has to be either gentle off the mark or
+        # quick to reach cruising speed, and 2026-07-28 chose quick. So use a
+        # gentler rate only while pulling away from a standstill (below
+        # soft_start_speed) and the full max_accel above it — smooth departure
+        # without going back to the sluggish 600 for the whole range. Applies
+        # to turning too, since a spin also starts both wheels from zero.
+        # ‼️ Acceleration only. Braking always gets the full rate: making a stop
+        # softer means making it longer, which is the wrong trade on a robot
+        # that stops for bumpers and e-stops.
+        self.declare_parameter('soft_start_accel', 400.0)  # mm/s^2
+        self.declare_parameter('soft_start_speed', 120.0)  # mm/s
         # OI mode we drive in. 'safe' (default, 2026-07-28 at the user's
         # request) keeps the Roomba's own protections live: it aborts motion by
         # itself on a cliff, a lifted wheel, or the charger. 'full' disables all
@@ -305,6 +317,8 @@ class RoombaDriver(Node):
         self.right_trim = self.get_parameter('right_trim').value
         self.right_trim_reverse = self.get_parameter('right_trim_reverse').value
         self.max_accel = self.get_parameter('max_accel').value
+        self.soft_start_accel = self.get_parameter('soft_start_accel').value
+        self.soft_start_speed = self.get_parameter('soft_start_speed').value
         self.bump_stop = self.get_parameter('bump_stop').value
         self.bump_block_s = self.get_parameter('bump_block_s').value
         self._bump = False
@@ -413,6 +427,10 @@ class RoombaDriver(Node):
                 self.right_trim_reverse = p.value
             elif p.name == 'max_accel':
                 self.max_accel = p.value
+            elif p.name == 'soft_start_accel':
+                self.soft_start_accel = p.value
+            elif p.name == 'soft_start_speed':
+                self.soft_start_speed = p.value
             elif p.name == 'reverse_speed_scale':
                 self.reverse_speed_scale = p.value
         return SetParametersResult(successful=True)
@@ -462,6 +480,19 @@ class RoombaDriver(Node):
 
         self._target_right = max(-500.0, min(500.0, right))
         self._target_left  = max(-500.0, min(500.0, left))
+
+    def _ramp_step(self, current, target, dt):
+        """How much this wheel's speed may change this tick, in mm/s.
+
+        Gentler while accelerating away from a standstill (that is where the
+        lurch is felt); full rate everywhere else. Braking and reversing
+        direction always get max_accel — a softer stop is a longer stop.
+        """
+        speeding_up = abs(target) > abs(current)
+        same_direction = current * target >= 0
+        if speeding_up and same_direction and abs(current) < self.soft_start_speed:
+            return self.soft_start_accel * dt
+        return self.max_accel * dt
 
     def _motor_control(self):
         """20Hz ramped output: steps drive_direct() toward the latest cmd_vel
@@ -514,9 +545,10 @@ class RoombaDriver(Node):
             self._bump_warned = False
             self.get_logger().info('Bumper clear')
 
-        step = self.max_accel * dt
-        self._cur_left  += max(-step, min(step, target_left  - self._cur_left))
-        self._cur_right += max(-step, min(step, target_right - self._cur_right))
+        step_left = self._ramp_step(self._cur_left, target_left, dt)
+        step_right = self._ramp_step(self._cur_right, target_right, dt)
+        self._cur_left  += max(-step_left,  min(step_left,  target_left  - self._cur_left))
+        self._cur_right += max(-step_right, min(step_right, target_right - self._cur_right))
 
         self.bot.drive_direct(round(self._cur_right), round(self._cur_left))
 

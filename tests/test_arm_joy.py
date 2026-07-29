@@ -155,6 +155,28 @@ def _install_ros_stubs():
         sys.modules[name] = mod
 
 
+STUB_MODULES = ('rclpy', 'rclpy.node', 'rclpy.qos',
+                'rcl_interfaces', 'rcl_interfaces.msg',
+                'sensor_msgs', 'sensor_msgs.msg', 'std_msgs', 'std_msgs.msg')
+
+
+@pytest.fixture(autouse=True)
+def _isolate_ros_stubs():
+    """Put sys.modules back afterwards.
+
+    The stubs are installed globally, and leaving them there breaks any later
+    test in the run that imports the real rclpy — test_smoke's launch-file
+    parsing died with "'rclpy' is not a package" until this existed.
+    """
+    saved = {name: sys.modules.get(name) for name in STUB_MODULES}
+    yield
+    for name, mod in saved.items():
+        if mod is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = mod
+
+
 def _load():
     _install_ros_stubs()
     spec = importlib.util.spec_from_file_location('arm_joy_node', NODE)
