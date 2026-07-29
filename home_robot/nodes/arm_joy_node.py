@@ -3,8 +3,14 @@
 
   right stick ←→   base      (swing the arm left/right)
   right stick ↑↓   shoulder  (raise/lower the arm)
+  D-pad ↑↓         elbow     (extend the reach forward / fold it back)
+  D-pad ←→         wrist     (tilt the hand)
   R1 held          gripper opens
   R2 held          gripper closes
+
+Reaching forward is the elbow, not the shoulder — the first version of this
+node bound only base and shoulder and there was simply no way to extend the
+arm, which is the thing you most want when you are trying to grab something.
 
 The arm has no velocity interface — arm_driver.py speaks T:102, which is
 *position* control. So this node integrates the stick deflection into a target
@@ -58,10 +64,20 @@ from std_msgs.msg import Bool, Float32
 JOINT_LIMITS = {
     'base':     (-3.14, 3.14),
     'shoulder': (-1.57, 1.57),
+    'elbow':    (0.0, 3.14),    # reach: this is the joint that extends forward
+    'wrist':    (-1.57, 1.57),
     'hand':     (1.08, 3.14),   # 1.08 = open, 3.14 = closed
 }
 
-JOG_JOINTS = ('base', 'shoulder')
+# joint -> (axis parameter default, rad/s default). Order fixes the order of
+# names/positions in the published JointState. An axis of -1 unbinds a joint.
+JOG_SPECS = (
+    ('base',     3,  0.60),     # right stick horizontal
+    ('shoulder', 4,  0.50),     # right stick vertical
+    ('elbow',    7,  0.50),     # D-pad up/down  — extend/retract the reach
+    ('wrist',    6,  0.50),     # D-pad left/right
+)
+JOG_JOINTS = tuple(spec[0] for spec in JOG_SPECS)
 
 
 def _clamp(name, value):
@@ -75,11 +91,11 @@ class ArmJoy(Node):
         super().__init__('arm_joy')
 
         self.declare_parameter('joy_topic', '/joy')
-        # Right stick. Negate the scales (below) to flip a direction.
-        self.declare_parameter('axis_base', 3)          # right stick horizontal
-        self.declare_parameter('axis_shoulder', 4)      # right stick vertical
-        self.declare_parameter('scale_base', 0.60)      # rad/s at full deflection
-        self.declare_parameter('scale_shoulder', 0.50)  # rad/s at full deflection
+        # One axis + one rad/s scale per jogged joint. Negate a scale to flip
+        # that direction; set an axis to -1 to leave that joint alone.
+        for joint, axis, scale in JOG_SPECS:
+            self.declare_parameter(f'axis_{joint}', axis)
+            self.declare_parameter(f'scale_{joint}', scale)
         self.declare_parameter('gripper_open_button', 5)    # R1
         self.declare_parameter('gripper_close_button', 7)   # R2
         self.declare_parameter('scale_gripper', 0.80)   # rad/s while held
@@ -97,10 +113,12 @@ class ArmJoy(Node):
         # its limit. Treat silence as "sticks centred".
         self.declare_parameter('joy_timeout', 0.5)      # seconds
 
-        self.axis_base = self.get_parameter('axis_base').value
-        self.axis_shoulder = self.get_parameter('axis_shoulder').value
-        self.scale_base = self.get_parameter('scale_base').value
-        self.scale_shoulder = self.get_parameter('scale_shoulder').value
+        # [(joint, axis index, rad/s)] for every joint left bound to an axis.
+        self.jog = [(joint,
+                     self.get_parameter(f'axis_{joint}').value,
+                     self.get_parameter(f'scale_{joint}').value)
+                    for joint, _, _ in JOG_SPECS
+                    if self.get_parameter(f'axis_{joint}').value >= 0]
         self.btn_open = self.get_parameter('gripper_open_button').value
         self.btn_close = self.get_parameter('gripper_close_button').value
         self.scale_gripper = self.get_parameter('scale_gripper').value
@@ -113,11 +131,11 @@ class ArmJoy(Node):
         # Integrator state. None until arm/joint_states tells us where the arm
         # actually is — jogging from a guessed pose would snap it on the first
         # command, since T:102 sets every joint at once.
-        self._target = None       # {'base': rad, 'shoulder': rad}
+        self._target = None       # {joint: rad} for every jogged joint
         self._grip = None         # rad
         self._warned_no_feedback = False
 
-        self._axes = (0.0, 0.0)   # base, shoulder — deadzoned
+        self._axes = {joint: 0.0 for joint, _, _ in self.jog}   # deadzoned
         self._grip_dir = 0        # -1 open, +1 close
         self._last_joy = None     # rclpy Time of the last /joy message
         self._moving = False      # published motion last tick?
@@ -141,10 +159,11 @@ class ArmJoy(Node):
         self._dt = 1.0 / rate
         self.create_timer(self._dt, self._tick)
 
+        bindings = ', '.join(f'{joint}=axis {ax} @ {sc:+.2f} rad/s'
+                             for joint, ax, sc in self.jog)
         self.get_logger().info(
-            f'Arm joy jog ready: right stick = base/shoulder '
-            f'({self.scale_base:.2f}/{self.scale_shoulder:.2f} rad/s), '
-            f'button {self.btn_open} opens / {self.btn_close} closes the gripper. '
+            f'Arm joy jog ready: {bindings}; button {self.btn_open} opens / '
+            f'{self.btn_close} closes the gripper. '
             f'Waiting for arm/joint_states before moving.')
 
     # ------------------------------------------------------------------
@@ -167,8 +186,8 @@ class ArmJoy(Node):
         return 0 <= idx < len(msg.buttons) and msg.buttons[idx] == 1
 
     def _joy_cb(self, msg: Joy):
-        self._axes = (self._deadzone(self._axis(msg, self.axis_base)),
-                      self._deadzone(self._axis(msg, self.axis_shoulder)))
+        self._axes = {joint: self._deadzone(self._axis(msg, ax))
+                      for joint, ax, _ in self.jog}
         if self.drive_lockout and self._driving(msg):
             self._grip_dir = 0
         else:
@@ -188,11 +207,11 @@ class ArmJoy(Node):
         # feedback every message would fight the open-loop integration.
         if self._target is None:
             pos = dict(zip(msg.name, msg.position))
-            if all(j in pos for j in JOG_JOINTS):
-                self._target = {j: _clamp(j, pos[j]) for j in JOG_JOINTS}
-                self.get_logger().info(
-                    'Arm pose acquired (base=%.2f shoulder=%.2f) — stick is live.'
-                    % (self._target['base'], self._target['shoulder']))
+            jogged = [joint for joint, _, _ in self.jog]
+            if all(j in pos for j in jogged):
+                self._target = {j: _clamp(j, pos[j]) for j in jogged}
+                where = ' '.join(f'{j}={self._target[j]:.2f}' for j in jogged)
+                self.get_logger().info(f'Arm pose acquired ({where}) — stick is live.')
         if self._grip is None and 'hand' in msg.name:
             self._grip = _clamp('hand', msg.position[list(msg.name).index('hand')])
 
@@ -218,7 +237,8 @@ class ArmJoy(Node):
             return
 
         if self._target is None:
-            if (self._axes != (0.0, 0.0) or self._grip_dir) and not self._warned_no_feedback:
+            pushed = any(v != 0.0 for v in self._axes.values())
+            if (pushed or self._grip_dir) and not self._warned_no_feedback:
                 self._warned_no_feedback = True
                 self.get_logger().warn(
                     'Stick moved but no arm/joint_states yet — is arm_driver.py '
@@ -229,24 +249,23 @@ class ArmJoy(Node):
         self._jog_gripper()
 
     def _jog_joints(self):
-        base_ax, shoulder_ax = self._axes
-        moving = base_ax != 0.0 or shoulder_ax != 0.0
+        moving = any(v != 0.0 for v in self._axes.values())
 
         if moving:
-            self._target['base'] = _clamp(
-                'base', self._target['base'] + base_ax * self.scale_base * self._dt)
-            self._target['shoulder'] = _clamp(
-                'shoulder',
-                self._target['shoulder'] + shoulder_ax * self.scale_shoulder * self._dt)
+            for joint, _, scale in self.jog:
+                self._target[joint] = _clamp(
+                    joint,
+                    self._target[joint] + self._axes[joint] * scale * self._dt)
         elif not self._moving:
             # Idle and already settled — stay off the serial link so the
             # driver's 10 Hz feedback polling isn't competing with us.
             return
 
+        names = [joint for joint, _, _ in self.jog]
         msg = JointState()
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.name = list(JOG_JOINTS)
-        msg.position = [self._target[j] for j in JOG_JOINTS]
+        msg.name = names
+        msg.position = [self._target[j] for j in names]
         self.joint_pub.publish(msg)
         # One extra command after release, so the arm ends exactly on the last
         # target instead of wherever the final in-flight command left it.

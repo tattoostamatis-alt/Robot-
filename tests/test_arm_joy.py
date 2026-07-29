@@ -31,6 +31,8 @@ ARM_DRIVER = f'{PKG}/home_robot/nodes/arm_driver.py'
 # node's copy is caught instead of silently agreeing with itself.
 BASE_LIMIT = (-3.14, 3.14)
 SHOULDER_LIMIT = (-1.57, 1.57)
+ELBOW_LIMIT = (0.0, 3.14)
+WRIST_LIMIT = (-1.57, 1.57)
 HAND_LIMIT = (1.08, 3.14)
 
 
@@ -145,12 +147,17 @@ def _load():
     return mod
 
 
+# Mid-range starting pose, so a test can jog either way without hitting a
+# limit. elbow's range is 0..3.14, hence 1.57 rather than 0.
+NEUTRAL = {'base': 0.0, 'shoulder': 0.0, 'elbow': 1.57, 'wrist': 0.0}
+
+
 @pytest.fixture
 def node():
     mod = _load()
     n = mod.ArmJoy()
-    # Seed the integrator the way arm/joint_states would, at a neutral pose.
-    n._target = {'base': 0.0, 'shoulder': 0.0}
+    # Seed the integrator the way arm/joint_states would.
+    n._target = {joint: NEUTRAL[joint] for joint, _, _ in n.jog}
     n._grip = 2.0
     n._mod = mod
     return n
@@ -161,9 +168,19 @@ def _joy_msg():
     return types.SimpleNamespace(axes=[0.0] * 8, buttons=[0] * 13)
 
 
-def _push(node, base=0.0, shoulder=0.0, grip_dir=0):
-    """Pretend a /joy message arrived with these (already-deadzoned) values."""
-    node._axes = (base, shoulder)
+def _axis_of(node, joint):
+    """The /joy axis index bound to a joint."""
+    return next(ax for j, ax, _ in node.jog if j == joint)
+
+
+def _push(node, grip_dir=0, **axes):
+    """Pretend a /joy message arrived with these (already-deadzoned) values.
+
+    Keyword args are joint names, e.g. _push(node, base=1.0, elbow=-1.0).
+    """
+    unknown = set(axes) - {joint for joint, _, _ in node.jog}
+    assert not unknown, f'not a jogged joint: {unknown}'
+    node._axes = {joint: axes.get(joint, 0.0) for joint, _, _ in node.jog}
     node._grip_dir = grip_dir
     node._last_joy = node.get_clock().now()
 
@@ -208,8 +225,11 @@ def test_publishes_joint_cmd_for_arm_driver(node):
     _run(node, 5)
     msgs = node.joint_pub.msgs
     assert msgs, 'stick deflection published nothing'
-    assert msgs[-1].name == ['base', 'shoulder']
-    assert len(msgs[-1].position) == 2
+    # Every jogged joint goes in each message: T:102 sets them all at once, so
+    # omitting one would let the driver fill it from lagging feedback.
+    assert msgs[-1].name == [joint for joint, _, _ in node.jog]
+    assert len(msgs[-1].position) == len(node.jog)
+    assert 'elbow' in msgs[-1].name, 'reach joint must be commandable'
 
 
 def test_released_stick_stops_commanding(node):
@@ -239,6 +259,65 @@ def test_base_clamps_both_directions(node):
     _push(node, base=-1.0)
     _run(node, 400)
     assert node._target['base'] == pytest.approx(BASE_LIMIT[0])
+
+
+# ── Reach (the joint the first version forgot) ─────────────────────────
+
+def test_dpad_extends_the_elbow(node):
+    """Reaching forward is the elbow; without it the arm cannot extend."""
+    assert 'elbow' in dict((j, ax) for j, ax, _ in node.jog)
+    _push(node, elbow=1.0)
+    _run(node, 20)
+    assert node._target['elbow'] == pytest.approx(1.57 + 0.50, abs=0.02)
+
+
+def test_elbow_and_wrist_are_on_the_dpad_not_the_sticks(node):
+    """The sticks are taken (drive + base/shoulder), so these must be D-pad."""
+    dpad = (6, 7)
+    assert _axis_of(node, 'elbow') in dpad
+    assert _axis_of(node, 'wrist') in dpad
+
+
+def test_elbow_clamps_at_its_asymmetric_limits(node):
+    """elbow is 0..3.14, not centred on zero like the others."""
+    _push(node, elbow=-1.0)
+    _run(node, 400)
+    assert node._target['elbow'] == pytest.approx(ELBOW_LIMIT[0])
+    _push(node, elbow=1.0)
+    _run(node, 400)
+    assert node._target['elbow'] == pytest.approx(ELBOW_LIMIT[1])
+
+
+def test_wrist_clamps(node):
+    _push(node, wrist=1.0)
+    _run(node, 400)
+    assert node._target['wrist'] == pytest.approx(WRIST_LIMIT[1])
+
+
+def test_joints_jog_independently(node):
+    """Pushing the D-pad must not disturb base/shoulder, and vice versa."""
+    _push(node, elbow=1.0)
+    _run(node, 10)
+    assert node._target['base'] == 0.0
+    assert node._target['shoulder'] == 0.0
+    assert node._target['elbow'] > 1.57
+
+
+def test_an_axis_of_minus_one_unbinds_a_joint():
+    """Escape hatch: axis_wrist: -1 drops the wrist without a code change.
+
+    Exercises the real __init__ by overriding the parameter as a launch file
+    would, rather than recomputing the binding list here.
+    """
+    mod = _load()
+
+    class Unbound(mod.ArmJoy):
+        def declare_parameter(self, name, value):
+            super().declare_parameter(name, -1 if name == 'axis_wrist' else value)
+
+    bound = [joint for joint, _, _ in Unbound().jog]
+    assert 'wrist' not in bound
+    assert 'elbow' in bound, 'unbinding one joint must not drop the others'
 
 
 # ── Safety ────────────────────────────────────────────────────────────
@@ -334,7 +413,7 @@ def test_arm_jog_is_never_locked_out_by_driving(node):
     """Only the gripper is interlocked — the right stick must stay live."""
     msg = _joy_msg()
     msg.axes[1] = 0.9                   # driving
-    msg.axes[node.axis_base] = 1.0      # and swinging the arm
+    msg.axes[_axis_of(node, 'base')] = 1.0      # and swinging the arm
     node._joy_cb(msg)
     _run(node, 5)
     assert node._target['base'] > 0.0

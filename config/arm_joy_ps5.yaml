@@ -2,19 +2,26 @@ arm_joy:
   ros__parameters:
     # PS5 DualSense → RoArm-M3 manual jog (arm_joy_node.py).
     #
-    # Right stick horizontal swings the base, vertical raises/lowers the
-    # shoulder; R1/R2 work the gripper. Axis/button indices follow the layout
-    # confirmed live 2026-06-22 and re-confirmed 2026-07-29 (see the header of
-    # teleop_twist_joy_ps5.yaml).
+    # Right stick swings the base and raises/lowers the shoulder, the D-pad
+    # extends the elbow (the joint that actually reaches forward) and tilts the
+    # wrist; R1/R2 work the gripper. Axis/button indices follow the layout
+    # confirmed live 2026-06-22 and re-confirmed against raw /dev/input/js0 on
+    # 2026-07-29 (see the header of teleop_twist_joy_ps5.yaml).
+    # D-pad axes (6/7) are digital: they read 0 or ±1, no partial deflection.
     axis_base: 3        # right stick horizontal
     axis_shoulder: 4    # right stick vertical
+    axis_elbow: 7       # D-pad up/down    — extends the reach forward
+    axis_wrist: 6       # D-pad left/right — tilts the hand
 
-    # rad/s at full stick deflection. NEGATE either one to flip that direction
-    # — the RoArm wiki does not document which way its joints count positive,
-    # so the signs here are a starting guess to be corrected on the hardware:
-    #   ros2 param set /arm_joy scale_shoulder -0.5
+    # rad/s at full stick deflection. NEGATE any of these to flip that
+    # direction — the RoArm wiki does not document which way its joints count
+    # positive, so the signs here are a starting guess to be corrected on the
+    # hardware:  ros2 param set /arm_joy scale_shoulder -0.5
+    # Set an axis_* to -1 instead to unbind that joint entirely.
     scale_base: 0.60
     scale_shoulder: 0.50
+    scale_elbow: 0.50
+    scale_wrist: 0.50
 
     # ‼️ R1 (button 5) is ALSO the drive dead-man in teleop_twist_joy_ps5.yaml
     # (enable_button: 5, require_enable_button: true) — it is held down for the
