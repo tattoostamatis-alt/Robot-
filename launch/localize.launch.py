@@ -50,6 +50,9 @@ def _launch_setup(context, *args, **kwargs):
     map_yaml = _resolve_map(LaunchConfiguration('map').perform(context), share_dir)
     use_depth = LaunchConfiguration('use_depth_camera').perform(context).lower() in ('true', '1')
     use_joy = LaunchConfiguration('use_joy').perform(context).lower() in ('true', '1')
+    # Inherited by the nested bringup (which starts arm_driver); read here too
+    # so the right stick can jog the arm in localize mode as well.
+    use_arm = LaunchConfiguration('use_arm').perform(context).lower() in ('true', '1')
     use_apriltag = LaunchConfiguration('use_apriltag').perform(context).lower() in ('true', '1')
     use_obstacle_safety = LaunchConfiguration('use_obstacle_safety').perform(context).lower() in ('true', '1')
     # Opt-in perception stack for navigation: YOLO detector + tracker feeding the
@@ -157,6 +160,16 @@ def _launch_setup(context, *args, **kwargs):
             executable='joystick_estop_node.py',
             name='joystick_estop',
         ))
+        # Right stick jogs the arm (base/shoulder), R1/R2 the gripper. Started
+        # here for the same reason as the teleop above: bringup's own use_joy
+        # is forced off, so its copy of this node never runs in localize mode.
+        if use_arm:
+            actions.append(Node(
+                package='home_robot',
+                executable='arm_joy_node.py',
+                name='arm_joy',
+                parameters=[PathJoinSubstitution([pkg, 'config', 'arm_joy_ps5.yaml'])],
+            ))
 
     # AprilTag reference-tag relocalization: detect the single saloni tag off the
     # D435 color stream (publishes TF camera_color_optical_frame -> saloni_tag),
@@ -203,6 +216,10 @@ def generate_launch_description():
             'use_joy', default_value='true',
             description='Start PS5 DualSense teleop (R1 = dead-man, left stick) '
                         'wired straight to cmd_vel_safe for localize mode'),
+        DeclareLaunchArgument(
+            'use_arm', default_value='false',
+            description='Start the RoArm-M3 (inherited by bringup) and, with '
+                        'use_joy, the right-stick jog for it'),
         DeclareLaunchArgument(
             'use_apriltag', default_value='true',
             description='Detect the saloni reference AprilTag off the D435 color '
