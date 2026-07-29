@@ -1,0 +1,33 @@
+arm_joy:
+  ros__parameters:
+    # PS5 DualSense → RoArm-M3 manual jog (arm_joy_node.py).
+    #
+    # Right stick horizontal swings the base, vertical raises/lowers the
+    # shoulder; R1/R2 work the gripper. Axis/button indices follow the layout
+    # confirmed live 2026-06-22 and re-confirmed 2026-07-29 (see the header of
+    # teleop_twist_joy_ps5.yaml).
+    axis_base: 3        # right stick horizontal
+    axis_shoulder: 4    # right stick vertical
+
+    # rad/s at full stick deflection. NEGATE either one to flip that direction
+    # — the RoArm wiki does not document which way its joints count positive,
+    # so the signs here are a starting guess to be corrected on the hardware:
+    #   ros2 param set /arm_joy scale_shoulder -0.5
+    scale_base: 0.60
+    scale_shoulder: 0.50
+
+    # ‼️ R1 (button 5) is ALSO the drive dead-man in teleop_twist_joy_ps5.yaml
+    # (enable_button: 5, require_enable_button: true) — it is held down for the
+    # whole of every drive. Without an interlock the gripper would crawl open
+    # every time the robot is driven, so R1 only counts for the gripper while
+    # the LEFT stick is centred. Set drive_lockout: false to remove that.
+    gripper_open_button: 5    # R1 — decreasing "hand" opens (T:106)
+    gripper_close_button: 7   # R2
+    scale_gripper: 0.80       # rad/s while held
+    drive_lockout: true
+    drive_lockout_axes: [0, 1]   # left stick
+
+    # The sticks rest near, but not exactly at, zero.
+    deadzone: 0.12
+    rate: 20.0          # Hz — position commands to arm_driver
+    joy_timeout: 0.5    # s of /joy silence before the sticks count as centred

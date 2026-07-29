@@ -6,7 +6,7 @@ from launch.actions import (DeclareLaunchArgument, IncludeLaunchDescription, Gro
 from launch.conditions import IfCondition
 from launch.events import matches_action
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import AndSubstitution, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node, PushRosNamespace, LifecycleNode, SetParameter
 from launch_ros.event_handlers import OnStateTransition
 from launch_ros.events.lifecycle import ChangeState
@@ -974,6 +974,17 @@ def generate_launch_description():
         output='screen',
         condition=IfCondition(use_joy),
     )
+    # Right stick jogs the arm (base/shoulder), R1/R2 work the gripper.
+    # Needs BOTH the controller and the arm, so gate on both flags — on its own
+    # it would just publish arm/joint_cmd into the void.
+    arm_joy_node = Node(
+        package='home_robot',
+        executable='arm_joy_node.py',
+        name='arm_joy',
+        parameters=[PathJoinSubstitution([pkg, 'config', 'arm_joy_ps5.yaml'])],
+        output='screen',
+        condition=IfCondition(AndSubstitution(use_joy, use_arm)),
+    )
 
     # ── RViz2 ─────────────────────────────────────────────────────
     rviz_node = Node(
@@ -1100,5 +1111,6 @@ def generate_launch_description():
         joy_node,
         teleop_twist_joy_node,
         joystick_estop_node,
+        arm_joy_node,
         rviz_node,
     ])
