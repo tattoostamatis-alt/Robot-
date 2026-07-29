@@ -3,10 +3,14 @@
 
 Finds the robot's position on the map with no initial pose hint.
 
-Auto-triggers on startup only when pose_saver has no saved pose file for
-the active map (pose_saver restores the last good AMCL pose otherwise).
-If the robot was moved, call /localize_globally manually or delete the
-per-map pose file under ~/.ros/last_amcl_pose_<map>.yaml.
+Runs on startup, and figures out on its own whether it needs to: if
+pose_saver has a pose for the active map, the scan is scored against the
+map at that pose, and it is kept only if it actually fits. If it doesn't
+— someone carried the robot to another room — the full map search runs
+automatically. So a moved robot re-finds itself without being driven to
+the AprilTag and without deleting the saved pose by hand.
+
+Set verify_saved_pose:=false to go back to trusting a saved pose blindly.
 
 Manual trigger:
   ros2 service call /localize_globally std_srvs/srv/Empty "{}"
@@ -38,6 +42,11 @@ FINE_HALF_DEG = 12.0    # ± degrees around each coarse peak
 FINE_STEPS    = 10      # steps within the fine window (≈2.4° each)
 N_CANDIDATES  = 5       # top coarse peaks to refine
 LF_SIGMA_M    = 0.25    # Gaussian blur radius for likelihood field [m]
+
+
+def _wrap(angle: float) -> float:
+    """Angle to (-pi, pi] — so 359° and 1° read as 2° apart, not 358°."""
+    return (angle + math.pi) % (2 * math.pi) - math.pi
 
 
 def _quat(yaw: float) -> tuple[float, float]:
@@ -151,6 +160,24 @@ class GlobalLocalizerNode(Node):
         self.declare_parameter('auto_localize', True)
         self.declare_parameter('map_yaml', '')
         self.declare_parameter('defer_to_saved_pose', True)
+        # Don't take the saved pose on faith — check the scan against the map at
+        # that pose first, and search the whole map if it doesn't fit. This is
+        # what lets a robot that was carried somewhere find itself on its own,
+        # instead of needing to be driven to the AprilTag to be corrected.
+        self.declare_parameter('verify_saved_pose', True)
+        # Median scan->wall distance, metres. A correctly localized robot sits
+        # well under 0.15 m; being in the wrong room puts it far above this.
+        self.declare_parameter('saved_pose_max_err', 0.30)
+        # How many distinct hypotheses to refine and compare. The FFT peak alone
+        # is not trustworthy (see the candidate selection in _run), so more than
+        # one has to be measured properly.
+        self.declare_parameter('refine_candidates', 4)
+        # Two candidates count as the same place within this distance, so the
+        # shortlist explores different rooms rather than one room five times.
+        self.declare_parameter('candidate_min_separation', 0.8)   # m
+        # Fits within this of the best are treated as indistinguishable, and the
+        # last known pose breaks the tie. 0 disables the tie-break.
+        self.declare_parameter('prior_tie_margin', 0.05)          # m
         self.declare_parameter('depth_weight',  0.5)   # 0 → LiDAR only
         # On a random/cold start, briefly hold the auto-trigger until the D435
         # depth arrives so it joins the very first match (better disambiguation),
@@ -223,11 +250,31 @@ class GlobalLocalizerNode(Node):
         if self.get_parameter('defer_to_saved_pose').value:
             pose_file = _pose_file_for(self.get_parameter('map_yaml').value)
             if os.path.exists(pose_file):
-                self._auto = False
-                self.get_logger().info(
-                    f'Saved pose found ({pose_file}) — pose_saver will restore it; '
-                    'call /localize_globally if the robot was moved')
-                return
+                if not self.get_parameter('verify_saved_pose').value:
+                    self._auto = False
+                    self.get_logger().info(
+                        f'Saved pose found ({pose_file}) — pose_saver will restore it; '
+                        'call /localize_globally if the robot was moved')
+                    return
+                # Trust it only if the scan actually agrees with it. Deferring
+                # blindly is what made a moved robot need a trip to the
+                # AprilTag: the saved pose is only right if nobody picked the
+                # robot up, and nothing was checking.
+                verdict = self._saved_pose_fits(pose_file)
+                if verdict is None:
+                    return          # scan/TF not ready yet — try again next scan
+                fits, err, where = verdict
+                if fits:
+                    self._auto = False
+                    self.get_logger().info(
+                        f'Saved pose {where} matches the scan '
+                        f'(median scan->wall {err:.2f} m) — keeping it')
+                    return
+                self.get_logger().warn(
+                    f'Saved pose {where} does NOT match the scan '
+                    f'(median scan->wall {err:.2f} m > '
+                    f'{self.get_parameter("saved_pose_max_err").value:.2f} m) — '
+                    'the robot was moved; searching the whole map instead')
 
         # map+scan ready — optionally hold briefly so the D435 depth can join.
         want_depth = (self.get_parameter('depth_weight').value > 0
@@ -244,6 +291,84 @@ class GlobalLocalizerNode(Node):
 
         self._auto = False
         threading.Thread(target=self._run, daemon=True).start()
+
+    def _saved_pose_laser(self):
+        """The saved base_link pose expressed as a laser pose, or None."""
+        pose_file = _pose_file_for(self.get_parameter('map_yaml').value)
+        if not os.path.exists(pose_file):
+            return None
+        try:
+            import yaml
+            with open(pose_file) as fh:
+                saved = yaml.safe_load(fh) or {}
+            return self._base_to_laser(float(saved['x']), float(saved['y']),
+                                       float(saved['yaw']))
+        except Exception:
+            return None
+
+    def _pick(self, refined):
+        """Choose among refined candidates: best fit, tie-broken by the prior.
+
+        When two hypotheses fit the walls equally well the geometry genuinely
+        cannot tell them apart (repeated room shapes do this), and picking by a
+        third decimal place is a coin toss. Prefer the one nearer where the
+        robot was last seen — it is far likelier to have stayed put than to have
+        been carried to the one other place that looks identical. Only applies
+        inside prior_tie_margin, so a robot that really was moved still gets the
+        pose the scan supports.
+        """
+        best = refined[0]
+        margin = self.get_parameter('prior_tie_margin').value
+        rivals = [c for c in refined if c[0] - best[0] <= margin]
+        if len(rivals) < 2:
+            return best
+
+        prior = self._saved_pose_laser()
+        if prior is None:
+            self.get_logger().warn(
+                f'{len(rivals)} poses fit within {margin:.2f} m and there is no '
+                'previous pose to break the tie — taking the best fit; '
+                'drive a metre and AMCL will settle it')
+            return best
+
+        px, py, _ = prior
+        nearest = min(rivals, key=lambda c: math.hypot(c[1] - px, c[2] - py))
+        if nearest is not best:
+            self.get_logger().warn(
+                f'{len(rivals)} poses fit within {margin:.2f} m; choosing the one '
+                f'{math.hypot(nearest[1] - px, nearest[2] - py):.2f} m from the '
+                f'last known pose over a {best[0]:.3f} m fit '
+                f'{math.hypot(best[1] - px, best[2] - py):.2f} m away')
+        return nearest
+
+    def _saved_pose_fits(self, pose_file: str):
+        """Score the saved pose against the current scan.
+
+        Returns (fits, median_err_m, "x=.. y=.. yaw=..°"), or None if the data
+        needed to judge isn't there yet — an unreadable file counts as a
+        mismatch (better to search than to trust a pose we can't read).
+        """
+        try:
+            import yaml
+            with open(pose_file) as fh:
+                saved = yaml.safe_load(fh) or {}
+            bx, by, byaw = float(saved['x']), float(saved['y']), float(saved['yaw'])
+        except Exception as e:
+            self.get_logger().warn(f'Cannot read {pose_file} ({e!r}) — will localize')
+            return False, 9.9, '(unreadable)'
+
+        with self._lock:
+            scan, map_msg = self._scan, self._map
+        if scan is None or map_msg is None:
+            return None
+        lidar = _lidar_pts(scan)
+        if lidar.shape[0] < 50:
+            return None
+
+        lx, ly, lyaw = self._base_to_laser(bx, by, byaw)
+        err = self._wall_err_fn(lidar, map_msg)(lx, ly, lyaw)
+        where = f'x={bx:.2f} y={by:.2f} yaw={math.degrees(byaw):.0f}°'
+        return err <= self.get_parameter('saved_pose_max_err').value, err, where
 
     # ── service ────────────────────────────────────────────────────
 
@@ -277,12 +402,13 @@ class GlobalLocalizerNode(Node):
         out[:, 1] = s * pts[:, 0] + c * pts[:, 1] + ty
         return out
 
-    def _laser_to_base(self, lx, ly, lyaw):
-        """Convert a laser-frame pose in map to the base_link pose. The FFT
-        scan points are in the LiDAR frame, so the match yields the laser pose,
-        but AMCL's /initialpose expects base_link. Uses the static
-        base_link->laser transform (looked up via TF; falls back to this
-        robot's known yaw=π, 0.12 m mount if TF isn't ready)."""
+    def _base_laser_tf(self):
+        """The static base_link->laser transform as (yaw, x, y).
+
+        Falls back to this robot's known mount (yaw=π, 0.12 m forward) if TF
+        isn't up yet — getting this wrong puts the pose 180° out, which AMCL
+        then locks onto.
+        """
         frame = self._scan.header.frame_id if self._scan is not None else 'laser'
         try:
             tf = self._tf_buffer.lookup_transform('base_link', frame,
@@ -290,12 +416,29 @@ class GlobalLocalizerNode(Node):
             q = tf.transform.rotation
             b = math.atan2(2 * (q.w * q.z + q.x * q.y),
                            1 - 2 * (q.y * q.y + q.z * q.z))
-            tx, ty = tf.transform.translation.x, tf.transform.translation.y
+            return b, tf.transform.translation.x, tf.transform.translation.y
         except Exception as e:
             self.get_logger().warn(
                 f'base_link->{frame} TF lookup failed ({e!r}); '
                 'assuming yaw=π, x=0.12')
-            b, tx, ty = math.pi, 0.12, 0.0
+            return math.pi, 0.12, 0.0
+
+    def _base_to_laser(self, bx, by, byaw):
+        """base_link pose in map -> laser pose in map.
+
+        The inverse of _laser_to_base, needed to score a saved base_link pose
+        against a scan that lives in the laser frame.
+        """
+        b, tx, ty = self._base_laser_tf()
+        lx = bx + math.cos(byaw) * tx - math.sin(byaw) * ty
+        ly = by + math.sin(byaw) * tx + math.cos(byaw) * ty
+        return lx, ly, byaw + b
+
+    def _laser_to_base(self, lx, ly, lyaw):
+        """Convert a laser-frame pose in map to the base_link pose. The FFT
+        scan points are in the LiDAR frame, so the match yields the laser pose,
+        but AMCL's /initialpose expects base_link."""
+        b, tx, ty = self._base_laser_tf()
         # map->base = map->laser ∘ (base->laser)^-1
         base_yaw = lyaw - b
         t_lb_x = -tx * math.cos(b) - ty * math.sin(b)
@@ -304,15 +447,15 @@ class GlobalLocalizerNode(Node):
         base_y = ly + math.sin(lyaw) * t_lb_x + math.cos(lyaw) * t_lb_y
         return base_x, base_y, base_yaw
 
-    def _refine(self, lidar: np.ndarray, lx: float, ly: float, lyaw: float,
-                map_msg: OccupancyGrid) -> tuple[float, float, float]:
-        """Local grid search that minimises median scan->wall distance.
+    def _wall_err_fn(self, lidar: np.ndarray, map_msg: OccupancyGrid):
+        """Build a median-scan-to-wall-distance evaluator for this scan + map.
 
-        Refines a laser-frame pose (lx, ly, lyaw) over ±0.4 m / ±8° using a
-        distance-to-wall field, so the published pose is metric-accurate
-        rather than just FFT-pixel-accurate."""
-        if lidar.shape[0] < 50:
-            return lx, ly, lyaw
+        Returns f(x, y, yaw) -> metres, for a LASER-frame pose. A low value
+        means the scan lands on mapped walls, i.e. the robot really is there;
+        a high one means it isn't. Used both to polish a fresh match (_refine
+        calls it thousands of times, hence hoisting the grid lookups into the
+        closure) and to decide whether a saved pose is still valid.
+        """
         if self._dist is None:
             from scipy.ndimage import distance_transform_edt
             grid = np.array(map_msg.data, dtype=np.int8).reshape(
@@ -338,6 +481,19 @@ class GlobalLocalizerNode(Node):
             if int(ib.sum()) < 50:
                 return 9.9
             return float(np.median(dist[gy[ib], gx[ib]]))
+
+        return median_err
+
+    def _refine(self, lidar: np.ndarray, lx: float, ly: float, lyaw: float,
+                map_msg: OccupancyGrid) -> tuple[float, float, float]:
+        """Local grid search that minimises median scan->wall distance.
+
+        Refines a laser-frame pose (lx, ly, lyaw) over ±0.4 m / ±8° using a
+        distance-to-wall field, so the published pose is metric-accurate
+        rather than just FFT-pixel-accurate."""
+        if lidar.shape[0] < 50:
+            return lx, ly, lyaw
+        median_err = self._wall_err_fn(lidar, map_msg)
 
         best = (median_err(lx, ly, lyaw), lx, ly, lyaw)
         for dx in np.arange(-0.4, 0.41, 0.04):
@@ -427,27 +583,58 @@ class GlobalLocalizerNode(Node):
                     fine.append((score, dx, dy, theta))
             fine.sort(key=lambda c: c[0], reverse=True)
 
-            best_score, best_dx, best_dy, best_theta = fine[0]
+            # ── Pick the candidate by scan->wall fit, not by FFT score ──
+            # The FFT correlation peak is NOT the best-fitting pose. It rewards
+            # putting scan points anywhere near walls, so a cluttered part of
+            # the map outscores the true pose in a plainer one — observed
+            # 2026-07-29 landing 4.4 m out, in another room, with a "perfect"
+            # 0.071 m fit reported because only that one candidate was ever
+            # measured. Score every distinct candidate by median scan->wall
+            # distance (one cheap evaluation each), then refine the best few
+            # and keep whichever actually fits. Same metric decides throughout.
+            def laser_xy(dx, dy):
+                return ox + (W // 2 + dx) * res, oy + (H // 2 + dy) * res
 
-            # FFT scan points are in the LiDAR frame, so (robot_x, robot_y,
-            # best_theta) is the LASER pose in map — convert it to the base_link
-            # pose before publishing /initialpose. This lidar is mounted yaw=π
-            # (0.12 m forward), so skipping this conversion put the published
-            # pose 180° out, which AMCL then locked onto (the "flip").
-            laser_x = ox + (W // 2 + best_dx) * res
-            laser_y = oy + (H // 2 + best_dy) * res
+            wall_err = self._wall_err_fn(lidar, map_msg)
+            scored = []
+            for _, dx, dy, theta in fine:
+                lx, ly = laser_xy(dx, dy)
+                scored.append((wall_err(lx, ly, theta), lx, ly, theta))
+            scored.sort(key=lambda c: c[0])
 
-            # ── Fine refinement ────────────────────────────────────
-            # The FFT peak is only pixel-accurate and, worse, the correlation
-            # maximum can sit ~0.5 m off the geometric best fit. Published as
+            # Distinct places only — the fine search returns many near-duplicate
+            # angles at the same spot, and refining five of those would explore
+            # one hypothesis while ignoring the alternatives.
+            spread = self.get_parameter('candidate_min_separation').value
+            distinct = []
+            for cand in scored:
+                if all(math.hypot(cand[1] - k[1], cand[2] - k[2]) > spread
+                       or abs(_wrap(cand[3] - k[3])) > math.radians(45)
+                       for k in distinct):
+                    distinct.append(cand)
+                if len(distinct) >= self.get_parameter('refine_candidates').value:
+                    break
+
+            self.get_logger().info(
+                '  candidates by scan->wall fit: ' + ', '.join(
+                    f'({c[1]:.1f},{c[2]:.1f},{math.degrees(c[3]):.0f}°)'
+                    f'={c[0]:.3f}m' for c in distinct))
+
+            # ── Fine refinement of each candidate ──────────────────
+            # The FFT peak is only pixel-accurate and the correlation maximum
+            # can sit ~0.5 m off the geometric best fit. Published as
             # /initialpose that leaves AMCL ~0.5 m out, and since AMCL is a
             # particle filter that only converges WITH MOTION, the scan looks
-            # off the walls until the robot drives. Polish the laser pose here
-            # by minimising median scan->wall distance over a small local grid
-            # (LiDAR only — 360°, more reliable than the forward depth for
-            # alignment) so the scan lands on the walls even while stationary.
-            laser_x, laser_y, best_theta = self._refine(
-                lidar, laser_x, laser_y, best_theta, map_msg)
+            # off the walls until the robot drives. Refining polishes each
+            # hypothesis (LiDAR only — 360°, more reliable than the forward
+            # depth for alignment) so they can be compared fairly.
+            refined = []
+            for err, lx, ly, theta in distinct:
+                rx, ry, rtheta = self._refine(lidar, lx, ly, theta, map_msg)
+                refined.append((wall_err(rx, ry, rtheta), rx, ry, rtheta))
+            refined.sort(key=lambda c: c[0])
+
+            best_score, laser_x, laser_y, best_theta = self._pick(refined)
 
             robot_x, robot_y, best_theta = self._laser_to_base(
                 laser_x, laser_y, best_theta)
@@ -455,7 +642,8 @@ class GlobalLocalizerNode(Node):
             self.get_logger().info(
                 f'Done in {time.monotonic() - t0:.1f}s — '
                 f'x={robot_x:.2f} y={robot_y:.2f} '
-                f'yaw={math.degrees(best_theta):.1f}°  score={best_score:.1f}')
+                f'yaw={math.degrees(best_theta):.1f}°  '
+                f'scan->wall={best_score:.3f} m')
 
             self._publish(robot_x, robot_y, best_theta)
 
