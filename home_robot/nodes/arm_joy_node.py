@@ -25,12 +25,12 @@ Targets are clamped to JOINT_LIMITS here and not only in the driver. Clamping
 only downstream would let the integrator wind up past the limit while you hold
 the stick, and the arm would then ignore the first part of the way back.
 
-‼️ Sign conventions are UNVERIFIED on hardware. joy publishes left = +1 and
-up = +1 (REP-103), but which way the RoArm's base and shoulder count positive
-is not documented in the Waveshare wiki. If a stick direction moves the arm the
-wrong way, negate that joint's scale_* parameter — no code change needed:
+All five axes were confirmed moving the real arm on 2026-07-29 (base, shoulder,
+elbow, wrist and the gripper, each over a usable range). Which way the RoArm
+counts a joint positive is still undocumented, so if a direction feels
+backwards, negate that joint's scale — applied immediately, no relaunch:
 
-    ros2 param set /arm_joy scale_shoulder -0.5
+    ros2 param set /arm_joy scale_shoulder -1.0
 
 ‼️ R1 DOUBLES AS THE DRIVE DEAD-MAN. config/teleop_twist_joy_ps5.yaml sets
 enable_button: 5 (R1) with require_enable_button: true, so R1 is held down for
@@ -55,6 +55,7 @@ both, so on /joy left and up are positive (REP-103), as assumed above.
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile
+from rcl_interfaces.msg import SetParametersResult
 from sensor_msgs.msg import Joy, JointState
 from std_msgs.msg import Bool, Float32
 
@@ -71,11 +72,13 @@ JOINT_LIMITS = {
 
 # joint -> (axis parameter default, rad/s default). Order fixes the order of
 # names/positions in the published JointState. An axis of -1 unbinds a joint.
+# Keep the rad/s defaults equal to config/arm_joy_ps5.yaml, so running the node
+# bare behaves the same as running it from the launch file.
 JOG_SPECS = (
-    ('base',     3,  0.60),     # right stick horizontal
-    ('shoulder', 4,  0.50),     # right stick vertical
-    ('elbow',    7,  0.50),     # D-pad up/down  — extend/retract the reach
-    ('wrist',    6,  0.50),     # D-pad left/right
+    ('base',     3,  1.20),     # right stick horizontal
+    ('shoulder', 4,  1.00),     # right stick vertical
+    ('elbow',    7,  1.00),     # D-pad up/down  — extend/retract the reach
+    ('wrist',    6,  1.00),     # D-pad left/right
 )
 JOG_JOINTS = tuple(spec[0] for spec in JOG_SPECS)
 
@@ -112,13 +115,14 @@ class ArmJoy(Node):
         # running on that stale deflection and the arm would drive itself into
         # its limit. Treat silence as "sticks centred".
         self.declare_parameter('joy_timeout', 0.5)      # seconds
+        # Cap on how far the open-loop target may run ahead of where the arm
+        # actually is. Without it, a scale the servos cannot keep up with lets
+        # the target sprint off; releasing the stick would then leave the arm
+        # still travelling to a target well past where it was asked to stop.
+        # Matters more the faster the scales get.
+        self.declare_parameter('max_lead', 0.35)        # rad
 
-        # [(joint, axis index, rad/s)] for every joint left bound to an axis.
-        self.jog = [(joint,
-                     self.get_parameter(f'axis_{joint}').value,
-                     self.get_parameter(f'scale_{joint}').value)
-                    for joint, _, _ in JOG_SPECS
-                    if self.get_parameter(f'axis_{joint}').value >= 0]
+        self._read_scales()
         self.btn_open = self.get_parameter('gripper_open_button').value
         self.btn_close = self.get_parameter('gripper_close_button').value
         self.scale_gripper = self.get_parameter('scale_gripper').value
@@ -126,6 +130,7 @@ class ArmJoy(Node):
         self.drive_axes = list(self.get_parameter('drive_lockout_axes').value)
         self.deadzone = self.get_parameter('deadzone').value
         self.joy_timeout = self.get_parameter('joy_timeout').value
+        self.max_lead = self.get_parameter('max_lead').value
         rate = self.get_parameter('rate').value
 
         # Integrator state. None until arm/joint_states tells us where the arm
@@ -156,6 +161,8 @@ class ArmJoy(Node):
                        history=QoSHistoryPolicy.KEEP_LAST,
                        durability=QoSDurabilityPolicy.TRANSIENT_LOCAL))
 
+        self.add_on_set_parameters_callback(self._on_params)
+
         self._dt = 1.0 / rate
         self.create_timer(self._dt, self._tick)
 
@@ -165,6 +172,52 @@ class ArmJoy(Node):
             f'Arm joy jog ready: {bindings}; button {self.btn_open} opens / '
             f'{self.btn_close} closes the gripper. '
             f'Waiting for arm/joint_states before moving.')
+
+    # ------------------------------------------------------------------
+    # Live retuning
+    # ------------------------------------------------------------------
+    def _read_scales(self):
+        """(Re)build the axis bindings from the current parameter values.
+
+        [(joint, axis index, rad/s)] for every joint still bound to an axis.
+        """
+        self.jog = [(joint,
+                     self.get_parameter(f'axis_{joint}').value,
+                     self.get_parameter(f'scale_{joint}').value)
+                    for joint, _, _ in JOG_SPECS
+                    if self.get_parameter(f'axis_{joint}').value >= 0]
+
+    def _on_params(self, params):
+        """Apply `ros2 param set` immediately instead of at the next restart.
+
+        Retuning speed and flipping a reversed direction are exactly the things
+        you do with the controller in your hands, so requiring a relaunch for
+        them would defeat the purpose.
+        """
+        tuneable = {f'{kind}_{joint}'
+                    for joint, _, _ in JOG_SPECS
+                    for kind in ('axis', 'scale')}
+        touched = [p.name for p in params if p.name in tuneable]
+        if not touched:
+            return SetParametersResult(successful=True)
+        # get_parameter() still returns the old value inside this callback, so
+        # stage the new ones first.
+        staged = {p.name: p.value for p in params}
+        self.jog = [(joint,
+                     staged.get(f'axis_{joint}', self.get_parameter(f'axis_{joint}').value),
+                     staged.get(f'scale_{joint}', self.get_parameter(f'scale_{joint}').value))
+                    for joint, _, _ in JOG_SPECS
+                    if staged.get(f'axis_{joint}',
+                                  self.get_parameter(f'axis_{joint}').value) >= 0]
+        bound = {joint for joint, _, _ in self.jog}
+        # An axis that was just unbound leaves a stale target/axis entry behind.
+        self._axes = {joint: self._axes.get(joint, 0.0) for joint in bound}
+        if self._target is not None:
+            self._target = {j: v for j, v in self._target.items() if j in bound}
+        self.get_logger().info(
+            'Retuned live: ' + ', '.join(f'{j}=axis {ax} @ {sc:+.2f} rad/s'
+                                         for j, ax, sc in self.jog))
+        return SetParametersResult(successful=True)
 
     # ------------------------------------------------------------------
     # Inputs
@@ -203,17 +256,31 @@ class ArmJoy(Node):
                    for ax in self.drive_axes)
 
     def _state_cb(self, msg: JointState):
+        pos = dict(zip(msg.name, msg.position))
+
+        if self._grip is None and 'hand' in pos:
+            self._grip = _clamp('hand', pos['hand'])
+
         # Seed the integrator once, then leave it alone: re-seeding from
         # feedback every message would fight the open-loop integration.
         if self._target is None:
-            pos = dict(zip(msg.name, msg.position))
             jogged = [joint for joint, _, _ in self.jog]
             if all(j in pos for j in jogged):
                 self._target = {j: _clamp(j, pos[j]) for j in jogged}
                 where = ' '.join(f'{j}={self._target[j]:.2f}' for j in jogged)
                 self.get_logger().info(f'Arm pose acquired ({where}) — stick is live.')
-        if self._grip is None and 'hand' in msg.name:
-            self._grip = _clamp('hand', msg.position[list(msg.name).index('hand')])
+            return
+
+        # Keep the open-loop target within max_lead of reality. This is NOT
+        # re-seeding from feedback (that would make the arm creep at a fraction
+        # of the requested rate): the target keeps its own position whenever the
+        # servos are keeping up, and is only reeled in when they fall behind.
+        for joint, actual in ((j, pos[j]) for j in self._target if j in pos):
+            lead = self._target[joint] - actual
+            if abs(lead) > self.max_lead:
+                self._target[joint] = _clamp(
+                    joint,
+                    actual + self.max_lead * (1.0 if lead > 0 else -1.0))
 
     def _estop_cb(self, msg: Bool):
         if msg.data and not self._estopped:

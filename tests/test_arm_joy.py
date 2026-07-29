@@ -96,6 +96,17 @@ def _install_ros_stubs():
         def create_timer(self, period, cb):
             self.timers.append((period, cb))
 
+        def add_on_set_parameters_callback(self, cb):
+            self.param_cb = cb
+
+        def set_parameters(self, params):
+            """Route through the node's callback, as rclpy does, then commit."""
+            result = self.param_cb(params)
+            if getattr(result, 'successful', False):
+                for p in params:
+                    self._params[p.name] = p.value
+            return result
+
         def get_clock(self):
             return self._clock
 
@@ -112,6 +123,9 @@ def _install_ros_stubs():
     rclpy.try_shutdown = lambda *_a, **_k: None
     rclpy_node = types.ModuleType('rclpy.node')
     rclpy_node.Node = _Node
+    rcl_interfaces = types.ModuleType('rcl_interfaces')
+    rcl_interfaces_msg = types.ModuleType('rcl_interfaces.msg')
+    rcl_interfaces_msg.SetParametersResult = lambda **kw: types.SimpleNamespace(**kw)
     rclpy_qos = types.ModuleType('rclpy.qos')
     rclpy_qos.QoSProfile = lambda **kw: types.SimpleNamespace(**kw)
     rclpy_qos.QoSDurabilityPolicy = types.SimpleNamespace(TRANSIENT_LOCAL=1)
@@ -134,6 +148,8 @@ def _install_ros_stubs():
 
     for name, mod in [('rclpy', rclpy), ('rclpy.node', rclpy_node),
                       ('rclpy.qos', rclpy_qos),
+                      ('rcl_interfaces', rcl_interfaces),
+                      ('rcl_interfaces.msg', rcl_interfaces_msg),
                       ('sensor_msgs', sensor_msgs), ('sensor_msgs.msg', sensor_msgs_msg),
                       ('std_msgs', std_msgs), ('std_msgs.msg', std_msgs_msg)]:
         sys.modules[name] = mod
@@ -212,11 +228,17 @@ def test_deadzone_starts_from_zero_not_a_jump(node):
 
 # ── Integration ───────────────────────────────────────────────────────
 
+def _scale_of(node, joint):
+    """The configured rad/s for a joint — read, not hardcoded, so retuning the
+    defaults doesn't silently invalidate every rate assertion below."""
+    return next(sc for j, _, sc in node.jog if j == joint)
+
+
 def test_stick_moves_the_target_at_the_configured_rate(node):
     _push(node, base=1.0)
     _run(node, 20)          # 20 ticks @ 20 Hz = 1.0 s
-    # scale_base is 0.60 rad/s, so ~0.60 rad after a second.
-    assert node._target['base'] == pytest.approx(0.60, abs=0.02)
+    # One second at full deflection covers exactly one scale's worth of travel.
+    assert node._target['base'] == pytest.approx(_scale_of(node, 'base'), abs=0.02)
     assert node._target['shoulder'] == 0.0
 
 
@@ -241,7 +263,8 @@ def test_released_stick_stops_commanding(node):
     _run(node, 10)
     # One settling command after release is fine; a stream is not.
     assert len(node.joint_pub.msgs) == before
-    assert node._target['base'] == pytest.approx(0.15, abs=0.02)  # holds position
+    assert node._target['base'] == pytest.approx(_scale_of(node, 'base') * 0.25,
+                                                 abs=0.02)  # holds position
 
 
 def test_target_clamps_at_joint_limit_no_windup(node):
@@ -268,7 +291,8 @@ def test_dpad_extends_the_elbow(node):
     assert 'elbow' in dict((j, ax) for j, ax, _ in node.jog)
     _push(node, elbow=1.0)
     _run(node, 20)
-    assert node._target['elbow'] == pytest.approx(1.57 + 0.50, abs=0.02)
+    assert node._target['elbow'] == pytest.approx(1.57 + _scale_of(node, 'elbow'),
+                                                  abs=0.02)
 
 
 def test_elbow_and_wrist_are_on_the_dpad_not_the_sticks(node):
@@ -426,6 +450,94 @@ def test_lockout_can_be_disabled(node):
     msg.axes[1] = 0.9
     node._joy_cb(msg)
     assert node._grip_dir == -1
+
+
+# ── Live retuning ─────────────────────────────────────────────────────
+
+def _param(name, value):
+    return types.SimpleNamespace(name=name, value=value)
+
+
+def test_speed_change_applies_without_a_restart(node):
+    """Documented as live-tunable, so it must actually take effect live."""
+    node.set_parameters([_param('scale_base', 2.0)])
+    _push(node, base=1.0)
+    _run(node, 20)                      # 1 s
+    assert node._target['base'] == pytest.approx(2.0, abs=0.05)
+
+
+def test_flipping_a_scale_sign_reverses_that_joint(node):
+    node.set_parameters([_param('scale_shoulder', -1.0)])
+    _push(node, shoulder=1.0)
+    _run(node, 10)
+    assert node._target['shoulder'] < 0.0, 'negated scale must reverse direction'
+
+
+def test_retuning_one_joint_leaves_the_others_alone(node):
+    before = {joint: sc for joint, _, sc in node.jog}
+    node.set_parameters([_param('scale_base', 2.0)])
+    after = {joint: sc for joint, _, sc in node.jog}
+    assert after['base'] == 2.0
+    for joint in ('shoulder', 'elbow', 'wrist'):
+        assert after[joint] == before[joint]
+
+
+def test_unbinding_an_axis_live_drops_its_target(node):
+    """A stale target for an unbound joint would keep being published."""
+    node.set_parameters([_param('axis_wrist', -1)])
+    assert 'wrist' not in [j for j, _, _ in node.jog]
+    assert 'wrist' not in node._target
+    assert 'wrist' not in node._axes
+    _push(node, base=1.0)
+    _run(node, 5)
+    assert 'wrist' not in node.joint_pub.msgs[-1].name
+
+
+def test_unrelated_parameter_change_is_accepted(node):
+    result = node.set_parameters([_param('joy_timeout', 1.0)])
+    assert result.successful
+
+
+# ── max_lead leash ────────────────────────────────────────────────────
+
+def _feedback(**pos):
+    full = {'base': 0.0, 'shoulder': 0.0, 'elbow': 1.57, 'wrist': 0.0, 'hand': 2.0}
+    full.update(pos)
+    return types.SimpleNamespace(name=list(full), position=list(full.values()))
+
+
+def test_target_cannot_sprint_past_a_lagging_servo(node):
+    """Fast scales must not let the target run away from a stalled joint."""
+    _push(node, base=1.0)
+    _run(node, 60)                      # 3 s at 1.2 rad/s ≈ 3.6 rad of demand
+    # The arm reports it never left the start: the leash must reel the target in.
+    node._state_cb(_feedback(base=0.0))
+    assert abs(node._target['base']) <= node.max_lead + 1e-6
+
+
+def test_leash_does_not_slow_a_servo_that_keeps_up(node):
+    """The whole point of open-loop: keeping up must not cost any speed."""
+    for _ in range(4):
+        _push(node, base=1.0)
+        _run(node, 5)
+        node._state_cb(_feedback(base=node._target['base']))   # arm tracks
+    assert node._target['base'] == pytest.approx(_scale_of(node, 'base'), abs=0.05)
+
+
+def test_leash_reels_in_from_either_direction(node):
+    _push(node, shoulder=-1.0)
+    _run(node, 60)
+    node._state_cb(_feedback(shoulder=0.0))
+    assert node._target['shoulder'] >= -node.max_lead - 1e-6
+
+
+def test_leash_respects_joint_limits(node):
+    """Reeling in must not park the target outside the joint's range."""
+    _push(node, elbow=-1.0)
+    _run(node, 200)
+    node._state_cb(_feedback(elbow=0.0))
+    lo, hi = ELBOW_LIMIT
+    assert lo <= node._target['elbow'] <= hi
 
 
 # ── Static wiring ─────────────────────────────────────────────────────
