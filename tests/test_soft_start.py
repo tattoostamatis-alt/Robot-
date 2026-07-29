@@ -157,6 +157,132 @@ def test_stopping_time_is_unchanged_by_soft_start(ramp):
     assert with_soft == pytest.approx(without)
 
 
+# ── Turn-rate slew limit (_ramp_angular) ──────────────────────────────
+
+ANG_ACCEL = 2.5     # rad/s^2
+TOP_YAW = 1.20      # what teleop_twist_joy_ps5.yaml now commands
+
+
+def _angular(monotonic):
+    """_ramp_angular bound to a stub, with an injected clock.
+
+    Its dt comes from time.monotonic() between cmd_vel messages, so the module
+    the method executes in gets a fake `time` — no sleeping in tests.
+    """
+    src = open(DRIVER).read()
+    match = re.search(r'\n    def _ramp_angular\(self.*?\n(?=    def )', src, re.S)
+    assert match, '_ramp_angular not found — was it renamed?'
+    ns = {'time': types.SimpleNamespace(monotonic=monotonic)}
+    exec('class _Stub:\n' + match.group(0), ns)
+    stub = ns['_Stub']()
+    stub.max_angular_accel = ANG_ACCEL
+    stub._cur_angular = 0.0
+    stub._last_angular_time = monotonic()
+    stub._stopped = False
+    return stub
+
+
+class _Clock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self):
+        return self.t
+
+    def tick(self, dt=DT):
+        self.t += dt
+
+
+@pytest.fixture
+def yaw():
+    clock = _Clock()
+    stub = _angular(clock)
+    stub._clock = clock
+    return stub
+
+
+def _hold_yaw(yaw, requested, seconds):
+    """Feed one cmd_vel per 20 Hz tick for `seconds`; return the eased rate."""
+    out = yaw._cur_angular
+    for _ in range(int(round(seconds / DT))):
+        yaw._clock.tick()
+        out = yaw._ramp_angular(requested)
+    return out
+
+
+def test_a_turn_does_not_snap_to_full_rate(yaw):
+    """One command at full yaw must not become full yaw on the same tick."""
+    yaw._clock.tick()
+    first = yaw._ramp_angular(TOP_YAW)
+    assert first == pytest.approx(ANG_ACCEL * DT)
+    assert first < TOP_YAW
+
+
+def test_turn_reaches_the_commanded_rate(yaw):
+    """Gentler must not mean never gets there."""
+    assert _hold_yaw(yaw, TOP_YAW, 1.0) == pytest.approx(TOP_YAW)
+
+
+def test_time_to_full_turn_rate_is_about_half_a_second(yaw):
+    """1.20 rad/s at 2.5 rad/s² ≈ 0.48 s — eased, not sluggish."""
+    assert _hold_yaw(yaw, TOP_YAW, 0.30) < TOP_YAW
+    assert _hold_yaw(yaw, TOP_YAW, 0.30) == pytest.approx(TOP_YAW, abs=0.05)
+
+
+def test_easing_works_in_both_directions(yaw):
+    assert _hold_yaw(yaw, -TOP_YAW, 1.0) == pytest.approx(-TOP_YAW)
+
+
+def test_reversing_a_turn_passes_through_zero_gradually(yaw):
+    _hold_yaw(yaw, TOP_YAW, 1.0)
+    # Flipping the stick must not slam from +1.2 to -1.2 in one tick.
+    yaw._clock.tick()
+    after = yaw._ramp_angular(-TOP_YAW)
+    assert after == pytest.approx(TOP_YAW - ANG_ACCEL * DT)
+    assert after > 0, 'a reversal should ease down, not jump across zero'
+
+
+def test_releasing_the_stick_eases_the_turn_out(yaw):
+    _hold_yaw(yaw, TOP_YAW, 1.0)
+    assert _hold_yaw(yaw, 0.0, 0.1) < TOP_YAW
+    assert _hold_yaw(yaw, 0.0, 1.0) == pytest.approx(0.0)
+
+
+def test_a_gap_longer_than_the_watchdog_starts_fresh(yaw):
+    """The wheels were zeroed during the gap, so resuming from the old rate
+    would fight the new command rather than easing it in."""
+    _hold_yaw(yaw, TOP_YAW, 1.0)
+    yaw._clock.tick(0.5)                      # > 0.25 s watchdog timeout
+    resumed = yaw._ramp_angular(TOP_YAW)
+    assert resumed == pytest.approx(0.0), 'stale rate must be dropped'
+
+
+def test_short_gaps_do_not_reset(yaw):
+    """Normal 20 Hz jitter must not keep restarting the ramp."""
+    _hold_yaw(yaw, TOP_YAW, 0.2)
+    before = yaw._cur_angular
+    yaw._clock.tick(0.15)                     # under the timeout
+    assert yaw._ramp_angular(TOP_YAW) > before
+
+
+def test_zero_disables_the_limiter(yaw):
+    """Escape hatch, matching soft_start_speed: 0."""
+    yaw.max_angular_accel = 0.0
+    yaw._clock.tick()
+    assert yaw._ramp_angular(TOP_YAW) == pytest.approx(TOP_YAW)
+
+
+def test_teleop_yaw_scale_is_no_longer_flat_out():
+    """The other half of "not so fast": the commanded ceiling came down too."""
+    import re as _re
+    cfg = open(f'{PKG}/config/teleop_twist_joy_ps5.yaml').read()
+    block = cfg[cfg.index('scale_angular:'):]
+    yaw_value = float(_re.search(r'yaw:\s*([0-9.]+)', block).group(1))
+    assert 0.35 < yaw_value <= 1.5, f'yaw scale {yaw_value} outside the sane band'
+    # ‼️ the 879 cannot rotate below ~0.31 rad/s at all.
+    assert yaw_value > 0.35
+
+
 # ── Tunability ────────────────────────────────────────────────────────
 
 def test_parameters_are_live_tunable():
@@ -164,7 +290,7 @@ def test_parameters_are_live_tunable():
     src = open(DRIVER).read()
     callback = src[src.index('def _on_set_parameters'):]
     callback = callback[:callback.index('\n    def ')]
-    for name in ('soft_start_accel', 'soft_start_speed'):
+    for name in ('soft_start_accel', 'soft_start_speed', 'max_angular_accel'):
         assert f"p.name == '{name}'" in callback, f'{name} not handled live'
         assert f'self.declare_parameter(\'{name}\'' in src
 

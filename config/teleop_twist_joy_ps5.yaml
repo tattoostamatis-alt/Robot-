@@ -17,11 +17,15 @@ teleop_twist_joy_node:
     axis_angular:
       yaw: 0    # left stick horizontal
     scale_angular:
-      yaw: 2.50   # 2026-07-28: user asked for flat-out turning (was 0.40).
-                  # ‼️ NEVER go below ~0.35: the 879 has a ~0.31 rad/s rotation
-                  # floor and the wheels simply don't move under it.
+      # 2026-07-29: 2.50 -> 1.20 at the user's request ("not so fast"). 2.50 was
+      # 143 deg/s, which is more than a living room ever needs and made every
+      # correction an overshoot. 1.20 is ~69 deg/s. See also max_angular_accel
+      # in roomba_driver, which limits how fast this rate may be *reached*.
+      # ‼️ NEVER go below ~0.35: the 879 has a ~0.31 rad/s rotation floor and
+      # the wheels simply don't move under it.
+      yaw: 1.20
     scale_angular_turbo:
-      yaw: 3.00
+      yaw: 1.80
 
     # Soft e-stop (joystick_estop_node, separate from this teleop): Circle (1)
     # latches the robot stopped, Share+Options (8+9) together resets. Distinct

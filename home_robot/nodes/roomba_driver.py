@@ -277,6 +277,14 @@ class RoombaDriver(Node):
         # that stops for bumpers and e-stops.
         self.declare_parameter('soft_start_accel', 400.0)  # mm/s^2
         self.declare_parameter('soft_start_speed', 120.0)  # mm/s
+        # Slew limit on the turn rate itself, rad/s per second. The per-wheel
+        # ramp above only softens a turn started from a standstill: begin a turn
+        # while already driving and the two wheels are merely asked to diverge,
+        # each well inside its own accel limit, so the yaw snaps in. Limiting
+        # angular.z directly makes a turn ease in regardless of what the robot
+        # was doing beforehand. 2026-07-29, user: "turn more gently".
+        # 0 disables it and restores the raw commanded rate.
+        self.declare_parameter('max_angular_accel', 2.5)   # rad/s^2
         # OI mode we drive in. 'safe' (default, 2026-07-28 at the user's
         # request) keeps the Roomba's own protections live: it aborts motion by
         # itself on a cliff, a lifted wheel, or the charger. 'full' disables all
@@ -319,6 +327,7 @@ class RoombaDriver(Node):
         self.max_accel = self.get_parameter('max_accel').value
         self.soft_start_accel = self.get_parameter('soft_start_accel').value
         self.soft_start_speed = self.get_parameter('soft_start_speed').value
+        self.max_angular_accel = self.get_parameter('max_angular_accel').value
         self.bump_stop = self.get_parameter('bump_stop').value
         self.bump_block_s = self.get_parameter('bump_block_s').value
         self._bump = False
@@ -371,6 +380,9 @@ class RoombaDriver(Node):
         self._last_cmd_time = time.monotonic()
         self._target_left = 0.0
         self._target_right = 0.0
+        # Eased turn rate (see _ramp_angular) and when it last advanced.
+        self._cur_angular = 0.0
+        self._last_angular_time = time.monotonic()
         self._cur_left = 0.0
         self._cur_right = 0.0
         self._last_control_time = time.monotonic()
@@ -431,6 +443,8 @@ class RoombaDriver(Node):
                 self.soft_start_accel = p.value
             elif p.name == 'soft_start_speed':
                 self.soft_start_speed = p.value
+            elif p.name == 'max_angular_accel':
+                self.max_angular_accel = p.value
             elif p.name == 'reverse_speed_scale':
                 self.reverse_speed_scale = p.value
         return SetParametersResult(successful=True)
@@ -443,6 +457,7 @@ class RoombaDriver(Node):
             # hard stop immediately — no ramp, this is an emergency
             self._target_left = self._target_right = 0.0
             self._cur_left = self._cur_right = 0.0
+            self._cur_angular = 0.0
             try:
                 self.bot.drive_direct(0, 0)
             except Exception as e:  # never let a serial hiccup swallow the e-stop
@@ -452,6 +467,7 @@ class RoombaDriver(Node):
         else:
             # release: drop any stale target so we don't lurch on the next cmd
             self._target_left = self._target_right = 0.0
+            self._cur_angular = 0.0
             self.get_logger().info('Emergency stop released — motion re-enabled')
 
     def _cmd_vel_cb(self, msg: Twist):
@@ -467,7 +483,7 @@ class RoombaDriver(Node):
         linear = msg.linear.x * 1000   # m/s → mm/s
         if linear < 0:
             linear *= self.reverse_speed_scale
-        angular = msg.angular.z         # rad/s
+        angular = self._ramp_angular(msg.angular.z)   # rad/s
 
         # round(), not int(): at low teleop speeds (mapping uses 30mm/s)
         # the commanded mm/s is small enough that truncating toward zero
@@ -480,6 +496,33 @@ class RoombaDriver(Node):
 
         self._target_right = max(-500.0, min(500.0, right))
         self._target_left  = max(-500.0, min(500.0, left))
+
+    def _ramp_angular(self, requested):
+        """Ease the commanded turn rate toward `requested`, rad/s.
+
+        Called per cmd_vel message, so dt is the gap between commands (teleop
+        and Nav2 both publish at ~20Hz). A long gap means the previous command
+        already timed out and the robot is stopping, so treat it as a fresh
+        start rather than integrating across the pause.
+        """
+        now = time.monotonic()
+        dt = now - self._last_angular_time
+        self._last_angular_time = now
+
+        if self.max_angular_accel <= 0.0:      # limiter disabled
+            self._cur_angular = requested
+            return requested
+        # 0.25 s is the motor watchdog's timeout: past it the wheels have
+        # already been zeroed, so carrying the old rate over would fight the
+        # fresh command instead of easing it in. (_stopped is no use here — the
+        # caller clears it before we run.)
+        if dt > 0.25:
+            self._cur_angular = 0.0
+            dt = 0.0
+
+        step = self.max_angular_accel * dt
+        self._cur_angular += max(-step, min(step, requested - self._cur_angular))
+        return self._cur_angular
 
     def _ramp_step(self, current, target, dt):
         """How much this wheel's speed may change this tick, in mm/s.
