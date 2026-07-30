@@ -100,3 +100,37 @@ def test_initial_prompt_has_no_meta_framing():
     call = src[src.index('self._whisper.transcribe'):]
     call = call[:call.index(')\n')]
     assert 'Εντολές προς το ρομπότ' not in call
+
+
+# ── babble: Whisper decoding noise into repeated fragments ──────────────────
+# Live 2026-07-30: this came out of stt_node after a wake and went to the LLM
+# as if the user had said it. None of it is prompt text, so the leakage filter
+# above could not see it — the tell is structure, not vocabulary.
+
+BABBLE = ('Ροδικρον, μάλταν, νου, μάλτα, δαμμου, ροδικοσύγμα, τάο, δίτρο, '
+          'σύγμα, ροδικρον, τίτρα, ροδικρον, νου, δίτρο, σύγμα, καπέ, λαμβά, '
+          'εξελον, ροδικοσύγμα, τάο, ροδικοσύγμα.')
+
+
+def test_letter_name_babble_is_dropped():
+    from home_robot.stt_postprocess import is_babble
+    assert is_babble(BABBLE)
+    assert clean(BABBLE) == ''
+
+
+def test_short_repetitive_answer_is_dropped():
+    from home_robot.stt_postprocess import is_babble
+    assert is_babble('ναι, όχι, ναι, όχι, ναι, όχι, ναι, όχι')
+
+
+@pytest.mark.parametrize('text', [
+    'πήγαινε στην κουζίνα',
+    'σταμάτα',
+    'Μαξ, πήγαινε στο σαλόνι και μετά καθάρισε το δωμάτιο του μπαμπά',
+    'άνοιξε τον κειμενογράφο, μετά την αριθμομηχανή, και μετά το firefox',
+    'τι ώρα είναι;',
+])
+def test_real_speech_survives_the_babble_filter(text):
+    from home_robot.stt_postprocess import is_babble
+    assert not is_babble(text)
+    assert clean(text)

@@ -43,6 +43,31 @@ def _norm(s: str) -> str:
     return re.sub(r'[^\w\s]', '', s).strip()
 
 
+def is_babble(text: str) -> bool:
+    """True for a transcription that is a loop of repeated fragments.
+
+    Seen live 2026-07-30, straight out of stt_node after a wake:
+
+        "Ροδικρον, μάλταν, νου, μάλτα, δαμμου, ροδικοσύγμα, τάο, δίτρο,
+         σύγμα, ροδικρον, τίτρα, ροδικρον, νου, δίτρο, σύγμα, καπέ, λαμβά,
+         εξελον, ροδικοσύγμα, τάο, ροδικοσύγμα."
+
+    Whisper decoding room noise into mangled Greek letter names — nothing the
+    user said, but the LLM receives it as a command and answers. The prompt
+    filter below cannot catch it: none of these are prompt fragments. What
+    gives it away is structure rather than vocabulary — many short comma-
+    separated tokens, most of them repeats. Real speech does not repeat a third
+    of its words.
+    """
+    tokens = [_norm(c) for c in re.split(r'\s*,\s*', text.strip()) if c.strip()]
+    if len(tokens) < 8:
+        return False
+    unique = len(set(tokens))
+    if unique / len(tokens) > 0.75:          # varied enough to be real speech
+        return False
+    return all(len(t.split()) <= 2 for t in tokens)
+
+
 def clean(text: str) -> str:
     """Return the usable part of a transcription, or '' if it is all leakage.
 
@@ -54,6 +79,9 @@ def clean(text: str) -> str:
         return ''
 
     if any(m in _norm(text) for m in META_MARKERS):
+        return ''
+
+    if is_babble(text):
         return ''
 
     clauses = [c for c in re.split(r'\s*,\s*', text.strip()) if c.strip()]
