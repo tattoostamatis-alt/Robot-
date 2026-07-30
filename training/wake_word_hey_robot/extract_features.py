@@ -29,6 +29,8 @@ WINDOW_SAMPLES = 32000  # 2.0s -> exactly 16 embedding frames
 TRAILING_VARIANTS = [0, 3200]  # 0 / 0.2s of trailing silence after speech
 N_SILENCE_NEG = 40
 N_AUG = 4  # augmented copies per base buffer, in addition to the clean original
+FRAME = 320   # 20ms RMS frames, as in record_real.py — used by fit_window()
+PAD = 1600    # 0.1s kept around the voiced region
 
 
 def load_wav_mono16k(path):
@@ -107,6 +109,41 @@ def augment(buf_int16, noise_source, rng):
     return np.clip(x, -32768, 32767).astype(np.int16)
 
 
+def fit_window(audio):
+    """Trim hard enough to fit the 2.0s window — but never truncate.
+
+    The fixed threshold above is tuned for edge-tts, whose padding is digital
+    silence. Real XVF3800 recordings carry a room-noise floor (median RMS ~88,
+    against thresh=150 — close enough that breaths and reverb tails survive the
+    trim), so 25 of the first 45 real takes came out longer than the window
+    even though the speech in them is a median 1.50s. Dropping those would have
+    thrown away most of the real data, and specifically the slow takes it was
+    recorded for.
+
+    So retry with progressively stricter relative thresholds, keyed to each
+    clip's own peak — the same idea record_real.py uses to find the voiced
+    region. If it still does not fit, the clip is dropped, NOT cut: truncating
+    is what turned a slow "Έι ρομπότ" into a positive example of bare "ρομπότ"
+    on 2026-07-25.
+    """
+    if len(audio) <= WINDOW_SAMPLES:
+        return audio
+    n = len(audio) // FRAME
+    if n:
+        frames = audio[:n * FRAME].reshape(n, FRAME).astype(np.float64)
+        rms = np.sqrt((frames ** 2).mean(axis=1))
+        for ratio in (0.15, 0.25, 0.35):
+            voiced = np.where(rms > max(rms.max() * ratio, 150))[0]
+            if len(voiced) == 0:
+                continue
+            start = max(0, voiced[0] * FRAME - PAD)
+            end = min(len(audio), (voiced[-1] + 1) * FRAME + PAD)
+            candidate = audio[start:end]
+            if len(candidate) <= WINDOW_SAMPLES:
+                return candidate
+    return audio          # still too long — caller drops it
+
+
 def main():
     manifest = [line.strip().split('\t') for line in open('manifest.tsv')]
     noise_source = load_wav_mono16k('noise/room_noise.wav')
@@ -116,10 +153,15 @@ def main():
     labels = []
     clean = []  # 1 = untouched TTS buffer, 0 = augmented/synthetic noise
     n_skipped = 0
+    n_rescued = 0
     for label, path in manifest:
         audio = trim_silence(load_wav_mono16k(path))
         if len(audio) > WINDOW_SAMPLES:
-            n_skipped += 1
+            audio = fit_window(audio)
+            if len(audio) > WINDOW_SAMPLES:
+                n_skipped += 1
+            else:
+                n_rescued += 1
         for trailing in TRAILING_VARIANTS:
             buf = make_buffer(audio, trailing)
             if buf is None:
@@ -141,7 +183,8 @@ def main():
     y = np.array(labels, dtype=np.float32)
     clean = np.array(clean, dtype=np.float32)
     print(f'Total examples: {len(y)} (pos={int(y.sum())}, neg={int((1 - y).sum())}); '
-          f'{n_skipped} clips longer than the 2s window were dropped')
+          f'{n_rescued} over-length clips re-trimmed to fit, '
+          f'{n_skipped} still too long and dropped')
 
     af = AudioFeatures()
     embeddings = af.embed_clips(X, batch_size=64)

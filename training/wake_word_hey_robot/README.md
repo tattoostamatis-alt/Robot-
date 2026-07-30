@@ -97,6 +97,39 @@ captures 2.6s per take (`--secs`) so a slow "Έι ρομπότ" is not cut off, 
 warns when a take exceeds the 2.0s window, since `extract_features.py` drops
 those rather than truncating them.
 
+## 45 real recordings, and what they exposed (2026-07-30)
+
+30 real "Έι ρομπότ" positives and 15 real "ρομπότ"-without-"Έι" negatives,
+captured on the XVF3800 via `record_real.py`. The negatives are the story:
+
+**The deployed synthetic-only model woke on 9 of the 15 real "ρομπότ" clips**,
+scoring 0.93-1.00 — i.e. ordinary commands containing the word "ρομπότ" were
+firing the wake word. No synthetic test saw this: the same phrases rendered by
+edge-tts score ~0.001. Real speech was the only way to find it.
+
+After retraining with the real clips: **3 of 15**, with all 30 real positives
+still at 1.000 and the augmented rate sweep unchanged (83% → 84%).
+
+**Caveat, stated plainly**: hold out every 3rd real clip, retrain, and score
+the held-out ones (`holdout.py` in the session scratchpad) and the improvement
+disappears — held-out negatives fire 2/5 before and 2/5 after, held-out
+positives 39/60 → 40/60 augmented. With only 45 real clips the model is
+memorising them, not generalising from them. The deployed gain is real for the
+phrasings recorded, unproven for new ones. **More real negatives is the single
+highest-value thing left** — the same "ρομπότ" inside many different commands,
+50+ of them, not 15.
+
+Also worth knowing: the retrained model scores 0.815 on one synthetic negative
+— "Ρομπότ Μαξ" at -20% rate, the retired wake phrase (was 0.382). Everything
+else stays ≤0.016.
+
+`extract_features.py` no longer drops most of the real data. Its fixed
+threshold is tuned for edge-tts padding, which is digital silence; real
+recordings carry a room-noise floor, so 25 of the 45 came out longer than the
+2.0s window even though the speech in them is a median 1.50s. `fit_window()`
+retries with stricter relative thresholds keyed to each clip's own peak, which
+rescued 21 of the 25. Clips that still do not fit are dropped, never truncated.
+
 ## Known limitations / how to improve
 
 - **No real recordings**: all training data is synthetic TTS. Real speech
