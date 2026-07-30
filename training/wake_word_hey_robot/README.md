@@ -130,6 +130,21 @@ recordings carry a room-noise floor, so 25 of the 45 came out longer than the
 retries with stricter relative thresholds keyed to each clip's own peak, which
 rescued 21 of the 25. Clips that still do not fit are dropped, never truncated.
 
+## HW-verified 2026-07-30 evening
+
+Same test, before and after the sentence-final negatives went in:
+
+| | old model | with NEG_FINAL_GREEK |
+|---|---|---|
+| "Έι ρομπότ" | 7/7 fired | **10/10 fired** (0.62-0.99) |
+| ordinary speech containing "ρομπότ" | **11 false wakes in 4.3 min** (0.61-1.00) | **0** |
+
+After the last true detection the node sat silent for 59 s while the phrase was
+spoken on its own — at the old rate that window would have produced 2-3 false
+wakes. The negative phase was ~1 min against 4.3 min the first time, so the
+result is clear but not equally weighted; a longer conversational test is the
+obvious confirmation.
+
 ## Known limitations / how to improve
 
 - **No real recordings**: all training data is synthetic TTS. Real speech
