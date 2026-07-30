@@ -66,6 +66,25 @@ VARIANTS_1 = [('+0%', '+0Hz')]
 VARIANTS_5 = [('-20%', '-40Hz'), ('-10%', '-15Hz'), ('+0%', '+0Hz'),
               ('+10%', '+15Hz'), ('+20%', '+40Hz')]
 
+# ‼️ The false-trigger case that matters, added 2026-07-30 after a live test:
+# with the model deployed, ordinary speech containing "ρομπότ" woke the robot 11
+# times in 4.3 minutes. The window the model sees is ~1.94s ending at the word,
+# so what it must reject is a sentence ENDING in "ρομπότ" — and the old negative
+# set barely had any ("Το ρομπότ καθαρίζει" ends elsewhere). These are exactly
+# that shape: a carrier phrase, then "ρομπότ" last, the way you address it.
+# "εντάξει ρομπότ" is in here on purpose: "…ξει ρομπότ" is the nearest miss to
+# "έι ρομπότ" that normal Greek produces.
+NEG_FINAL_GREEK = [
+    'πήγαινε στην κουζίνα ρομπότ', 'σταμάτα ρομπότ', 'έλα εδώ ρομπότ',
+    'καλημέρα ρομπότ', 'καληνύχτα ρομπότ', 'ευχαριστώ ρομπότ', 'άκου ρομπότ',
+    'πάμε ρομπότ', 'όχι ρομπότ', 'ναι ρομπότ', 'ωραία ρομπότ', 'μπράβο ρομπότ',
+    'τι κάνεις ρομπότ', 'πού είσαι ρομπότ', 'γεια σου ρομπότ', 'περίμενε ρομπότ',
+    'γύρνα πίσω ρομπότ', 'καθάρισε το σαλόνι ρομπότ', 'πήγαινε στη βάση σου ρομπότ',
+    'πρόσεχε ρομπότ', 'βοήθησέ με ρομπότ', 'εντάξει ρομπότ', 'ρε ρομπότ',
+    'καλό ρομπότ', 'κακό ρομπότ', 'αυτό το ρομπότ', 'το δικό μου ρομπότ',
+    'ρομπότ έλα', 'ρομπότ σταμάτα', 'ρομπότ πήγαινε', 'ρομπότ άκου',
+]
+
 jobs = []  # (label, text, voice, rate, pitch, name)
 
 
@@ -84,6 +103,8 @@ add_jobs('neg', NEG_GREEK, GREEK_VOICES, VARIANTS_3)
 add_jobs('neg', NEG_ENGLISH, ENGLISH_VOICES, VARIANTS_1)
 add_jobs('neg', NEG_HARD_GREEK, GREEK_VOICES, VARIANTS_5)
 add_jobs('neg', NEG_HARD_ENGLISH, ENGLISH_VOICES, VARIANTS_3)
+# appended LAST so the indices of every existing clip stay put
+add_jobs('neg', NEG_FINAL_GREEK, GREEK_VOICES, VARIANTS_5)
 
 print(f'Total jobs: {len(jobs)} '
       f'(pos={sum(1 for j in jobs if j[0]=="pos")}, '
@@ -95,6 +116,8 @@ sem = asyncio.Semaphore(8)
 async def gen_one(job):
     label, text, voice, rate, pitch, name = job
     mp3_path = f'{OUT_RAW}/{name}.mp3'
+    if os.path.exists(f'{OUT_WAV}/{name}.wav'):
+        return label, name          # already synthesized — keep it
     async with sem:
         try:
             c = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
@@ -115,13 +138,22 @@ async def main():
         label, name = r
         mp3_path = f'{OUT_RAW}/{name}.mp3'
         wav_path = f'{OUT_WAV}/{name}.wav'
-        subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-i', mp3_path,
-                        '-ar', '16000', '-ac', '1', '-sample_fmt', 's16', wav_path], check=True)
+        if not os.path.exists(wav_path):
+            subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-i', mp3_path,
+                            '-ar', '16000', '-ac', '1', '-sample_fmt', 's16', wav_path], check=True)
         manifest.append((label, wav_path))
 
+    # ‼️ Real recordings live in the same manifest and are NOT regenerable —
+    # carry them across instead of overwriting the file out from under them.
+    real = []
+    if os.path.exists('manifest.tsv'):
+        real = [tuple(l.strip().split('\t')) for l in open('manifest.tsv')
+                if l.strip() and 'real_' in l]
     with open('manifest.tsv', 'w') as f:
-        for label, path in manifest:
+        for label, path in manifest + real:
             f.write(f'{label}\t{path}\n')
+    if real:
+        print(f'kept {len(real)} real recordings in the manifest')
 
     n_pos = sum(1 for label, _ in manifest if label == 'pos')
     n_neg = sum(1 for label, _ in manifest if label == 'neg')

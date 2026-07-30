@@ -39,7 +39,19 @@ def train_one(seed, X_train_t, y_train_t, X_val_t, y_val_t, clean_val_t, verbose
     torch.manual_seed(seed)
     model = WakeWordClassifier()
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
-    criterion = nn.BCELoss()
+    # Class weighting, added 2026-07-30. The negative set grew to ~6x the
+    # positives once 260 sentence-final "…ρομπότ" clips went in; unweighted BCE
+    # then buys negative accuracy with positive recall, which is the one thing
+    # that must not regress — a wake word you have to repeat is worse than one
+    # that occasionally over-fires. Weight each class by its inverse frequency
+    # so both sides carry the same total weight regardless of clip counts.
+    pos_frac = float(y_train_t.mean())
+    w_pos = 0.5 / max(pos_frac, 1e-6)
+    w_neg = 0.5 / max(1.0 - pos_frac, 1e-6)
+
+    def criterion(out, target):
+        w = target * w_pos + (1.0 - target) * w_neg
+        return nn.functional.binary_cross_entropy(out, target, weight=w)
 
     # Mini-batch, not full-batch: 300 full-batch Adam steps left the model
     # barely converged and wildly seed-dependent (identical data gave anything
