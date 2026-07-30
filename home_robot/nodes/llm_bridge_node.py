@@ -77,6 +77,15 @@ SYSTEM_PROMPT = """Είσαι ο "Max", βοηθός ρομπότ καθαρισ
 
 Αν η ερώτηση αφορά την εικόνα, η περιγραφή της κάμερας συνοδεύει ήδη το μήνυμα."""
 
+# Nudge for the follow-up call, added only when a dispatched tool reported
+# 'started' — i.e. the robot is now moving and has NOT arrived. Without it the
+# model reports those as finished ("Πήγα στην κουζίνα.", "Έχω φτάσει στην βάση
+# μου.") while the wheels are still turning. Blocking tools (goto returns after
+# nav2 reports arrival) legitimately answer in the past tense, so they skip it.
+ACTION_STARTED_NOTE = ('Η ενέργεια ΜΟΛΙΣ ξεκίνησε και συνεχίζεται — ΔΕΝ έχει '
+                       'ολοκληρωθεί. Απάντησε σε ενεστώτα («Πηγαίνω…», '
+                       '«Ξεκινάω…»), ποτέ σε παρελθοντικό χρόνο.')
+
 # NOTE: keep descriptions terse. FastFlowLM (NPU) has max_prefill_len=4096 and the
 # whole TOOLS schema is serialized into every prefill — verbose descriptions overflow
 # it ("Max length reached!" 400). This concise set fits with room to spare.
@@ -531,16 +540,40 @@ class LLMBridgeNode(Node):
         else:
             self._handle_text_ollama(text)
 
+    def _remember_turn(self, turn, acted):
+        """Commit a turn to the rolling history — unless it fired a tool.
+
+        Measured on qwen3.5:4b: leaving an action turn (tool_call + tool result
+        + "Πήγα στην κουζίνα.") in the history makes a REPEAT of the same
+        command answer from that history instead of calling the tool again —
+        1/3 on explore/follow/dock/goto, and the reply claims the action
+        happened while the robot stands still. The tell is latency collapsing
+        (8.6s → 5.4s → 2.2s): it is recalling, not working.
+
+        Commands are idempotent and need no continuity; chat does. So chat
+        turns are remembered and action turns are not. The cost is that "τι σου
+        είπα πριν;" cannot recall a past command — worth it to never claim an
+        action that did not happen.
+        """
+        if acted:
+            return
+        self._history.append(turn)
+        del self._history[:-self.history_turns]
+
     # ── lemonade backend ───────────────────────────────────────────────────
 
     def _handle_text_lemonade(self, text):
-        messages = [{'role': 'system', 'content': SYSTEM_PROMPT}]
-        memory_msg = self._memory_system_message(self._retrieve_memories(text))
-        if memory_msg:
-            messages.append({'role': 'system', 'content': memory_msg})
-        sit_msg = self._situation_system_message()
-        if sit_msg:
-            messages.append({'role': 'system', 'content': sit_msg})
+        # ‼️ FastFlowLM's chat template raises "System message must be at the
+        # beginning" for a system message that follows any non-system message —
+        # and returns it as {"error": ...} with HTTP 200, so it surfaces as a
+        # KeyError, not a 4xx. Leading system messages are fine (measured), but
+        # merging them into one keeps that invariant trivially true; the
+        # follow-up call below depends on it.
+        parts = [SYSTEM_PROMPT]
+        parts += [m for m in (self._memory_system_message(self._retrieve_memories(text)),
+                              self._situation_system_message()) if m]
+        system_msg = {'role': 'system', 'content': '\n\n'.join(parts)}
+        messages = [system_msg]
         for turn in self._history:
             messages.extend(turn)
 
@@ -575,7 +608,12 @@ class LLMBridgeNode(Node):
                 payload['tools'] = TOOLS
             r = requests.post(f'{self.lemonade_url}/chat/completions', json=payload, timeout=120)
             r.raise_for_status()
-            return r.json()['choices'][0]['message']
+            body = r.json()
+            # FLM reports template/prefill errors in a 200 body. Without this the
+            # caller dies on a KeyError that says nothing about the real cause.
+            if 'choices' not in body:
+                raise RuntimeError(f'FLM error: {body.get("error", body)}')
+            return body['choices'][0]['message']
 
         try:
             out = _chat(messages, self.temperature, with_tools=True)
@@ -589,15 +627,22 @@ class LLMBridgeNode(Node):
         if tool_calls:
             messages.append(out)
             turn.append(out)
+            started = False
             for tc in tool_calls:
                 fn = tc['function']
                 args = json.loads(fn.get('arguments') or '{}')
                 self.get_logger().info(f'Tool call: {fn["name"]}({args})')
                 result = self._dispatch_tool(fn['name'], args)
+                started |= result.get('status') == 'started'
                 tool_msg = {'role': 'tool', 'tool_call_id': tc.get('id', ''),
                             'content': json.dumps(result, ensure_ascii=False)}
                 messages.append(tool_msg)
                 turn.append(tool_msg)
+            if started:
+                # Same template rule: fold the note into the leading system
+                # message rather than appending a second one.
+                messages[0] = {'role': 'system',
+                               'content': f'{system_msg["content"]}\n\n{ACTION_STARTED_NOTE}'}
 
             try:
                 out2 = _chat(messages, 0.3, with_tools=False)
@@ -613,8 +658,7 @@ class LLMBridgeNode(Node):
             return
 
         turn.append({'role': 'assistant', 'content': reply})
-        self._history.append(turn)
-        del self._history[:-self.history_turns]
+        self._remember_turn(turn, bool(tool_calls))
 
         self.get_logger().info(f'Max: {reply}')
         self.response_pub.publish(String(data=reply))
@@ -658,13 +702,17 @@ class LLMBridgeNode(Node):
         if out.tool_calls:
             messages.append(out)
             turn.append(out)
+            started = False
             for tc in out.tool_calls:
                 args = tc.function.arguments or {}
                 self.get_logger().info(f'Tool call: {tc.function.name}({args})')
                 result = self._dispatch_tool(tc.function.name, args)
+                started |= result.get('status') == 'started'
                 tool_msg = {'role': 'tool', 'content': json.dumps(result, ensure_ascii=False)}
                 messages.append(tool_msg)
                 turn.append(tool_msg)
+            if started:
+                messages.append({'role': 'system', 'content': ACTION_STARTED_NOTE})
 
             try:
                 resp2 = ollama.chat(model=self.model, messages=messages,
@@ -682,8 +730,7 @@ class LLMBridgeNode(Node):
             return
 
         turn.append({'role': 'assistant', 'content': reply})
-        self._history.append(turn)
-        del self._history[:-self.history_turns]
+        self._remember_turn(turn, bool(out.tool_calls))
 
         self.get_logger().info(f'Max: {reply}')
         self.response_pub.publish(String(data=reply))
@@ -732,10 +779,12 @@ class LLMBridgeNode(Node):
             contents.append(out)
             turn.append(out)
             response_parts = []
+            started = False
             for fc in function_calls:
                 args = fc.args or {}
                 self.get_logger().info(f'Tool call: {fc.name}({args})')
                 result = self._dispatch_tool(fc.name, args)
+                started |= result.get('status') == 'started'
                 response_parts.append(types.Part.from_function_response(
                     name=fc.name, response=result))
             response_content = types.Content(role='user', parts=response_parts)
@@ -743,10 +792,12 @@ class LLMBridgeNode(Node):
             turn.append(response_content)
 
             try:
+                followup_system = (f'{SYSTEM_PROMPT}\n\n{ACTION_STARTED_NOTE}'
+                                   if started else SYSTEM_PROMPT)
                 resp2 = self._gemini_client.models.generate_content(
                     model=self.gemini_model, contents=contents,
                     config=types.GenerateContentConfig(
-                        system_instruction=SYSTEM_PROMPT, temperature=0.3))
+                        system_instruction=followup_system, temperature=0.3))
                 reply = (resp2.text or '').strip()
             except Exception as e:
                 self.get_logger().error(f'LLM follow-up call failed: {e}')
@@ -759,8 +810,7 @@ class LLMBridgeNode(Node):
             return
 
         turn.append(types.Content(role='model', parts=[types.Part(text=reply)]))
-        self._history.append(turn)
-        del self._history[:-self.history_turns]
+        self._remember_turn(turn, bool(function_calls))
 
         self.get_logger().info(f'Max: {reply}')
         self.response_pub.publish(String(data=reply))

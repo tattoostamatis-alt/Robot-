@@ -18,18 +18,24 @@ NODE = pathlib.Path.home() / 'robot_ws/src/home_robot/home_robot/nodes/llm_bridg
 WANT = {'SYSTEM_PROMPT', '_ROOMS', 'TOOLS'}
 
 
-def load_contract():
-    """Pull SYSTEM_PROMPT/_ROOMS/TOOLS out of the node without importing ROS."""
+def extract(names):
+    """Pull top-level constants out of the node without importing ROS."""
     tree = ast.parse(NODE.read_text(encoding='utf-8'))
     ns = {}
     for node in tree.body:
         if isinstance(node, ast.Assign) and len(node.targets) == 1:
             t = node.targets[0]
-            if isinstance(t, ast.Name) and t.id in WANT:
+            if isinstance(t, ast.Name) and t.id in names:
                 exec(compile(ast.Module([node], []), '<contract>', 'exec'), ns)
-    missing = WANT - ns.keys()
+    missing = set(names) - ns.keys()
     if missing:
         sys.exit(f'could not extract {missing} from {NODE}')
+    return ns
+
+
+def load_contract():
+    """SYSTEM_PROMPT/TOOLS as the node sends them."""
+    ns = extract(WANT)
     return ns['SYSTEM_PROMPT'], ns['TOOLS']
 
 
