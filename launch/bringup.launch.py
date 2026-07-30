@@ -45,11 +45,16 @@ def generate_launch_description():
     # because Lemonade 11.0.0 dropped every FLM/NPU model from its catalogue
     # (2026-07-16), so the NPU path now goes through FastFlowLM's own server on
     # :52625 instead — that is the default here. Note FLM's base path is `/v1`,
-    # not Lemonade's `/api/v1`, and it spells the model `qwen3vl-it:4b`.
+    # not Lemonade's `/api/v1`, and it spells the model `qwen3.5:4b`.
     # Override both together to point somewhere else.
+    #
+    # Model was qwen3vl-it:4b until 2026-07-30. An A/B over the real 15-tool
+    # schema (24 Greek utterances x3) scored qwen3.5:4b at 100 % vs 90.5 %: the
+    # VL model answered "Σταμάτησα." to a bare "σταμάτα" without ever calling
+    # `stop`. qwen3.5 is multimodal as well, so use_vision is unaffected.
     llm_url       = LaunchConfiguration('llm_url',
                                         default='http://127.0.0.1:52625/v1')
-    llm_model     = LaunchConfiguration('llm_model', default='qwen3vl-it:4b')
+    llm_model     = LaunchConfiguration('llm_model', default='qwen3.5:4b')
     vision_backend = LaunchConfiguration('vision_backend', default='gemini')
     use_planner   = LaunchConfiguration('use_planner',   default='false')
     use_vision    = LaunchConfiguration('use_vision',    default='false')
@@ -1024,7 +1029,7 @@ def generate_launch_description():
         DeclareLaunchArgument('llm_backend',   default_value='lemonade'),
         DeclareLaunchArgument('llm_url',
             default_value='http://127.0.0.1:52625/v1'),
-        DeclareLaunchArgument('llm_model',     default_value='qwen3vl-it:4b'),
+        DeclareLaunchArgument('llm_model',     default_value='qwen3.5:4b'),
         DeclareLaunchArgument('vision_backend', default_value='lemonade'),
         DeclareLaunchArgument('use_planner',   default_value='false'),
         DeclareLaunchArgument('use_vision',    default_value='false'),

@@ -47,8 +47,11 @@ class VisionNode(Node):
         self.declare_parameter('backend', 'lemonade')
         self.declare_parameter('model', 'qwen3-vl:4b-instruct')
         self.declare_parameter('gemini_model', 'gemini-flash-lite-latest')
-        self.declare_parameter('lemonade_url', 'http://127.0.0.1:13305/api/v1')
-        self.declare_parameter('lemonade_model', 'qwen3vl-it-4b-FLM')
+        # See llm_bridge_node: FastFlowLM on :52625 /v1 is what actually runs.
+        # qwen3.5:4b is multimodal (verified 2026-07-30: reads text off a frame),
+        # so this backend stays usable even though bringup defaults to gemini.
+        self.declare_parameter('lemonade_url', 'http://127.0.0.1:52625/v1')
+        self.declare_parameter('lemonade_model', 'qwen3.5:4b')
         self.declare_parameter('keep_alive', '5m')
 
         self.backend = self.get_parameter('backend').value

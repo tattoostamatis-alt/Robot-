@@ -42,8 +42,14 @@ class RagMemoryNode(Node):
     def __init__(self):
         super().__init__('rag_memory_node')
 
-        self.declare_parameter('lemonade_url', 'http://127.0.0.1:13305/api/v1')
-        self.declare_parameter('embedding_model', 'embed-gemma-300m-FLM')
+        # :13305 is Lemonade, which has answered model_not_found for every NPU
+        # model since 11.0.0 dropped the FLM catalogue — these embeddings were
+        # therefore hitting a dead endpoint. FastFlowLM on :52625 is what runs.
+        # NOTE: this still needs the embed model present and served alongside the
+        # chat model (`flm pull embed-gemma:300m`, then `flm serve ... --embed 1`);
+        # untested end-to-end as of 2026-07-30.
+        self.declare_parameter('lemonade_url', 'http://127.0.0.1:52625/v1')
+        self.declare_parameter('embedding_model', 'embed-gemma:300m')
         self.declare_parameter('db_path', os.path.expanduser('~/.robot_memory'))
         self.declare_parameter('top_k', 3)
         self.declare_parameter('max_distance', 1.0)
