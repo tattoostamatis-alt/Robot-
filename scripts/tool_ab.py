@@ -15,7 +15,7 @@ import argparse, ast, json, pathlib, statistics, sys, time
 import requests
 
 NODE = pathlib.Path.home() / 'robot_ws/src/home_robot/home_robot/nodes/llm_bridge_node.py'
-WANT = {'SYSTEM_PROMPT', '_ROOMS', 'TOOLS'}
+WANT = {'SYSTEM_PROMPT', '_ROOMS', '_APPS', 'TOOLS'}
 
 
 def extract(names):

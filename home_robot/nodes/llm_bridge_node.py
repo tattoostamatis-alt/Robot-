@@ -46,6 +46,7 @@ from home_robot.status_query import (format_location, format_status,
                                      is_location_query, is_status_query,
                                      wants_battery)
 from home_robot.stop_command import is_stop_command, strip_accents
+from home_robot import desktop
 from nav2_msgs.action import NavigateToPose
 from rclpy.action import ActionClient
 from rclpy.node import Node
@@ -95,6 +96,9 @@ ACTION_STARTED_NOTE = ('Η ενέργεια ΜΟΛΙΣ ξεκίνησε και �
 # NOTE: keep descriptions terse. FastFlowLM (NPU) has max_prefill_len=4096 and the
 # whole TOOLS schema is serialized into every prefill — verbose descriptions overflow
 # it ("Max length reached!" 400). This concise set fits with room to spare.
+_APPS = ['calculator', 'files', 'firefox', 'pdf_viewer', 'terminal',
+         'text_editor', 'video_player', 'vscode']
+
 _ROOMS = ['saloni', 'kouzina', 'diadromos', 'toualeta', 'domatio tou max', 'domatio tou mbamba']
 
 TOOLS = [
@@ -104,6 +108,18 @@ TOOLS = [
         'parameters': {'type': 'object', 'properties': {
             'room': {'type': 'string', 'enum': _ROOMS + ['all']},
         }, 'required': ['room']},
+    }},
+    {'type': 'function', 'function': {
+        'name': 'open_app',
+        'description': 'Άνοιξε εφαρμογή στην οθόνη του υπολογιστή',
+        'parameters': {'type': 'object', 'properties': {
+            'app': {'type': 'string', 'enum': _APPS},
+        }, 'required': ['app']},
+    }},
+    {'type': 'function', 'function': {
+        'name': 'list_windows',
+        'description': 'Τι είναι ανοιχτό στην οθόνη του υπολογιστή',
+        'parameters': {'type': 'object', 'properties': {}},
     }},
     {'type': 'function', 'function': {
         'name': 'goto',
@@ -406,10 +422,23 @@ class LLMBridgeNode(Node):
     # ── context helpers ────────────────────────────────────────────────────
 
     def _situation_system_message(self) -> str | None:
+        # Date and time go in unconditionally — asked for 2026-07-30, after "τι
+        # ώρα είναι;" was answered with "Δεν ξέρω την ώρα". A tool would cost a
+        # second NPU round trip (~6s) plus its schema in every prefill; two
+        # lines of context cost ~20 tokens and are always right.
+        now = time.localtime()
+        days = ['Δευτέρα', 'Τρίτη', 'Τετάρτη', 'Πέμπτη', 'Παρασκευή',
+                'Σάββατο', 'Κυριακή']
+        months = ['Ιανουαρίου', 'Φεβρουαρίου', 'Μαρτίου', 'Απριλίου', 'Μαΐου',
+                  'Ιουνίου', 'Ιουλίου', 'Αυγούστου', 'Σεπτεμβρίου',
+                  'Οκτωβρίου', 'Νοεμβρίου', 'Δεκεμβρίου']
+        clock = [f'Ώρα: {now.tm_hour:02d}:{now.tm_min:02d}',
+                 f'Ημερομηνία: {days[now.tm_wday]} {now.tm_mday} '
+                 f'{months[now.tm_mon - 1]} {now.tm_year}']
         if not self._situation:
-            return None
+            return 'Τρέχουσα κατάσταση:\n' + '\n'.join(f'- {p}' for p in clock)
         s = self._situation
-        parts = [f"Δωμάτιο: {s.get('room', '?')}"]
+        parts = clock + [f"Δωμάτιο: {s.get('room', '?')}"]
         if 'objects' in s:
             parts.append(f"Κοντινά αντικείμενα: {s['objects']}")
         if 'battery_pct' in s:
@@ -913,6 +942,12 @@ class LLMBridgeNode(Node):
 
         elif name == 'dock':
             return self._start_docking()
+
+        elif name == 'open_app':
+            return desktop.open_app(args.get('app'))
+
+        elif name == 'list_windows':
+            return desktop.list_windows()
 
         elif name == 'stop':
             self.cmd_vel_pub.publish(Twist())
