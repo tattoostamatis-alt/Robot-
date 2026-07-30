@@ -9,7 +9,17 @@ saves to wav/ and appends to manifest.tsv with a `real_` prefix.
 
 After recording, re-run the pipeline:
     python3 extract_features.py && python3 train.py && python3 evaluate.py
-    cp max.onnx ../../config/models/max.onnx
+    cp hey_robot.onnx ../../config/models/hey_robot.onnx
+
+Say each take at a DIFFERENT speed — slow, normal, hurried. The synthetic set
+covers -20%..+20% rate only, and rate_sweep.py cannot tell whether real slow
+speech survives, because clean TTS saturates at 1.000 whatever the rate.
+
+The capture window (--secs) is deliberately longer than the model's 2.0s
+receptive field so a slow take is not cut off mid-phrase. A take whose trimmed
+audio exceeds 2.0s is still flagged: extract_features.py drops such clips
+rather than truncating them (truncation is what mislabeled "ρομπότ" as a
+positive on 2026-07-25), so it would silently never reach training.
 
 Usage:
     python3 record_real.py --label pos --count 30           # say "Έι ρομπότ"
@@ -27,7 +37,9 @@ import numpy as np
 import sounddevice as sd
 
 SAMPLE_RATE = 16000
-RECORD_SECS = 2.0            # captured window per take
+RECORD_SECS = 2.6            # captured window per take — longer than the model's
+                             # 2.0s window so a slow take is not cut off
+WINDOW_SAMPLES = 32000       # 2.0s: what extract_features.py can actually use
 FRAME = 320                  # 20 ms RMS frames for silence trimming
 PAD = 1600                   # 0.1 s padding kept around voiced region
 DEVICE_HINT = 'XVF3800'      # substring match; overridable with --device
@@ -94,6 +106,9 @@ def main():
     ap.add_argument('--tag', default='', help='optional group tag, e.g. speaker or "mac"')
     ap.add_argument('--channel', type=int, default=4, help='mic channel (4 = XVF3800 ASR beam)')
     ap.add_argument('--device', default=DEVICE_HINT, help='input device name substring or index')
+    ap.add_argument('--secs', type=float, default=RECORD_SECS,
+                    help='capture window per take (default 2.6s; raise it if you '
+                         'want to say the phrase very slowly)')
     args = ap.parse_args()
 
     if args.device.isdigit():
@@ -120,7 +135,7 @@ def main():
     while saved < args.count:
         input(f'[{saved + 1}/{args.count}] Press Enter, then speak after the beep... ')
         beep()
-        rec = sd.rec(int(RECORD_SECS * SAMPLE_RATE), samplerate=SAMPLE_RATE,
+        rec = sd.rec(int(args.secs * SAMPLE_RATE), samplerate=SAMPLE_RATE,
                      channels=dev_ch, dtype='int16', device=dev_idx)
         sd.wait()
         audio = rec[:, ch].copy()
@@ -131,6 +146,9 @@ def main():
         peak = int(np.abs(trimmed).max())
         print(f'  captured {len(trimmed)/SAMPLE_RATE:.2f}s, peak={peak} '
               f'({peak/32768*100:.0f}% FS) — playing back...')
+        if len(trimmed) > WINDOW_SAMPLES:
+            print(f'  ⚠ {len(trimmed)/SAMPLE_RATE:.2f}s > 2.00s — extract_features.py '
+                  f'DROPS this clip. Say it a little faster, or redo.')
         try:
             sd.play(trimmed, SAMPLE_RATE); sd.wait()
         except Exception:

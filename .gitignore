@@ -14,3 +14,4 @@ maps/*.data
 
 # Quantized ONNX model — regenerate via scripts/quantize_yolo.sh
 *.onnx
+training/wake_word_hey_robot/rate_sweep_wav/

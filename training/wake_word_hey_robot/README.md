@@ -68,6 +68,35 @@ longer fires. Held-out eval: positives min 0.609 / mean 0.991, negatives max
 4. `evaluate.py` — sanity-checks `hey_robot.onnx` on held-out manifest clips
    (clean) plus pure noise.
 
+## Speaking rate: measured, and it is not the problem (2026-07-30)
+
+`rate_sweep.py` synthesizes the phrase from -40% to +40% rate and streams each
+clip through the model the way `wake_word_node.py` does (1280-sample chunks,
+score = max over the stream). Two results:
+
+* **Clean TTS is worthless as a test** — all 36 clips score 1.000 regardless of
+  rate. These are the training voices at full volume.
+* Through `augment()` (gain, reverb, mic lowpass, room noise), 83% of clips
+  fire at threshold 0.50 — and the misses do **not** track rate: -40% fires
+  81%, +0% fires 72%, +40% fires 91%. What decides it is level and noise, not
+  speed.
+
+`threshold_sweep.py` then rules out the cheap fix: the model's scores are
+effectively binary (0.000 or 1.000), so from 0.20 to 0.70 the hit rate does not
+move at all (76.5% throughout) while false triggers only creep from 13.9% to
+9.6%. **There is no threshold worth tuning to** — the score distribution has no
+middle for a threshold to cut.
+
+Treat both numbers as a *relative* instrument, not an absolute forecast: they
+apply training-style augmentation to streamed clips, which likely overstates
+both misses and false triggers. They compare models; they do not predict the
+robot's true hit rate.
+
+The remaining lever is real recordings — see below. `record_real.py` now
+captures 2.6s per take (`--secs`) so a slow "Έι ρομπότ" is not cut off, and
+warns when a take exceeds the 2.0s window, since `extract_features.py` drops
+those rather than truncating them.
+
 ## Known limitations / how to improve
 
 - **No real recordings**: all training data is synthetic TTS. Real speech
