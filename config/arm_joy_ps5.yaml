@@ -49,3 +49,28 @@ arm_joy:
     # go instead of letting it coast on to a target that sprinted away.
     # Raise it for snappier response, lower it if the arm overshoots.
     max_lead: 0.35      # rad
+
+    # ── Usable envelope, [lo, hi] radians ────────────────────────────────
+    # MEASURED 2026-07-31, not taken from the wiki: the user cut servo torque
+    # (T:210 cmd:0) and walked the arm by hand through the range they want it
+    # to have, while every joint angle was recorded at 20 Hz (3212 samples).
+    # These are those extremes pulled 2 deg inward, so a commanded move never
+    # sits exactly on a hand-forced end stop.
+    #
+    # ‼️ Keep these identical to arm_driver's limit_* (bringup.launch.py). This
+    # node stops the jog integrator winding past the limit; the driver is what
+    # actually refuses the command. Out of sync, the stick would keep pushing
+    # against a wall the driver silently clamps.
+    #
+    # Measured raw extremes, for reference when retuning:
+    #   base     -174.7 .. +2.9 deg      shoulder  -81.5 .. +96.9 deg
+    #   elbow      +6.1 .. +178.4 deg    wrist     -67.5 .. +82.6 deg
+    #   roll      -68.7 .. +80.6 deg
+    # ‼️ The shoulder reached +96.9 deg by hand, past the +90 deg the Waveshare
+    # wiki gives as its stop, so the hi end is capped at the documented 1.57
+    # rather than the measured 1.69 — driving a servo past its own limit is a
+    # different risk from backdriving it there.
+    limit_base:     [-3.015, 0.016]
+    limit_shoulder: [-1.387, 1.570]
+    limit_elbow:    [0.141, 3.079]
+    limit_wrist:    [-1.143, 1.407]

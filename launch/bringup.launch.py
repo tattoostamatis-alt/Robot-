@@ -914,7 +914,19 @@ def generate_launch_description():
         package='home_robot',
         executable='arm_driver.py',
         name='arm_driver',
-        parameters=[{'port': arm_port}],
+        parameters=[{
+            'port': arm_port,
+            # Usable envelope — MEASURED by hand 2026-07-31 with the servo
+            # torque off, not taken from the wiki. ‼️ These must stay identical
+            # to config/arm_joy_ps5.yaml's limit_*: arm_joy stops the jog
+            # integrator, this node is what refuses the command. See that file
+            # for the raw extremes and why the shoulder is capped at 1.57.
+            'limit_base':     [-3.015, 0.016],
+            'limit_shoulder': [-1.387, 1.570],
+            'limit_elbow':    [0.141, 3.079],
+            'limit_wrist':    [-1.143, 1.407],
+            'limit_roll':     [-1.165, 1.372],
+        }],
         output='screen',
         condition=IfCondition(use_arm),
     )
