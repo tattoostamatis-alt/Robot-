@@ -185,6 +185,44 @@ class GlobalLocalizerNode(Node):
         self.declare_parameter('wait_for_depth', True)
         self.declare_parameter('depth_timeout',  8.0)  # seconds
 
+        # ── watchdog: keep the red scan glued to the walls, for good ──────
+        # One-shot localization at startup is not enough. AMCL only corrects
+        # while the robot DRIVES (no odometry motion => no resampling), so a
+        # pose that lands 0.2-0.4 m off just sits there being wrong, which is
+        # exactly what "οι κόκκινες γραμμές είναι λάθος" looks like in RViz.
+        # This timer re-measures the live scan against the map and snaps the
+        # pose back onto the walls by itself, without anyone pressing 2D Pose
+        # Estimate. Only ever acts on a STATIONARY robot: mid-drive the scan
+        # and the TF are from slightly different instants, and a correction
+        # published under a running Nav2 goal would yank the path sideways.
+        self.declare_parameter('watchdog', True)
+        self.declare_parameter('watchdog_period', 5.0)     # s between checks
+        # Above this median scan->wall error the pose is worth nudging. Measured
+        # in the flat 2026-07-31: a pose that still had 0.20 m of slack in it
+        # scored 0.071 m, and a perfect alignment scores ~0.00 (the distance
+        # field is zero AT the wall cells), so 0.12 was lax enough to leave
+        # visibly-off red lines sitting there. watchdog_min_gain, not this
+        # threshold, is what stops pointless corrections.
+        self.declare_parameter('watchdog_max_err', 0.06)   # m
+        # Only republish if the local search actually buys this much accuracy,
+        # so we don't reset AMCL's particles for a third decimal place.
+        self.declare_parameter('watchdog_min_gain', 0.03)  # m
+        # A snap is a correction, not a teleport: anything bigger than this is
+        # a different hypothesis and belongs to the full global search.
+        self.declare_parameter('watchdog_max_shift', 0.50) # m
+        # Sustained error this large means genuinely lost (carried to another
+        # room), so search the whole map instead of nudging.
+        self.declare_parameter('watchdog_lost_err', 0.30)  # m
+        self.declare_parameter('watchdog_lost_strikes', 3)
+        self.declare_parameter('watchdog_cooldown', 20.0)  # s after any action
+        self._wd_last_pose:  tuple | None = None   # last laser pose seen
+        self._wd_strikes = 0
+        self._wd_next_ok = 0.0      # monotonic time the watchdog may act again
+        self._wd_backoff = 0.0      # grows when a snap fails to help
+        if self.get_parameter('watchdog').value:
+            self.create_timer(self.get_parameter('watchdog_period').value,
+                              self._watchdog)
+
         latch = QoSProfile(
             depth=1,
             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
@@ -485,29 +523,132 @@ class GlobalLocalizerNode(Node):
         return median_err
 
     def _refine(self, lidar: np.ndarray, lx: float, ly: float, lyaw: float,
-                map_msg: OccupancyGrid) -> tuple[float, float, float]:
+                map_msg: OccupancyGrid, span: float = 0.4, step: float = 0.04,
+                ang: int = 8, quiet: bool = False):
         """Local grid search that minimises median scan->wall distance.
 
-        Refines a laser-frame pose (lx, ly, lyaw) over ±0.4 m / ±8° using a
+        Refines a laser-frame pose (lx, ly, lyaw) over ±span m / ±ang° using a
         distance-to-wall field, so the published pose is metric-accurate
-        rather than just FFT-pixel-accurate."""
+        rather than just FFT-pixel-accurate. The watchdog calls this on a
+        coarser grid (and quietly) because it runs every few seconds, not once.
+
+        Returns (x, y, yaw) — or (x, y, yaw, err) when quiet, since the caller
+        then needs the score to decide whether the nudge is worth publishing.
+        """
         if lidar.shape[0] < 50:
-            return lx, ly, lyaw
+            return (lx, ly, lyaw, 9.9) if quiet else (lx, ly, lyaw)
         median_err = self._wall_err_fn(lidar, map_msg)
 
         best = (median_err(lx, ly, lyaw), lx, ly, lyaw)
-        for dx in np.arange(-0.4, 0.41, 0.04):
-            for dy in np.arange(-0.4, 0.41, 0.04):
-                for dth in range(-8, 9):
+        for dx in np.arange(-span, span + 1e-9, step):
+            for dy in np.arange(-span, span + 1e-9, step):
+                for dth in range(-ang, ang + 1):
                     yaw = lyaw + math.radians(dth)
                     err = median_err(lx + dx, ly + dy, yaw)
                     if err < best[0]:
                         best = (err, lx + dx, ly + dy, yaw)
+        if quiet:
+            return best[1], best[2], best[3], best[0]
         self.get_logger().info(
             f'  refined: median scan->wall {best[0]:.3f} m '
             f'(shifted {math.hypot(best[1] - lx, best[2] - ly):.2f} m, '
             f'{math.degrees(best[3] - lyaw):+.0f}°)')
         return best[1], best[2], best[3]
+
+    # ── watchdog ───────────────────────────────────────────────────
+
+    def _live_laser_pose(self):
+        """Where AMCL currently thinks the laser is, from TF. None if unknown."""
+        try:
+            tf = self._tf_buffer.lookup_transform('map', 'laser', rclpy.time.Time())
+        except Exception:
+            return None
+        t, q = tf.transform.translation, tf.transform.rotation
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                         1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        return t.x, t.y, yaw
+
+    def _watchdog(self):
+        """Periodically re-fit the live scan to the map and correct the pose."""
+        if self._running:
+            return
+        import time
+        now = time.monotonic()
+        if now < self._wd_next_ok:
+            return
+
+        with self._lock:
+            scan, map_msg = self._scan, self._map
+        if scan is None or map_msg is None:
+            return
+        pose = self._live_laser_pose()
+        if pose is None:
+            return
+        lx, ly, lyaw = pose
+
+        # Stationary only. Also the natural place to act: the robot has just
+        # finished a goal / is parked, which is when the user is looking at RViz.
+        prev, self._wd_last_pose = self._wd_last_pose, pose
+        if prev is None:
+            return
+        if (math.hypot(lx - prev[0], ly - prev[1]) > 0.02
+                or abs(_wrap(lyaw - prev[2])) > math.radians(1.0)):
+            self._wd_strikes = 0        # moving: AMCL is correcting itself
+            self._wd_backoff = 0.0
+            return
+
+        lidar = _lidar_pts(scan)
+        if lidar.shape[0] < 50:
+            return
+        err = self._wall_err_fn(lidar, map_msg)(lx, ly, lyaw)
+
+        if err <= self.get_parameter('watchdog_max_err').value:
+            self._wd_strikes = 0
+            self._wd_backoff = 0.0
+            return
+
+        # Sustained gross error => not a drift, a wrong hypothesis. Search all.
+        # This band RETURNS either way: a ±0.3 m nudge cannot reach the right
+        # room, and applying one anyway would both corrupt the prior the global
+        # search tie-breaks on and start a cooldown, so the strikes needed to
+        # escalate could never accumulate — the robot would stay lost, nudging
+        # itself sideways every 20 s.
+        if err >= self.get_parameter('watchdog_lost_err').value:
+            self._wd_strikes += 1
+            if self._wd_strikes >= self.get_parameter('watchdog_lost_strikes').value:
+                self.get_logger().warn(
+                    f'Watchdog: scan->wall {err:.2f} m for '
+                    f'{self._wd_strikes} checks — robot looks lost, '
+                    're-running global localization')
+                self._wd_strikes = 0
+                self._wd_next_ok = now + self.get_parameter('watchdog_cooldown').value
+                threading.Thread(target=self._run, daemon=True).start()
+            return
+        self._wd_strikes = 0
+
+        # Drifted a little: snap it back onto the walls.
+        nx, ny, nyaw, nerr = self._refine(lidar, lx, ly, lyaw, map_msg,
+                                          span=0.30, step=0.05, ang=6, quiet=True)
+        shift = math.hypot(nx - lx, ny - ly)
+        gain  = err - nerr
+        cooldown = self.get_parameter('watchdog_cooldown').value
+        if (gain < self.get_parameter('watchdog_min_gain').value
+                or shift > self.get_parameter('watchdog_max_shift').value):
+            # Nothing better nearby — the error is furniture/clutter the map
+            # doesn't have, not a bad pose. Back off so we stop burning CPU on
+            # a scene that will not improve until something actually moves.
+            self._wd_backoff = min(max(self._wd_backoff * 2.0, cooldown), 300.0)
+            self._wd_next_ok = now + self._wd_backoff
+            return
+
+        bx, by, byaw = self._laser_to_base(nx, ny, nyaw)
+        self.get_logger().info(
+            f'Watchdog: scan->wall {err:.2f} -> {nerr:.2f} m — nudging pose '
+            f'{shift:.2f} m, {math.degrees(_wrap(nyaw - lyaw)):+.0f}°')
+        self._publish(bx, by, byaw, tight=True)
+        self._wd_backoff = 0.0
+        self._wd_next_ok = now + cooldown
+        self._wd_last_pose = None      # pose jumped; re-baseline next tick
 
     def _run(self):
         if self._running:
@@ -654,7 +795,7 @@ class GlobalLocalizerNode(Node):
         finally:
             self._running = False
 
-    def _publish(self, x: float, y: float, yaw: float):
+    def _publish(self, x: float, y: float, yaw: float, tight: bool = False):
         msg = PoseWithCovarianceStamped()
         msg.header.stamp    = self.get_clock().now().to_msg()
         msg.header.frame_id = 'map'
@@ -663,6 +804,15 @@ class GlobalLocalizerNode(Node):
         qz, qw = _quat(yaw)
         msg.pose.pose.orientation.z = qz
         msg.pose.pose.orientation.w = qw
+        if tight:
+            # A watchdog nudge is a small measured correction of a pose AMCL
+            # already agrees with, so it must not blow the particle cloud back
+            # open — that would undo the very convergence it is protecting.
+            msg.pose.covariance[0]  = 0.05
+            msg.pose.covariance[7]  = 0.05
+            msg.pose.covariance[35] = 0.02
+            self._pub.publish(msg)
+            return
         # Conservative uncertainty — scan matching ≈ ±0.5m / ±10°
         msg.pose.covariance[0]  = 0.5    # x  [m²]
         msg.pose.covariance[7]  = 0.5    # y  [m²]
