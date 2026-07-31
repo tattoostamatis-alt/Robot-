@@ -87,6 +87,14 @@ def _launch_setup(context, *args, **kwargs):
             'use_prediction':      perc,      # /predicted_obstacles costmap layer
             'use_semantic_costmap': perc,     # /semantic_obstacles costmap layer
             'use_object_memory':   perc,      # remembers where objects are (map frame)
+            # Without this the LLM's "Τρέχουσα κατάσταση" block only ever holds
+            # the clock: no room, no battery, and no nearby-object distances.
+            # That is why "πόση απόσταση έχει;" answered "δεν ξέρω" on
+            # 2026-07-30 — the node was never started, on any flag combination,
+            # because this argument was simply not forwarded (bringup defaults
+            # it to false). It only consumes topics, so it costs nothing beyond
+            # the detections use_perception already pays for.
+            'use_situational':     perc,      # fills the LLM's situation context
             # Docking is a mission (navigate to the handover point in front of
             # the base, relocalize on the tag above it, then hand over to IR
             # homing), and this is the launch `robot max` uses — with the
