@@ -60,15 +60,19 @@ from sensor_msgs.msg import Joy, JointState
 from std_msgs.msg import Bool, Float32
 
 
-# Mirrors arm_driver.JOINT_LIMITS. Duplicated rather than imported because the
+# Mirrors arm_driver.MECH_LIMITS. Duplicated rather than imported because the
 # nodes are installed as standalone scripts, not as an importable module.
-JOINT_LIMITS = {
+# These are the SERVO's limits; the usable envelope is the limit_* parameters,
+# which must match arm_driver's or the jog would stop somewhere the driver
+# still allows (or worse, keep pushing at a wall the driver clamps at).
+MECH_LIMITS = {
     'base':     (-3.14, 3.14),
     'shoulder': (-1.57, 1.57),
     'elbow':    (0.0, 3.14),    # reach: this is the joint that extends forward
     'wrist':    (-1.57, 1.57),
     'hand':     (1.08, 3.14),   # 1.08 = open, 3.14 = closed
 }
+JOINT_LIMITS = MECH_LIMITS      # backwards-compatible alias
 
 # joint -> (axis parameter default, rad/s default). Order fixes the order of
 # names/positions in the published JointState. An axis of -1 unbinds a joint.
@@ -83,12 +87,30 @@ JOG_SPECS = (
 JOG_JOINTS = tuple(spec[0] for spec in JOG_SPECS)
 
 
-def _clamp(name, value):
-    lo, hi = JOINT_LIMITS[name]
+def _clamp(name, value, limits=None):
+    lo, hi = (limits or MECH_LIMITS)[name]
     return max(lo, min(hi, value))
 
 
 class ArmJoy(Node):
+
+    def limits(self):
+        """Live {joint: (lo, hi)}, never wider than the servo can travel.
+
+        Read fresh rather than cached so limits can be tightened with the arm
+        in front of you and take effect on the next 20 Hz tick.
+        """
+        out = {}
+        for name, (lo_m, hi_m) in MECH_LIMITS.items():
+            try:
+                v = list(self.get_parameter(f'limit_{name}').value)
+                lo, hi = float(v[0]), float(v[1])
+                if lo > hi:
+                    lo, hi = hi, lo
+            except Exception:
+                lo, hi = lo_m, hi_m
+            out[name] = (max(lo, lo_m), min(hi, hi_m))
+        return out
 
     def __init__(self):
         super().__init__('arm_joy')
@@ -121,6 +143,16 @@ class ArmJoy(Node):
         # still travelling to a target well past where it was asked to stop.
         # Matters more the faster the scales get.
         self.declare_parameter('max_lead', 0.35)        # rad
+        # Usable envelope per joint, [lo, hi] radians — the answer to "stop the
+        # arm going wherever it likes". Defaults to the full servo travel, which
+        # is deliberately NOT a safe envelope on this robot: most of that range
+        # swings the arm into the chassis, the D435 or the LiDAR scan plane.
+        # Tighten each one against the real arm, live:
+        #     ros2 param set /arm_joy limit_shoulder "[-0.60, 1.20]"
+        # ‼️ Set the SAME value on /arm_driver — this node stops the integrator
+        # winding up, the driver is the one that refuses the command.
+        for _j, (_lo, _hi) in MECH_LIMITS.items():
+            self.declare_parameter(f'limit_{_j}', [float(_lo), float(_hi)])
 
         self._read_scales()
         self.btn_open = self.get_parameter('gripper_open_button').value
@@ -259,14 +291,15 @@ class ArmJoy(Node):
         pos = dict(zip(msg.name, msg.position))
 
         if self._grip is None and 'hand' in pos:
-            self._grip = _clamp('hand', pos['hand'])
+            self._grip = _clamp('hand', pos['hand'], self.limits())
 
         # Seed the integrator once, then leave it alone: re-seeding from
         # feedback every message would fight the open-loop integration.
         if self._target is None:
             jogged = [joint for joint, _, _ in self.jog]
             if all(j in pos for j in jogged):
-                self._target = {j: _clamp(j, pos[j]) for j in jogged}
+                lim = self.limits()
+                self._target = {j: _clamp(j, pos[j], lim) for j in jogged}
                 where = ' '.join(f'{j}={self._target[j]:.2f}' for j in jogged)
                 self.get_logger().info(f'Arm pose acquired ({where}) — stick is live.')
             return
@@ -280,7 +313,8 @@ class ArmJoy(Node):
             if abs(lead) > self.max_lead:
                 self._target[joint] = _clamp(
                     joint,
-                    actual + self.max_lead * (1.0 if lead > 0 else -1.0))
+                    actual + self.max_lead * (1.0 if lead > 0 else -1.0),
+                    self.limits())
 
     def _estop_cb(self, msg: Bool):
         if msg.data and not self._estopped:
@@ -319,10 +353,12 @@ class ArmJoy(Node):
         moving = any(v != 0.0 for v in self._axes.values())
 
         if moving:
+            lim = self.limits()
             for joint, _, scale in self.jog:
                 self._target[joint] = _clamp(
                     joint,
-                    self._target[joint] + self._axes[joint] * scale * self._dt)
+                    self._target[joint] + self._axes[joint] * scale * self._dt,
+                    lim)
         elif not self._moving:
             # Idle and already settled — stay off the serial link so the
             # driver's 10 Hz feedback polling isn't competing with us.
@@ -341,7 +377,8 @@ class ArmJoy(Node):
     def _jog_gripper(self):
         if not self._grip_dir or self._grip is None:
             return
-        new = _clamp('hand', self._grip + self._grip_dir * self.scale_gripper * self._dt)
+        new = _clamp('hand', self._grip + self._grip_dir * self.scale_gripper * self._dt,
+                     self.limits())
         if new != self._grip:
             self._grip = new
             self.grip_pub.publish(Float32(data=new))

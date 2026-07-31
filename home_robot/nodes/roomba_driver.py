@@ -289,15 +289,27 @@ class RoombaDriver(Node):
         # was doing beforehand. 2026-07-29, user: "turn more gently".
         # 0 disables it and restores the raw commanded rate.
         self.declare_parameter('max_angular_accel', 2.5)   # rad/s^2
-        # OI mode we drive in. 'safe' (default, 2026-07-28 at the user's
-        # request) keeps the Roomba's own protections live: it aborts motion by
-        # itself on a cliff, a lifted wheel, or the charger. 'full' disables all
-        # of that and lets us drive off a step.
-        # ‼️ The trade-off is real: those same protections drop the robot back to
-        # PASSIVE, where it ignores drive commands until _connect_oi() runs
-        # again. Docking is the known case — touching the charging contacts
-        # ends Safe mode.
-        self.declare_parameter('oi_mode', 'safe')
+        # OI mode we drive in. 'full' (default since 2026-07-31, at the user's
+        # request: "να μην μπαίνει ποτέ για ύπνο"). Safe keeps the Roomba's own
+        # cliff/wheel-drop/charger aborts live, but every one of those aborts
+        # DROPS THE ROBOT TO PASSIVE — and Passive is where the 5-minute sleep
+        # timer lives, so the protections were themselves the thing putting the
+        # robot to sleep mid-session. Full never demotes, so it never sleeps.
+        # ‼️ Full disables those aborts in the Roomba, so they are reimplemented
+        # here in software (cliff_stop / wheel_drop_stop below) off the same
+        # 20 Hz sensor read the bumper already uses. Set oi_mode:='safe' to hand
+        # the job back to the firmware.
+        self.declare_parameter('oi_mode', 'full')
+        # Software replacements for what Full mode switches off. These are NOT
+        # optional decoration: without them 'full' means the robot will happily
+        # drive down a step. Cliff = packets 9-12, wheel drop = packet 7 bits
+        # 2/3, both riding the existing encoder query (4 extra bytes, no extra
+        # serial transaction).
+        self.declare_parameter('cliff_stop', True)
+        self.declare_parameter('wheel_drop_stop', True)
+        # How long forward stays blocked after a cliff clears, same idea as
+        # bump_block_s: stops the robot nosing straight back over the edge.
+        self.declare_parameter('cliff_block_s', 1.5)
         # Bumper protection. HW-verified 2026-07-28: packet 7 reports [1, 3] and
         # the light bumper (45) reports too — despite the stale comment in
         # obstacle_safety_node claiming this robot has no bump sensors. Nothing
@@ -337,6 +349,14 @@ class RoombaDriver(Node):
         self._bump = False
         self._bump_warned = False
         self._last_bump_time = 0.0
+        self.cliff_stop = self.get_parameter('cliff_stop').value
+        self.wheel_drop_stop = self.get_parameter('wheel_drop_stop').value
+        self.cliff_block_s = self.get_parameter('cliff_block_s').value
+        self._cliff = False
+        self._cliff_warned = False
+        self._last_cliff_time = 0.0
+        self._wheel_drop = False
+        self._wheel_drop_warned = False
         self.oi_mode = str(self.get_parameter('oi_mode').value).lower()
         if self.oi_mode not in ('safe', 'full'):
             self.get_logger().warn(
@@ -592,6 +612,34 @@ class RoombaDriver(Node):
         elif self._bump_warned:
             self._bump_warned = False
             self.get_logger().info('Bumper clear')
+
+        # Cliff: in Full mode the Roomba will drive off a step without this.
+        # Blocks FORWARD only — reverse is exactly how the robot backs away
+        # from an edge, so taking that away would strand it on the lip.
+        if self.cliff_stop and (now - self._last_cliff_time) < self.cliff_block_s:
+            if target_left > 0 and target_right > 0:
+                target_left = target_right = 0.0
+                if not self._cliff_warned:
+                    self._cliff_warned = True
+                    self.get_logger().warn(
+                        'ΓΚΡΕΜΟΣ — μπλοκάρω την εμπρόσθια κίνηση (όπισθεν ελεύθερη)')
+        elif self._cliff_warned:
+            self._cliff_warned = False
+            self.get_logger().info('Cliff clear')
+
+        # Wheel drop: the robot has been picked up, or a wheel is over an edge.
+        # Unlike the cliff this stops motion in EVERY direction — there is no
+        # safe way to keep driving a robot that is not on the floor, and Safe
+        # mode used to enforce exactly that (by dropping to Passive, which is
+        # what put it to sleep).
+        if self.wheel_drop_stop and self._wheel_drop:
+            target_left = target_right = 0.0
+            if not self._wheel_drop_warned:
+                self._wheel_drop_warned = True
+                self.get_logger().warn('Τροχός στον αέρα — σταματώ εντελώς')
+        elif self._wheel_drop_warned and not self._wheel_drop:
+            self._wheel_drop_warned = False
+            self.get_logger().info('Wheels back on the floor')
 
         step_left = self._ramp_step(self._cur_left, target_left, dt)
         step_right = self._ramp_step(self._cur_right, target_right, dt)
@@ -1039,19 +1087,29 @@ class RoombaDriver(Node):
         for attempt in range(3):
             try:
                 self.bot.SCI.ser.reset_input_buffer()
-                self.bot.SCI.write(149, (3, 43, 44, 7))  # encoders + bumps
+                # encoders + bumps/wheel-drops + the four cliff sensors. The
+                # cliffs are here rather than in a poll of their own for the
+                # same reason packet 7 is: one extra byte each on a round trip
+                # we already make every 50 ms, versus a second serial
+                # transaction at 20 Hz that would starve odometry.
+                self.bot.SCI.write(149, (7, 43, 44, 7, 9, 10, 11, 12))
                 # No fixed post-write sleep needed: _RawTermiosSerial.read()
-                # blocks (up to its timeout) until all 5 bytes have arrived, so
+                # blocks (up to its timeout) until all 9 bytes have arrived, so
                 # it no longer races the FTDI latency timer.
-                data = self.bot.SCI.read(5)
-                if len(data) != 5:
-                    raise Exception(f'Encoder data not 5 bytes long, it is: {len(data)}')
-                left, right, bumps = struct.unpack('>hhB', data)
-                # bit0 = bump right, bit1 = bump left (bits 2/3 are wheel drops,
-                # which Safe mode already handles by dropping to Passive).
+                data = self.bot.SCI.read(9)
+                if len(data) != 9:
+                    raise Exception(f'Encoder data not 9 bytes long, it is: {len(data)}')
+                left, right, bumps, cl, cfl, cfr, cr = struct.unpack('>hhBBBBB', data)
+                # bit0 = bump right, bit1 = bump left, bits 2/3 = wheel drops.
+                # In Full mode the Roomba no longer acts on the drops itself, so
+                # they are read here instead of being masked off.
                 self._bump = bool(bumps & 0x03)
+                self._wheel_drop = bool(bumps & 0x0C)
+                self._cliff = bool(cl or cfl or cfr or cr)
                 if self._bump:
                     self._last_bump_time = time.monotonic()
+                if self._cliff:
+                    self._last_cliff_time = time.monotonic()
                 result = (left, right)
                 self._last_ok_time = time.monotonic()
                 return result

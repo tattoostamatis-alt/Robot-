@@ -55,7 +55,12 @@ FEEDBACK_JOINT_KEYS = {
     'wrist': 't', 'roll': 'r', 'hand': 'g',
 }
 
-JOINT_LIMITS = {
+# MECHANICAL limits, from the Waveshare wiki — what the servos can physically
+# reach. These are NOT the limits to drive against: the arm is mounted on a
+# moving robot next to the LiDAR, so most of that range points it into the
+# chassis, the camera or the scan plane. The usable envelope is the `limit_*`
+# parameters below, which start here and are meant to be tightened per joint.
+MECH_LIMITS = {
     'base':     (-3.14, 3.14),
     'shoulder': (-1.57, 1.57),
     'elbow':    (0.0, 3.14),
@@ -63,11 +68,8 @@ JOINT_LIMITS = {
     'roll':     (-3.14, 3.14),
     'hand':     (1.08, 3.14),
 }
-
-
-def _clamp(name, value):
-    lo, hi = JOINT_LIMITS[name]
-    return max(lo, min(hi, value))
+# Kept for anything still importing the old name (arm_joy reads its own params).
+JOINT_LIMITS = MECH_LIMITS
 
 
 class ArmDriver(Node):
@@ -80,6 +82,13 @@ class ArmDriver(Node):
         # spd/acc as used in the Waveshare T:102/T:106 examples.
         self.declare_parameter('speed', 0)     # steps/s, 0 = firmware default
         self.declare_parameter('accel', 10)    # 0-254, in 100 steps/s^2
+        # Per-joint usable envelope, [lo, hi] radians. Read on EVERY clamp, not
+        # cached at startup, so limits can be tuned against the real arm live:
+        #     ros2 param set /arm_driver limit_shoulder "[-0.6, 1.2]"
+        # A limit is never allowed outside MECH_LIMITS — a typo that widens the
+        # range past the servo's travel would grind the joint against its stop.
+        for _j, (_lo, _hi) in MECH_LIMITS.items():
+            self.declare_parameter(f'limit_{_j}', [float(_lo), float(_hi)])
 
         port = self.get_parameter('port').value
         baud = self.get_parameter('baud').value
@@ -97,6 +106,7 @@ class ArmDriver(Node):
         # un-commanded joints to a guessed value.
         self._current_joints = None
         self._feedback_format_warned = False
+        self._limit_warned = set()
 
         # ── Subscriptions ─────────────────────────────────────────
         self.joint_cmd_sub = self.create_subscription(
@@ -134,14 +144,41 @@ class ArmDriver(Node):
             if name not in JOINT_LIMITS:
                 self.get_logger().warn(f'Unknown joint "{name}" in arm/joint_cmd, ignored')
                 continue
-            target[name] = _clamp(name, pos)
+            target[name] = self._clamp(name, pos)
 
         cmd = {'T': 102, **{name: target[name] for name in self.joint_names},
                'spd': self.speed, 'acc': self.accel}
         self._send_json(cmd)
 
+    def limits(self, name):
+        """The live [lo, hi] for a joint, never wider than the servo's travel.
+
+        Read fresh on every call so `ros2 param set` takes effect on the next
+        command — tightening a limit is something you do WITH the arm in front
+        of you, and a restart mid-way loses the pose you were measuring.
+        """
+        lo_m, hi_m = MECH_LIMITS[name]
+        try:
+            v = list(self.get_parameter(f'limit_{name}').value)
+            lo, hi = float(v[0]), float(v[1])
+        except Exception:
+            return lo_m, hi_m
+        if lo > hi:
+            lo, hi = hi, lo
+        clipped = (max(lo, lo_m), min(hi, hi_m))
+        if (lo, hi) != clipped and name not in self._limit_warned:
+            self._limit_warned.add(name)
+            self.get_logger().warn(
+                f'limit_{name}={[lo, hi]} reaches past the servo travel '
+                f'{[lo_m, hi_m]} — using the mechanical limit instead')
+        return clipped
+
+    def _clamp(self, name, value):
+        lo, hi = self.limits(name)
+        return max(lo, min(hi, value))
+
     def _gripper_cb(self, msg: Float32):
-        pos = _clamp('hand', msg.data)
+        pos = self._clamp('hand', msg.data)
         self._send_json({'T': 106, 'cmd': pos, 'spd': self.speed, 'acc': self.accel})
         if self._current_joints is not None:
             self._current_joints['hand'] = pos
