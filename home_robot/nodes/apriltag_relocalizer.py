@@ -91,6 +91,14 @@ class AprilTagRelocalizer(Node):
         # without a service call. Throttled so it can't reset AMCL every frame.
         self.auto_seed_interval = float(
             self.declare_parameter('auto_seed_interval', 8.0).value)
+        # A periodic auto-seed only fires when the tag DISAGREES with the pose
+        # by at least this much. Below it, re-seeding costs an AMCL filter reset
+        # and buys nothing but the tag's own jitter. An explicit ~/relocalize
+        # ignores both thresholds — asking for it means you want it applied.
+        self.auto_seed_min_shift = float(
+            self.declare_parameter('auto_seed_min_shift', 0.25).value)   # m
+        self.auto_seed_min_yaw = float(
+            self.declare_parameter('auto_seed_min_yaw', 8.0).value)      # deg
         default_calib = os.path.expanduser('~/.ros/saloni_tag_map_pose.yaml')
         self.calib_file = self.declare_parameter('calib_file', default_calib).value
 
@@ -143,16 +151,43 @@ class AprilTagRelocalizer(Node):
                 fire = not self.seeded                       # once per session
             else:
                 fire = (now - self._last_seed) >= self.auto_seed_interval
-        if fire and self._publish_initialpose():
+        # An explicit ~/relocalize (force_once) always publishes; a periodic
+        # auto-seed only does when it would actually change something.
+        forced = self.force_once
+        if fire and self._publish_initialpose(forced=forced):
             self.seeded = True
             self.force_once = False
+            self._last_seed = now
+        elif fire:
+            # Gated or failed — still restart the interval, or a robot parked in
+            # front of the tag re-evaluates on every single detection frame.
             self._last_seed = now
 
     def _lookup(self, target, source):
         return self.tf_buffer.lookup_transform(target, source, Time(),
                                                timeout=Duration(seconds=0.3))
 
-    def _publish_initialpose(self):
+    def _pose_delta(self, m_map_base):
+        """How far the tag's answer is from where the robot thinks it is.
+
+        Returns (shift_m, yaw_deg), or None when the current pose is unknown
+        (no map->base_link yet — then there is nothing to compare and the seed
+        should go ahead).
+        """
+        try:
+            cur = self._lookup(self.map_frame, self.base_frame)
+        except Exception:  # noqa: BLE001
+            return None
+        dx = float(m_map_base[0, 3]) - cur.transform.translation.x
+        dy = float(m_map_base[1, 3]) - cur.transform.translation.y
+        q = cur.transform.rotation
+        cur_yaw = math.atan2(2 * (q.w * q.z + q.x * q.y),
+                             1 - 2 * (q.y * q.y + q.z * q.z))
+        new_yaw = math.atan2(m_map_base[1, 0], m_map_base[0, 0])
+        dyaw = math.atan2(math.sin(new_yaw - cur_yaw), math.cos(new_yaw - cur_yaw))
+        return math.hypot(dx, dy), abs(math.degrees(dyaw))
+
+    def _publish_initialpose(self, forced: bool = True):
         if self.map_tag is None:
             self.get_logger().warn("Tag seen but not calibrated - call ~/calibrate_tag "
                                    "while correctly localized first.")
@@ -165,6 +200,24 @@ class AprilTagRelocalizer(Node):
             self.get_logger().warn(f"TF {self.tag_frame}->{self.base_frame} failed: {e}")
             return False
         m_map_base = self.map_tag @ tf_to_mat(t_tag_base)
+
+        # Don't re-seed a pose that is already right. Measured 2026-07-31 with
+        # the robot PARKED in front of the tag: consecutive tag fixes wandered
+        # over 16 deg of yaw, and each one reset AMCL's filter, so the laser
+        # scan visibly swung off the walls every 8 s. Worse, it fought the
+        # localization watchdog — watchdog snapped the scan onto the walls,
+        # the tag yanked it back, round and round every cooldown. A periodic
+        # re-lock is only worth its disruption when the pose is actually wrong.
+        if not forced:
+            delta = self._pose_delta(m_map_base)
+            if (delta is not None
+                    and delta[0] <= self.auto_seed_min_shift
+                    and delta[1] <= self.auto_seed_min_yaw):
+                self.get_logger().debug(
+                    f"Tag agrees with the current pose ({delta[0]:.2f} m, "
+                    f"{delta[1]:.1f} deg) — not re-seeding")
+                return False
+
         qx, qy, qz, qw = mat_to_quat(m_map_base)
 
         msg = PoseWithCovarianceStamped()
