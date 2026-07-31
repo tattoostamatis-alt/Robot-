@@ -67,7 +67,7 @@ ROOM_NAMES_EL = {
 # The locative phrase, article included — "στο σαλόνι" but "στην κουζίνα".
 # Kept separate from ROOM_NAMES_EL because the situation context wants the
 # bare noun while a spoken sentence needs the inflected form.
-_ROOM_LOCATIVE_EL = {
+ROOM_LOCATIVE_EL = {
     'saloni':             'στο σαλόνι',
     'kouzina':            'στην κουζίνα',
     'diadromos':          'στον διάδρομο',
@@ -75,6 +75,36 @@ _ROOM_LOCATIVE_EL = {
     'domatio tou max':    'στο δωμάτιο του Μαξ',
     'domatio tou mbamba': 'στο δωμάτιο του μπαμπά',
 }
+
+# locations.yaml holds poses that are not rooms, and a patrol or a tidy sweep
+# that treated them as rooms would drive the robot at the charger over and
+# over. `dock` is the seated pose on the base and `dock_staging` the handover
+# point in front of it — both charger machinery, neither a place to inspect.
+NON_ROOMS = frozenset({'dock', 'dock_staging'})
+
+
+def rooms_from_locations(locations: dict) -> list:
+    """The visitable rooms of a map, in the order locations.yaml lists them.
+
+    The room set belongs to the map, not to the code: every remap re-teaches
+    it. Hardcoded lists went stale silently — task_planner still asked for
+    'living_room' long after the map had none — so derive it instead.
+    """
+    return [name for name in (locations or {}) if name not in NON_ROOMS]
+
+
+def room_el(room: str) -> str:
+    """Bare Greek noun for a map key: 'kouzina' -> 'κουζίνα'."""
+    return ROOM_NAMES_EL.get(room, room)
+
+
+def room_locative_el(room: str) -> str:
+    """Inflected Greek phrase for a map key: 'kouzina' -> 'στην κουζίνα'.
+
+    Unknown keys fall through with a neutral article: a map with a new room
+    should still get an answer, just a clumsier one.
+    """
+    return ROOM_LOCATIVE_EL.get(room, f'στο {room}')
 
 
 def format_location(room: str) -> str:
@@ -87,9 +117,7 @@ def format_location(room: str) -> str:
     if not room:
         return ('Δεν ξέρω πού βρίσκομαι — ο εντοπισμός δεν είναι ενεργός '
                 'αυτή τη στιγμή.')
-    # Unknown keys fall through with a neutral article: a map with a new room
-    # should still get a location answer, just a clumsier one.
-    return f'Βρίσκομαι {_ROOM_LOCATIVE_EL.get(room, f"στο {room}")}.'
+    return f'Βρίσκομαι {room_locative_el(room)}.'
 
 
 def is_status_query(text: str) -> bool:

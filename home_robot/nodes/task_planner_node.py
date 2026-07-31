@@ -4,8 +4,8 @@ driving Nav2 (NavigateToPose) to named locations and reporting detected
 clutter at each stop on `speech_response`.
 
 Subscribes:
-- `tidy_command` (std_msgs/String, JSON {'room': 'living_room'|'bedroom'|
-  'kitchen'|'all'}) — published by llm_bridge_node's `tidy` tool.
+- `tidy_command` (std_msgs/String, JSON {'room': <a key of locations.yaml>
+  |'all'}) — published by llm_bridge_node's `tidy` tool.
 - `patrol_command` (std_msgs/Bool) — published by llm_bridge_node's `patrol`
   tool. Visits every known room once.
 - `detected_objects` (std_msgs/String, JSON list from object_detector.py),
@@ -42,14 +42,8 @@ from rclpy.action import ActionClient
 from rclpy.node import Node
 from std_msgs.msg import Bool, String
 
-
-ROOM_ORDER = ['living_room', 'bedroom', 'kitchen']
-
-ROOM_NAMES_EL = {
-    'living_room': 'στο σαλόνι',
-    'bedroom': 'στην κρεβατοκάμαρα',
-    'kitchen': 'στην κουζίνα',
-}
+from home_robot.status_query import (room_el, room_locative_el,
+                                     rooms_from_locations)
 
 
 def _yaw_to_quaternion(yaw):
@@ -74,6 +68,7 @@ class TaskPlannerNode(Node):
                                         'config', 'locations.yaml')
         with open(locations_path) as f:
             self.locations = yaml.safe_load(f)
+        self.room_order = rooms_from_locations(self.locations)
 
         self.response_pub = self.create_publisher(String, 'speech_response', 10)
         self.pick_pub = self.create_publisher(String, 'pick_command', 10)
@@ -110,13 +105,13 @@ class TaskPlannerNode(Node):
         except json.JSONDecodeError:
             data = {}
         room = data.get('room', 'all')
-        rooms = ROOM_ORDER if room == 'all' else [room]
+        rooms = self.room_order if room == 'all' else [room]
         self._run(self._tidy_run, rooms)
 
     def _on_patrol(self, msg: Bool):
         if not msg.data:
             return
-        self._run(self._patrol_run, ROOM_ORDER)
+        self._run(self._patrol_run, self.room_order)
 
     def _run(self, target, rooms):
         if not self._busy.acquire(blocking=False):
@@ -144,9 +139,9 @@ class TaskPlannerNode(Node):
 
     def _visit_and_report(self, room):
         loc = self.locations.get(room)
-        room_name = ROOM_NAMES_EL.get(room, room)
+        room_name = room_locative_el(room)
         if loc is None:
-            self._say(f'Δεν ξέρω πού βρίσκεται το δωμάτιο "{room}".')
+            self._say(f'Δεν ξέρω πού βρίσκεται το δωμάτιο {room_el(room)}.')
             return
 
         ok, reason = self._navigate(loc)

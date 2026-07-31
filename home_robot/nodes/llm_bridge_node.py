@@ -42,9 +42,9 @@ from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
 from dotenv import load_dotenv
 from geometry_msgs.msg import Quaternion, Twist
-from home_robot.status_query import (format_location, format_status,
-                                     is_location_query, is_status_query,
-                                     wants_battery)
+from home_robot.status_query import (ROOM_NAMES_EL, format_location,
+                                     format_status, is_location_query,
+                                     is_status_query, wants_battery)
 from home_robot.stop_command import is_stop_command, strip_accents
 from home_robot.tool_router import select_tools
 from home_robot import desktop
@@ -78,7 +78,7 @@ SYSTEM_PROMPT = """Είσαι ο "Max", βοηθός ρομπότ καθαρισ
 
 ΜΗΝ εφευρίσκεις. Αν δεν ξέρεις κάτι για τον εαυτό σου, το σπίτι ή τον λόγο που κάτι πήγε στραβά, πες "δεν ξέρω" — μην μαντεύεις αιτίες.
 
-Τα δωμάτια είναι ΜΟΝΟ αυτά· στα tools γράψε το greeklish, στην ομιλία πες το ελληνικό: saloni=σαλόνι, kouzina=κουζίνα, diadromos=διάδρομος, toualeta=τουαλέτα, domatio tou max=δωμάτιο του Μαξ, domatio tou mbamba=δωμάτιο του μπαμπά.
+Τα δωμάτια είναι ΜΟΝΟ αυτά· στα tools γράψε το greeklish, στην ομιλία πες το ελληνικό: {rooms}.
 
 Κάλεσε tool όταν ο χρήστης ζητάει ενέργεια (κίνηση, καθαρισμό, docking, εξερεύνηση, αναφορά αντικειμένων, πιάσιμο αντικειμένου με τον βραχίονα, να σε ακολουθήσει) ή ρωτάει κατάσταση/μπαταρία. Αν απλώς συζητά, απάντα χωρίς tool.
 
@@ -87,6 +87,12 @@ SYSTEM_PROMPT = """Είσαι ο "Max", βοηθός ρομπότ καθαρισ
 Αν η ερώτηση αφορά την εικόνα, η περιγραφή της κάμερας συνοδεύει ήδη το μήνυμα.
 
 Στα "Κοντινά αντικείμενα" το `label@1.2m` σημαίνει ότι το αντικείμενο απέχει 1.2 μέτρα από σένα. Τα labels είναι αγγλικά — πες τα στα Ελληνικά (person=άτομο, chair=καρέκλα, bottle=μπουκάλι, cup=κούπα, couch=καναπές, tv=τηλεόραση). Όταν λες τι βλέπεις, ΠΡΟΣΘΕΣΕ την απόσταση αν υπάρχει: "βλέπω μια καρέκλα στο 1.2, έναν καναπέ στα 2.4 μέτρα". Αν ένα αντικείμενο ΔΕΝ είναι στη λίστα, μην εφευρίσκεις απόσταση — πες ότι δεν την ξέρεις."""
+
+# The room list is the map's, so spell it out from the shared dict rather than
+# typing it twice: a remap that renames a room must not leave the model naming
+# rooms the map no longer has. (.replace, not .format — the prompt has braces.)
+SYSTEM_PROMPT = SYSTEM_PROMPT.replace(
+    '{rooms}', ', '.join(f'{key}={el}' for key, el in ROOM_NAMES_EL.items()))
 
 # Nudge for the follow-up call, added only when a dispatched tool reported
 # 'started' — i.e. the robot is now moving and has NOT arrived. Without it the
@@ -103,7 +109,8 @@ ACTION_STARTED_NOTE = ('Η ενέργεια ΜΟΛΙΣ ξεκίνησε και �
 _APPS = ['calculator', 'files', 'firefox', 'pdf_viewer', 'terminal',
          'text_editor', 'video_player', 'vscode']
 
-_ROOMS = ['saloni', 'kouzina', 'diadromos', 'toualeta', 'domatio tou max', 'domatio tou mbamba']
+# The map's rooms, from the one dict that is checked against locations.yaml.
+_ROOMS = list(ROOM_NAMES_EL)
 
 TOOLS = [
     {'type': 'function', 'function': {

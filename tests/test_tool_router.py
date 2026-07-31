@@ -13,13 +13,15 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from home_robot.status_query import ROOM_NAMES_EL  # noqa: E402
 from home_robot.tool_router import select_tools  # noqa: E402
 
 # Import the real TOOLS so the tests break if a tool is renamed or added
-# without being routed.
+# without being routed. The room enum is derived from status_query in the
+# node, so seed it here — exec'ing the snippet runs no imports.
 _SRC = (Path(__file__).resolve().parents[1]
         / 'home_robot' / 'nodes' / 'llm_bridge_node.py').read_text()
-_ns = {}
+_ns = {'ROOM_NAMES_EL': ROOM_NAMES_EL}
 exec(compile(  # noqa: S102 - test-only extraction of a module-level constant
     __import__('re').search(r'^_APPS = .*?^\]', _SRC, 8 | 16).group(0)
     + '\n'

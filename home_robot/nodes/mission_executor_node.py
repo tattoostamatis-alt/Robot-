@@ -56,6 +56,7 @@ from std_srvs.srv import Empty
 from home_robot import dock_geometry
 from home_robot.fetch_planner import (approach_pose, memory_target,
                                       nearest_detection, homing_twist)
+from home_robot.status_query import ROOM_NAMES_EL, rooms_from_locations
 
 
 class State(Enum):
@@ -79,18 +80,9 @@ def _load_locations() -> dict:
         return {}
 
 
-LOCATION_NAMES_EL = {
-    'living_room': 'σαλόνι',
-    'bedroom':     'κρεβατοκάμαρα',
-    'kitchen':     'κουζίνα',
-    'dock':        'βάση φόρτισης',
-}
-
-# locations.yaml holds poses that are not rooms, and a patrol or a room sweep
-# that treated them as rooms would drive the robot at the charger over and
-# over. `dock` is the seated pose on the base and `dock_staging` the handover
-# point in front of it — both charger machinery, neither a place to inspect.
-NON_ROOMS = frozenset({'dock', 'dock_staging'})
+# The room names come from status_query so speech is identical wherever it is
+# produced; the dock is not a room but does get spoken about, so add it here.
+LOCATION_NAMES_EL = {**ROOM_NAMES_EL, 'dock': 'βάση φόρτισης'}
 
 CANCEL_PHRASES = {'ακύρωσε', 'ακυρωσε', 'σταμάτα', 'σταματα', 'σταμάτησε', 'σταματησε', 'cancel'}
 
@@ -269,7 +261,7 @@ class MissionExecutorNode(Node):
 
     def _mission_patrol(self):
         self.get_logger().info('Mission: patrol')
-        locs = [n for n in self._locations if n not in NON_ROOMS]
+        locs = rooms_from_locations(self._locations)
         if not locs:
             self._speak('Δεν έχω καταχωρισμένα δωμάτια ακόμα.')
             return
@@ -310,7 +302,7 @@ class MissionExecutorNode(Node):
 
     def _mission_find(self, label: str):
         self.get_logger().info(f'Mission: find "{label}"')
-        locs = [n for n in self._locations if n not in NON_ROOMS]
+        locs = rooms_from_locations(self._locations)
         if not locs:
             self._speak('Δεν έχω καταχωρισμένα δωμάτια.')
             return
@@ -414,7 +406,7 @@ class MissionExecutorNode(Node):
         if t:
             return t
         self._speak('Δεν το έχω στη μνήμη, ψάχνω στα δωμάτια.')
-        for room in [n for n in self._locations if n not in NON_ROOMS]:
+        for room in rooms_from_locations(self._locations):
             if self._cancel_flag.is_set():
                 return None
             if not self._navigate_to(room):
@@ -634,7 +626,7 @@ class MissionExecutorNode(Node):
 
     def _mission_check_rooms(self):
         self.get_logger().info('Mission: check_rooms')
-        locs = [n for n in self._locations if n not in NON_ROOMS]
+        locs = rooms_from_locations(self._locations)
         if not locs:
             self._speak('Δεν έχω δωμάτια.')
             return

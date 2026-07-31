@@ -16,7 +16,12 @@ from home_robot import dock_geometry as dg
 
 PKG = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# The calibrated malou tag, as measured 2026-07-22 (verified to 6.1 mm).
+# Where apriltag_relocalizer stores the tag pose for the map in use.
+CALIB = os.path.expanduser('~/.ros/saloni_tag_map_pose.yaml')
+
+# The calibrated malou tag, as measured 2026-07-22 (verified to 6.1 mm). A
+# frozen fixture for the geometry itself — the map moved on, the arithmetic
+# it pins down did not. Anything that must track the live map reads CALIB.
 MALOU_TAG = dict(x=-0.11230837877346556, y=-0.3591970113160061,
                  z=0.5587916250045776,
                  qx=0.3689896161706194, qy=0.6191975245097218,
@@ -174,29 +179,46 @@ def test_staging_on_the_real_malou_map():
 
 
 def test_locations_yaml_matches_the_tag():
-    """The shipped dock/dock_staging must still agree with the calibration."""
+    """The shipped dock/dock_staging must still agree with the calibration.
+
+    Against the *live* calibration, not MALOU_TAG: the tag pose is measured
+    per map, so pinning it here meant the test compared the malou2 dock with
+    the malou tag and failed by 2 m from the 2026-07-28 remap onwards — while
+    the dock entry itself was right. A stale calibration on disk is the case
+    worth catching, and this is how to catch it.
+    """
     yaml = pytest.importorskip('yaml')
     locs = yaml.safe_load(open(f'{PKG}/config/locations.yaml'))
     assert 'dock_staging' in locs, 'run scripts/derive_dock_pose.py --write'
 
-    n = dg.tag_normal_yaw(MALOU_TAG['qx'], MALOU_TAG['qy'],
-                          MALOU_TAG['qz'], MALOU_TAG['qw'])
-    sx, sy, _ = dg.seated_pose(MALOU_TAG['x'], MALOU_TAG['y'], n)
+    if not os.path.exists(CALIB):
+        pytest.skip('no tag calibration on this machine')
+    tag = yaml.safe_load(open(CALIB))
+
+    n = dg.tag_normal_yaw(tag['qx'], tag['qy'], tag['qz'], tag['qw'])
+    sx, sy, _ = dg.seated_pose(tag['x'], tag['y'], n)
     assert math.hypot(locs['dock']['x'] - sx,
-                      locs['dock']['y'] - sy) < 0.02
+                      locs['dock']['y'] - sy) < 0.02, \
+        'dock does not sit under the tag — run scripts/derive_dock_pose.py --write'
 
     st = locs['dock_staging']
     # Staging must be in front of the tag and further out than the seated pose.
-    assert dg.off_axis(MALOU_TAG['x'], MALOU_TAG['y'], n,
+    assert dg.off_axis(tag['x'], tag['y'], n,
                        st['x'], st['y']) <= dg.DEFAULT_MAX_OFF_AXIS
-    assert (math.hypot(st['x'] - MALOU_TAG['x'], st['y'] - MALOU_TAG['y'])
+    assert (math.hypot(st['x'] - tag['x'], st['y'] - tag['y'])
             > dg.DEFAULT_SEAT_OFFSET)
 
 
 def test_dock_staging_is_not_treated_as_a_room():
     """A patrol must not add the charger to its round of rooms."""
+    yaml = pytest.importorskip('yaml')
+    from home_robot.status_query import rooms_from_locations
+    locs = yaml.safe_load(open(f'{PKG}/config/locations.yaml'))
+    rooms = rooms_from_locations(locs)
+    assert 'dock' not in rooms and 'dock_staging' not in rooms
+
     src = open(f'{PKG}/home_robot/nodes/mission_executor_node.py').read()
-    assert "NON_ROOMS = frozenset({'dock', 'dock_staging'})" in src
+    assert 'rooms_from_locations' in src
     assert "if n != 'dock'" not in src, 'stale room filter misses dock_staging'
 
 
