@@ -21,6 +21,10 @@ import threading
 import time
 
 
+# OI sensor packet 35. Only Passive runs the 5-minute inactivity sleep timer;
+# Safe and Full stay awake indefinitely. See _keep_awake().
+OI_MODE_OFF, OI_MODE_PASSIVE, OI_MODE_SAFE, OI_MODE_FULL = 0, 1, 2, 3
+
 _BAUD_MAP = {
     9600:   termios.B9600,
     19200:  termios.B19200,
@@ -366,6 +370,7 @@ class RoombaDriver(Node):
         # ignores these commands, and without re-trying the driver would stay
         # stuck reading 0 bytes forever (only a wake + re-init fixes it).
         self._last_ok_time = 0.0
+        self._last_oi_mode = None      # packet 35, refreshed by every read
         self._last_brc_pulse = 0.0
         self._connect_oi()
         self.get_logger().info(f'Roomba driver started on {port}')
@@ -604,8 +609,11 @@ class RoombaDriver(Node):
             self._cur_left = self._cur_right = 0.0
             self.bot.drive_direct(0, 0)
             self._stopped = True
+            # Wheels stopped, OI mode untouched — this does NOT enter Passive,
+            # and it must not: Passive is where the sleep timer lives.
             self.get_logger().info(
-                f'Roomba: idle {self.idle_timeout:.0f}s → passive mode (low power)'
+                f'Roomba: idle {self.idle_timeout:.0f}s → wheels stopped '
+                f'(staying in {self.oi_mode})'
             )
 
     def _set_brc_low(self, fd: int, low: bool):
@@ -703,13 +711,27 @@ class RoombaDriver(Node):
             self.get_logger().warn(f'OI (re)connect failed: {e!r}')
 
     def _keep_awake(self):
-        """Never let the Roomba sleep. Two jobs:
+        """Never let the Roomba sleep. Three jobs:
           1. If there has been no good sensor/encoder read for >2s the robot
              is asleep or dropped out of OI — re-run wake/start/full so it
              recovers on its own (e.g. right after the user presses CLEAN),
              with no driver restart needed.
-          2. While healthy, pulse BRC at least once a minute so the OI's
-             5-minute inactivity sleep timer never expires."""
+          2. If the OI has fallen back to Passive, climb straight back out.
+             This is the one that actually keeps the robot awake here: the
+             5-minute inactivity sleep timer runs ONLY in Passive, while Safe
+             and Full never auto-sleep. Safe is demoted to Passive silently by
+             any safety abort — a wheel drop when someone picks the robot up,
+             a cliff reading — so "we entered Safe once at startup" is not the
+             same as "we are in Safe now".
+          3. While healthy, pulse BRC at least once a minute so the OI's
+             sleep timer never expires. ‼️ BRC is NOT wired on this chassis
+             (proven 2026-07-25: 282 pulses, no response), so this job is a
+             no-op here and cannot be what keeps the robot up — job 2 is.
+
+        Getting this wrong is expensive and silent: on 2026-07-31 the robot
+        slept at 20:40:24 and a patrol started at 20:49:01 drove a base that
+        was no longer listening, reporting nav timeouts for 6 rooms while the
+        pose never changed by a millimetre."""
         # Hands off during a dock approach. On the legacy 143 path the robot
         # is in Passive driving itself and _connect_oi()'s full() would cancel
         # the seek; on the IR homing path we are mid-approach in Full and a
@@ -720,6 +742,13 @@ class RoombaDriver(Node):
         now = time.monotonic()
         if (now - self._last_ok_time) > 2.0:
             self._connect_oi()
+            return
+        if self._last_oi_mode == OI_MODE_PASSIVE:
+            self.get_logger().warn(
+                f'OI dropped to passive — re-entering {self.oi_mode} before the '
+                f'sleep timer runs')
+            self._enter_drive_mode()
+            self._last_oi_mode = None    # re-read it, do not re-assert blindly
             return
         if (now - self._last_brc_pulse) > 60.0:
             self._brc_pulse()
@@ -734,6 +763,11 @@ class RoombaDriver(Node):
                 self.bot.SCI.ser.reset_input_buffer()
                 val = self.bot.get_sensors()
                 self._last_ok_time = time.monotonic()
+                # Packet 35. The only way to know we are still in Safe/Full:
+                # a safety abort demotes the OI without saying so anywhere.
+                mode = getattr(val, 'open_interface_mode', None)
+                if mode is not None:
+                    self._last_oi_mode = mode
                 return val
             except Exception as e:
                 self.get_logger().warn(f'get_sensors() attempt {attempt}: {e!r}')
