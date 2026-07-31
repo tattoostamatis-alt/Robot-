@@ -922,7 +922,7 @@ def generate_launch_description():
             # integrator, this node is what refuses the command. See that file
             # for the raw extremes and why the shoulder is capped at 1.57.
             'limit_base':     [-3.015, 0.016],
-            'limit_shoulder': [-1.387, 1.570],
+            'limit_shoulder': [-0.169, 1.570],
             'limit_elbow':    [0.141, 3.079],
             'limit_wrist':    [-1.143, 1.407],
             'limit_roll':     [-1.165, 1.372],

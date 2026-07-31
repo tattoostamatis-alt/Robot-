@@ -70,7 +70,15 @@ arm_joy:
     # wiki gives as its stop, so the hi end is capped at the documented 1.57
     # rather than the measured 1.69 — driving a servo past its own limit is a
     # different risk from backdriving it there.
+    #
+    # SHOULDER RETUNED separately, same day: the hand-walked -81.5 deg let the
+    # arm rise higher than wanted ("δεν θελω να πηγαινει πολυ πανω"), so the
+    # user jogged it to the highest acceptable point and that reading, less the
+    # 2 deg margin, became the lo end: -0.169 rad (-9.7 deg).
+    # ‼️ UP IS THE NEGATIVE DIRECTION on this joint — raising the arm made the
+    # angle fall from +1.6 to -11.7 deg. So the "how high" limit is `lo`, and
+    # `hi` (1.57) is how far DOWN it may go. Do not swap them by reflex.
     limit_base:     [-3.015, 0.016]
-    limit_shoulder: [-1.387, 1.570]
+    limit_shoulder: [-0.169, 1.570]
     limit_elbow:    [0.141, 3.079]
     limit_wrist:    [-1.143, 1.407]
