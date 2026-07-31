@@ -96,6 +96,19 @@ def test_the_system_prompt_names_the_rooms_of_the_map():
         assert f'{room}={room_el(room)}' in prompt
 
 
+def test_the_planner_actually_runs_in_the_launch_we_use():
+    """A room sweep nobody executes is the failure mode this file exists for.
+
+    llm_bridge always offers `tidy` and `patrol`, but localize.launch.py — what
+    `robot max` starts — never forwarded use_planner, so bringup's default of
+    false won every time and both topics had zero subscribers. Verified live
+    on 2026-07-31: the robot said "Ξεκινάω περιπολία" and did not move.
+    """
+    src = open(os.path.join(_ROOT, 'launch', 'localize.launch.py')).read()
+    assert "'use_planner':         'true'," in src, \
+        'localize.launch.py must start task_planner_node for tidy/patrol'
+
+
 def test_planner_and_executor_hold_no_hardcoded_room_list():
     for rel in ('home_robot/nodes/task_planner_node.py',
                 'home_robot/nodes/mission_executor_node.py'):

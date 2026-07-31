@@ -101,6 +101,14 @@ def _launch_setup(context, *args, **kwargs):
             # executor off, "πήγαινε να φορτίσεις" would publish mission/start
             # to nobody. It needs no extra hardware.
             'use_mission':         'true',
+            # Same omission as use_situational above, one node over: llm_bridge
+            # always offers the `tidy` and `patrol` tools, but their topics had
+            # no subscriber at all under `robot max` (checked live 2026-07-31:
+            # tidy_command and patrol_command both Subscription count: 0). So
+            # the robot answered "Ξεκινάω περιπολία" and then stood still. The
+            # planner only waits on topics; the clutter check it runs at each
+            # stop needs use_perception, the driving does not.
+            'use_planner':         'true',
             'use_recovery':        'true' if use_recovery else 'false',
             'use_obstacle_safety': 'true' if use_obstacle_safety else 'false',
             'use_rviz':            'true',
