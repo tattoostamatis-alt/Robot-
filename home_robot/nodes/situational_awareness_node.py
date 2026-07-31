@@ -91,14 +91,9 @@ def _nearest_room(x: float, y: float, locations: dict,
     return best_name
 
 
-ROOM_NAMES_EL = {
-    'saloni':              'σαλόνι',
-    'kouzina':             'κουζίνα',
-    'diadromos':           'διάδρομος',
-    'toualeta':            'τουαλέτα',
-    'domatio tou max':     'δωμάτιο του Μαξ',
-    'domatio tou mbamba':  'δωμάτιο του μπαμπά',
-}
+# Single source of truth, shared with format_location() so the room never gets
+# spoken as greeklish in one answer and Greek in another.
+from home_robot.status_query import ROOM_NAMES_EL  # noqa: E402
 
 
 class SituationalAwarenessNode(Node):

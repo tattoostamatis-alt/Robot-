@@ -51,6 +51,32 @@ def is_location_query(text: str) -> bool:
     return bool(_LOCATION_RE.search(n))
 
 
+# /current_room carries the greeklish map key, which is what the map files and
+# the LLM's tool arguments use. Spoken aloud it came out as "Βρίσκομαι στο
+# domatio tou mbamba" (heard live 2026-07-31) — the TTS reads the latin text
+# letter-salad. The room keys are a closed set, so translate on the way out.
+ROOM_NAMES_EL = {
+    'saloni':             'σαλόνι',
+    'kouzina':            'κουζίνα',
+    'diadromos':          'διάδρομος',
+    'toualeta':           'τουαλέτα',
+    'domatio tou max':    'δωμάτιο του Μαξ',
+    'domatio tou mbamba': 'δωμάτιο του μπαμπά',
+}
+
+# The locative phrase, article included — "στο σαλόνι" but "στην κουζίνα".
+# Kept separate from ROOM_NAMES_EL because the situation context wants the
+# bare noun while a spoken sentence needs the inflected form.
+_ROOM_LOCATIVE_EL = {
+    'saloni':             'στο σαλόνι',
+    'kouzina':            'στην κουζίνα',
+    'diadromos':          'στον διάδρομο',
+    'toualeta':           'στην τουαλέτα',
+    'domatio tou max':    'στο δωμάτιο του Μαξ',
+    'domatio tou mbamba': 'στο δωμάτιο του μπαμπά',
+}
+
+
 def format_location(room: str) -> str:
     """One short Greek sentence about position, or an honest admission.
 
@@ -61,7 +87,9 @@ def format_location(room: str) -> str:
     if not room:
         return ('Δεν ξέρω πού βρίσκομαι — ο εντοπισμός δεν είναι ενεργός '
                 'αυτή τη στιγμή.')
-    return f'Βρίσκομαι στο {room}.'
+    # Unknown keys fall through with a neutral article: a map with a new room
+    # should still get a location answer, just a clumsier one.
+    return f'Βρίσκομαι {_ROOM_LOCATIVE_EL.get(room, f"στο {room}")}.'
 
 
 def is_status_query(text: str) -> bool:

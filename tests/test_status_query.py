@@ -142,4 +142,27 @@ def test_unlocalized_admits_it_rather_than_guessing():
 
 
 def test_localized_reports_the_real_room():
-    assert 'saloni' in format_location('saloni')
+    assert 'σαλόνι' in format_location('saloni')
+
+
+def test_room_is_spoken_in_greek_not_greeklish():
+    """Heard live 2026-07-31: "Βρίσκομαι στο domatio tou mbamba" — the TTS
+    reads latin keys as letter-salad, so /current_room's map key must be
+    translated before it is spoken."""
+    for key in ('saloni', 'kouzina', 'toualeta', 'diadromos',
+                'domatio tou max', 'domatio tou mbamba'):
+        reply = format_location(key)
+        assert key not in reply, f'{key!r} leaked into speech: {reply!r}'
+
+
+def test_room_article_agrees_in_gender():
+    """"στο κουζίνα" is wrong and audible; feminine rooms take "στην"."""
+    assert 'στην κουζίνα' in format_location('kouzina')
+    assert 'στην τουαλέτα' in format_location('toualeta')
+    assert 'στο σαλόνι' in format_location('saloni')
+    assert 'στον διάδρομο' in format_location('diadromos')
+
+
+def test_unknown_room_still_answers():
+    """A remap may add a room before this table catches up — still answer."""
+    assert 'neo_domatio' in format_location('neo_domatio')
