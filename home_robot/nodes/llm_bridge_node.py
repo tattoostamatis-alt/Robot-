@@ -51,6 +51,7 @@ from home_robot import desktop
 from nav2_msgs.action import NavigateToPose
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile
 from sensor_msgs.msg import BatteryState, Image
 from std_msgs.msg import Bool, String
 
@@ -322,9 +323,18 @@ class LLMBridgeNode(Node):
         # Real position, for the location gate. room_markers_node derives this
         # from /amcl_pose, so an empty string genuinely means "not localized"
         # — which is the honest answer, not a room to guess at.
+        #
+        # TRANSIENT_LOCAL to match the latched publisher. /current_room follows
+        # /amcl_pose, which a stationary robot does not publish at all, so with
+        # the default volatile QoS this node learns the room only if it happens
+        # to be running while the robot drives. Restarted mid-session on
+        # 2026-07-31 next to a parked robot, it then claimed "ο εντοπισμός δεν
+        # είναι ενεργός" indefinitely — pointing the user at a subsystem that
+        # was working fine.
         self._current_room = ''
-        self.create_subscription(String, '/current_room',
-                                 self._on_current_room, 10)
+        self.create_subscription(
+            String, '/current_room', self._on_current_room,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.create_subscription(String, 'detected_objects', self._on_detected_objects, 10)
         self.create_subscription(BatteryState, 'battery/state', self._on_battery_state, 10)
         self.create_subscription(String, 'memory/answer', self._on_memory_answer, 10)
