@@ -54,7 +54,11 @@ class TaskPlannerNode(Node):
     def __init__(self):
         super().__init__('task_planner_node')
 
-        self.declare_parameter('nav_timeout', 120.0)
+        # 120 s was not enough for one leg of the house: the first patrol on
+        # malou2 (2026-07-31) gave up on diadromos at exactly 120.0 s, more
+        # than 5 m out, while the robot was still driving and Nav2 had not
+        # failed. This is the give-up guard for a leg, not a target time.
+        self.declare_parameter('nav_timeout', 240.0)
         self.declare_parameter('detect_wait', 2.0)
         self.declare_parameter('use_arm', False)
         self.declare_parameter('pick_timeout', 30.0)
