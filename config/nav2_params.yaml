@@ -286,12 +286,15 @@ local_costmap:
       # parked pose. Now matches the Stop polygon exactly: 0.50x0.40,
       # inscribed 0.20, circumscribed 0.344.
       # 2026-07-21, Roomba 879 chassis: replaced that rectangle with a circular
-      # footprint — user-measured as a Ø0.40 m circle about the wheel axle.
-      # Side effect worth knowing: circumscribed drops 0.344 -> 0.20, now BELOW
-      # inflation_radius 0.30, which clears the long-standing Nav2
+      # footprint. 2026-07-31: the user re-measured the chassis as **Ø0.35 m**,
+      # not the Ø0.40 recorded here, so the radius goes 0.20 -> 0.175. That is
+      # 2.5 cm of extra clearance on EVERY side of every gap, which is a lot
+      # when the doors are the tightest thing the robot meets.
+      # Side effect worth knowing: circumscribed drops to 0.175, still BELOW
+      # inflation_radius, which clears the long-standing Nav2
       # "inflation < circumscribed" ERROR and restores MPPI CostCritic's
       # potential-field shortcut.
-      robot_radius: 0.20
+      robot_radius: 0.175
       # keepout_filter is harmless when use_keepout:=false (the default) —
       # filter_mask_server/costmap_filter_info_server just aren't running,
       # so this layer waits quietly for filter info and never applies
@@ -312,9 +315,18 @@ local_costmap:
         # Deliberately below the 0.344 circumscribed footprint radius: Nav2
         # logs an ERROR and MPPI CostCritic loses its potential-field shortcut,
         # but consider_footprint: true compensates (full-footprint checks),
-        # and >=0.40 risks sealing the ~0.78 m doorways (see 2026-06-30 nav
-        # notes). Don't raise without re-testing doorway plans on the map.
-        inflation_radius: 0.30
+        # and >=0.40 risks sealing the doorways. Don't raise without
+        # re-measuring the doorways on the map in use.
+        # 2026-07-31, malou2: 0.30 -> 0.22. The doorways here are NOT ~0.78 m —
+        # measured on this map, the tightest passage from saloni to kouzina is
+        # 0.60 m (largest radius that still connects them: 0.300). With
+        # inflation 0.30 the collars from the two jambs meet exactly in the
+        # middle, so the centre line of every door carried near-inscribed cost
+        # and the robot stalled in the opening — reported live as "κόλλησε στην
+        # πόρτα". At 0.22 the door centre is plain 0-cost floor. This changes
+        # only where the robot PREFERS to drive: lethal is still robot_radius
+        # 0.20, so it cannot clip a jamb.
+        inflation_radius: 0.22
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
         enabled: true
@@ -392,7 +404,7 @@ global_costmap:
       # inscribed 0.20, circumscribed 0.344.
       # 2026-07-21, Roomba 879 chassis: circular Ø0.40 m footprint (see the
       # matching note in local_costmap above).
-      robot_radius: 0.20
+      robot_radius: 0.175
       resolution: 0.05
       track_unknown_space: true
       plugins: ["static_layer", "obstacle_layer", "keepout_filter", "inflation_layer"]
@@ -426,9 +438,18 @@ global_costmap:
         # Deliberately below the 0.344 circumscribed footprint radius: Nav2
         # logs an ERROR and MPPI CostCritic loses its potential-field shortcut,
         # but consider_footprint: true compensates (full-footprint checks),
-        # and >=0.40 risks sealing the ~0.78 m doorways (see 2026-06-30 nav
-        # notes). Don't raise without re-testing doorway plans on the map.
-        inflation_radius: 0.30
+        # and >=0.40 risks sealing the doorways. Don't raise without
+        # re-measuring the doorways on the map in use.
+        # 2026-07-31, malou2: 0.30 -> 0.22. The doorways here are NOT ~0.78 m —
+        # measured on this map, the tightest passage from saloni to kouzina is
+        # 0.60 m (largest radius that still connects them: 0.300). With
+        # inflation 0.30 the collars from the two jambs meet exactly in the
+        # middle, so the centre line of every door carried near-inscribed cost
+        # and the robot stalled in the opening — reported live as "κόλλησε στην
+        # πόρτα". At 0.22 the door centre is plain 0-cost floor. This changes
+        # only where the robot PREFERS to drive: lethal is still robot_radius
+        # 0.20, so it cannot clip a jamb.
+        inflation_radius: 0.22
       always_send_full_costmap: true
 
 planner_server:
