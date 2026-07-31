@@ -52,12 +52,18 @@ class TTSNode(Node):
         # Local voice used only when edge-tts fails outright (see
         # home_robot/tts_fallback.py). Empty string disables it.
         self.declare_parameter('fallback_model', tts_fallback.DEFAULT_MODEL)
+        # Give up on an edge-tts attempt after this long and let the retry (then
+        # the local voice) take over. A healthy synth measures 0.3-1.1 s, so 3 s
+        # is ~3x headroom and still an order of magnitude below the 36-46 s that
+        # untimed hung attempts cost on 2026-07-30. See _synthesize().
+        self.declare_parameter('synth_timeout', 3.0)
 
         self.voice = self.get_parameter('voice').value
         self.rate = self.get_parameter('rate').value
         self.volume = self.get_parameter('volume').value
         self.device_index = self.get_parameter('device_index').value
         self.speaking_tail = self.get_parameter('speaking_tail').value
+        self.synth_timeout = self.get_parameter('synth_timeout').value
 
         fallback_model = self.get_parameter('fallback_model').value
         self._fallback = (tts_fallback.PiperFallback(fallback_model,
@@ -181,7 +187,7 @@ class TTSNode(Node):
         except Exception:
             pass
 
-    async def _synthesize(self, text, attempts=3):
+    async def _synthesize(self, text, attempts=2):
         # edge-tts talks to a free, unauthenticated Microsoft endpoint that
         # throttles: it intermittently closes the stream having sent no audio
         # ("NoAudioReceived"), or returns an empty one. Measured 2026-07-26 —
@@ -190,26 +196,43 @@ class TTSNode(Node):
         # not the text or the parameters. Without a retry a single hiccup left
         # the robot mute for that whole answer, which reads exactly like "it
         # isn't responding" since the LLM reply only ever reached the log.
+        #
+        # The retry alone was not enough. edge-tts sets no network timeout, so a
+        # throttled attempt does not fail fast — it hangs until the socket times
+        # out on its own. Measured on 2026-07-30 logs: 8 of 27 answers waited
+        # 36-46 s between the reply reaching the log and audio starting, every
+        # one of them followed by "recovered on attempt 2". A healthy call takes
+        # 0.3-1.1 s, so any attempt still running after SYNTH_TIMEOUT is a hung
+        # one, never a slow-but-fine one: cutting it loose costs nothing and
+        # hands over to the local piper voice (0.04 s) while the user is still
+        # waiting rather than 40 s later.
         last = None
         for i in range(attempts):
             try:
-                communicate = edge_tts.Communicate(
-                    text, self.voice, rate=self.rate, volume=self.volume)
-                chunks = []
-                async for chunk in communicate.stream():
-                    if chunk['type'] == 'audio':
-                        chunks.append(chunk['data'])
-                data = b''.join(chunks)
+                data = await asyncio.wait_for(
+                    self._synth_once(text), timeout=self.synth_timeout)
                 if data:
                     if i:
                         self.get_logger().warn(f'TTS synth recovered on attempt {i + 1}')
                     return data
                 last = 'empty audio stream'
+            except asyncio.TimeoutError:
+                last = f'no audio within {self.synth_timeout:.1f}s'
+                self.get_logger().warn(f'TTS attempt {i + 1} timed out ({last})')
             except Exception as e:                       # noqa: BLE001
                 last = e
             if i < attempts - 1:
-                await asyncio.sleep(0.4 * (i + 1))
+                await asyncio.sleep(0.2)
         raise RuntimeError(f'no audio after {attempts} attempts: {last}')
+
+    async def _synth_once(self, text):
+        communicate = edge_tts.Communicate(
+            text, self.voice, rate=self.rate, volume=self.volume)
+        chunks = []
+        async for chunk in communicate.stream():
+            if chunk['type'] == 'audio':
+                chunks.append(chunk['data'])
+        return b''.join(chunks)
 
     def _decode_mp3(self, mp3_bytes):
         proc = subprocess.run(

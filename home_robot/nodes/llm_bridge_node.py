@@ -46,6 +46,7 @@ from home_robot.status_query import (format_location, format_status,
                                      is_location_query, is_status_query,
                                      wants_battery)
 from home_robot.stop_command import is_stop_command, strip_accents
+from home_robot.tool_router import select_tools
 from home_robot import desktop
 from nav2_msgs.action import NavigateToPose
 from rclpy.action import ActionClient
@@ -632,15 +633,17 @@ class LLMBridgeNode(Node):
             send_user_msg = text_user_msg
         messages.append(send_user_msg)
 
-        def _chat(msgs, temperature, with_tools):
-            # Cap the reply length: generation on the NPU runs ~18 tok/s, so a
-            # runaway verbose answer (150+ tokens) takes ~9 s while a one-liner
-            # takes ~3-4 s. Spoken replies should be short anyway. 120 tokens is
-            # ~2-3 Greek sentences — plenty, and it bounds worst-case latency.
+        def _chat(msgs, temperature, tools=None):
+            # Cap the reply length. Note: generation is NOT what makes answers
+            # slow — measured 2026-07-31, a reply takes ~0.4 s to write while
+            # the prefill takes 5.3 s, because FastFlowLM re-reads the whole
+            # prompt every call (no prefix caching). The cap stays as a bound on
+            # rambling, but latency is won in the prefill — see the `tools`
+            # argument and tool_router.py.
             payload = {'model': self.lemonade_model, 'messages': msgs,
                        'temperature': temperature, 'max_tokens': 120}
-            if with_tools:
-                payload['tools'] = TOOLS
+            if tools:
+                payload['tools'] = tools
             r = requests.post(f'{self.lemonade_url}/chat/completions', json=payload, timeout=120)
             r.raise_for_status()
             body = r.json()
@@ -650,8 +653,18 @@ class LLMBridgeNode(Node):
                 raise RuntimeError(f'FLM error: {body.get("error", body)}')
             return body['choices'][0]['message']
 
+        # Send only the tools this utterance could plausibly need. The full
+        # schema is 1847 of 1941 prompt tokens, so "τι ώρα είναι;" was paying
+        # ~3 s to re-read how to pick up a cup. Unrecognised-but-action-ish
+        # phrasings still get the full set; see tool_router.py.
+        tools = select_tools(text, TOOLS)
+        if len(tools) != len(TOOLS):
+            self.get_logger().debug(
+                f'Tool routing: {len(tools)}/{len(TOOLS)} tools '
+                f'({[t["function"]["name"] for t in tools]})')
+
         try:
-            out = _chat(messages, self.temperature, with_tools=True)
+            out = _chat(messages, self.temperature, tools=tools)
         except Exception as e:
             self.get_logger().error(f'LLM call failed: {e}')
             return
@@ -680,7 +693,7 @@ class LLMBridgeNode(Node):
                                'content': f'{system_msg["content"]}\n\n{ACTION_STARTED_NOTE}'}
 
             try:
-                out2 = _chat(messages, 0.3, with_tools=False)
+                out2 = _chat(messages, 0.3)
                 reply = (out2.get('content') or '').strip()
             except Exception as e:
                 self.get_logger().error(f'LLM follow-up call failed: {e}')

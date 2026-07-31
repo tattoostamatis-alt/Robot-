@@ -1,0 +1,115 @@
+"""Pick the smallest TOOLS subset an utterance could plausibly need.
+
+Why this exists: on FastFlowLM/NPU the whole tool schema is re-read on every
+single request — there is no prefix caching (measured 2026-07-31: the same
+call twice took 6.7 s then 6.6 s). Generation itself is fast; the prefill is
+what the user experiences as "it takes ages to answer":
+
+    all 15 tools   6.7 s   1941 prompt tokens
+    3 tools        4.1 s    879
+    no tools       3.8 s    471
+
+So "τι ώρα είναι;" was paying ~3 s to re-read how to pick up a cup. Sending
+only the relevant group is worth ~2-3 s on every utterance, and the model's
+answers are unchanged — same model, same prompt, same max_tokens.
+
+The risk is a false negative: an action word we failed to list means the tool
+never reaches the model and the robot silently does nothing. Three things
+bound that risk:
+
+  1. Groups match on stems (`πηγαιν\\w*`), not whole words, so inflections and
+     the STT's habit of gluing punctuation on are covered.
+  2. ACTION_RE is a catch-all — any generic "do something" verb that matched no
+     group sends the *full* set rather than none. Unusual phrasings degrade to
+     today's behaviour (slow but correct), never to a dropped command.
+  3. Only an utterance with no action signal at all gets the empty set, and
+     those are exactly the ones that cannot need a tool.
+
+`stop` is deliberately not routed here — stop_command.py gates it with keywords
+*before* the model is called at all, because it must not be probabilistic.
+"""
+import re
+
+from .stop_command import strip_accents
+
+
+# Stems, not words: 'πηγαιν' covers πήγαινε/πηγαίνεις/πηγαίνετε. Written
+# accent-free because every input is passed through strip_accents() first.
+_GROUPS = [
+    # Navigation is split into four narrow groups rather than one broad one:
+    # as a single group "Πήγαινε στο σαλόνι" dragged along explore/patrol/
+    # follow/move and saved only 1.2 s. Split, it sends 3 tools instead of 9.
+    (['goto', 'dock', 'tidy'],
+     # 'πηγαι\w*' not 'πηγαιν\w*': the STT writes "Πήγαισε" for "πήγαινε"
+     # often enough that the narrower stem loses real commands.
+     # Deliberately NOT here: 'παω'/'παμε' — first person is the *user*
+     # narrating ("Πάω για ύπνο"), not an order. "Πάμε στο σαλόνι" still
+     # routes, on the room name.
+     r'πηγαι\w*|παε|ελα|ερχ\w*|σαλονι\w*|κουζιν\w*|διαδρομ\w*|'
+     r'τουαλετ\w*|δωματι\w*|μπαμπα|βαση|φορτισ\w*|dock|καθαρ\w*|σκουπ\w*|'
+     r'τακτοποι\w*|συγυρ\w*'),
+
+    (['move'],
+     r'μπροστα|πισω|αριστερ\w*|δεξι\w*|στριψ\w*|στροφ\w*|γυρν\w*|γυρισ\w*|'
+     r'προχωρ\w*|κουνησ\w*|μετακιν\w*|οπισθεν'),
+
+    (['patrol', 'explore', 'stop_explore'],
+     r'περιπολ\w*|εξερευν\w*|χαρτογραφ\w*|γυρε\s|βολτ\w*'),
+
+    (['follow', 'stop_follow'],
+     r'ακολουθ\w*'),
+
+    (['open_app', 'list_windows'],
+     r'ανοιξ\w*|ανοιγ\w*|κλεισ\w*|οθον\w*|εφαρμογ\w*|παραθυρ\w*|'
+     r'υπολογιστ\w*|firefox|φαιρφοξ|τερματικ\w*|κειμενογραφ\w*|'
+     r'αριθμομηχαν\w*|κομπιουτεραρ\w*|βιντεο|pdf|vscode|browser|'
+     r'φυλλομετρ\w*|αρχει\w*'),
+
+    (['system_status'],
+     r'κατασταση|καταστασ\w*|μπαταρι\w*|cpu|επεξεργαστ\w*|μνημη|ram|'
+     r'δισκ\w*|θερμοκρασ\w*|βαθμ\w*|uptime|ζεστα\w*|φορτι\w*'),
+
+    (['report_clutter', 'pick', 'fetch'],
+     r'σκορπι\w*|ακαταστασ\w*|clutter|αντικειμεν\w*|πιασ\w*|φερ\w*|'
+     r'μαζεψ\w*|μαζευ\w*|σηκωσ\w*|κουπ\w*|μπουκαλ\w*|βιβλι\w*|ποτηρ\w*|'
+     r'πιατ\w*|παιχνιδ\w*'),
+
+    (['remember'],
+     r'θυμ\w*|σημειωσ\w*|κρατα|μαθε'),
+]
+
+_COMPILED = [(names, re.compile(pat)) for names, pat in _GROUPS]
+
+# Catch-all "the user is asking for something to be done" signal. Only consulted
+# when no group matched; it sends the full set, i.e. today's behaviour. Matching
+# here is a *cost* (slow path), never a correctness problem, so it can be loose.
+ACTION_RE = re.compile(
+    # 'κανε' (imperative) only — 'καν\\w*' also matches "τι κάνεις;", which is
+    # a greeting and was dragging the full 15-tool schema into every hello.
+    r'\bκανε\b|βοηθ\w*|θελω\s+να|μπορεις\s+να|σε\s+παρακαλ\w*|'
+    r'πρεπει\s+να|ξεκιν\w*|αρχισ\w*|σταματ\w*|τελειωσ\w*|δωσ\w*|βαλ\w*|'
+    r'βγαλ\w*|ψαξ\w*|βρε\w*|δειξ\w*|ελεγξ\w*'
+)
+
+
+def select_tools(text, tools):
+    """Return the subset of `tools` worth sending for this utterance.
+
+    An empty list means "pure conversation" — send no tools at all, which is
+    the cheapest prefill and cannot break anything, because a reply that needs
+    no action is the only thing that reaches it.
+    """
+    normalized = strip_accents(text)
+
+    wanted = set()
+    for names, pattern in _COMPILED:
+        if pattern.search(normalized):
+            wanted.update(names)
+
+    if not wanted:
+        # Nothing specific matched. An action-ish verb still means "do
+        # something" we failed to classify — fall back to the full schema
+        # rather than dropping the command.
+        return list(tools) if ACTION_RE.search(normalized) else []
+
+    return [t for t in tools if t['function']['name'] in wanted]
