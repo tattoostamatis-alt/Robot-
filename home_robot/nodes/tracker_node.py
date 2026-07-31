@@ -23,8 +23,13 @@ _NEXT_ID = [1]
 
 def _iou_batch(bboxes_a: list, bboxes_b: list) -> np.ndarray:
     """Vectorized IoU: (N,4) × (M,4) → (N,M) matrix."""
-    a = np.array(bboxes_a, dtype=float)   # N×4
-    b = np.array(bboxes_b, dtype=float)   # M×4
+    # reshape, because np.array([]) is 1-D: with no tracks yet, a[:, None, 0]
+    # raised IndexError and killed the node the moment the first object was
+    # detected (seen live 2026-07-31, the first frame with anything in it).
+    # An empty side has to stay a well-formed (0,4) so this returns an empty
+    # matrix and the caller's assignment loop simply does not run.
+    a = np.array(bboxes_a, dtype=float).reshape(-1, 4)   # N×4
+    b = np.array(bboxes_b, dtype=float).reshape(-1, 4)   # M×4
     xx1 = np.maximum(a[:, None, 0], b[None, :, 0])
     yy1 = np.maximum(a[:, None, 1], b[None, :, 1])
     xx2 = np.minimum(a[:, None, 2], b[None, :, 2])
