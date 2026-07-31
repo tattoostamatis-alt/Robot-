@@ -54,6 +54,7 @@ def _launch_setup(context, *args, **kwargs):
     # so the right stick can jog the arm in localize mode as well.
     use_arm = LaunchConfiguration('use_arm').perform(context).lower() in ('true', '1')
     use_apriltag = LaunchConfiguration('use_apriltag').perform(context).lower() in ('true', '1')
+    use_rviz = LaunchConfiguration('use_rviz').perform(context).lower() in ('true', '1')
     use_obstacle_safety = LaunchConfiguration('use_obstacle_safety').perform(context).lower() in ('true', '1')
     # Opt-in perception stack for navigation: YOLO detector + tracker feeding the
     # dynamic-obstacle costmap layers (predicted/semantic) + semantic object
@@ -111,7 +112,10 @@ def _launch_setup(context, *args, **kwargs):
             'use_planner':         'true',
             'use_recovery':        'true' if use_recovery else 'false',
             'use_obstacle_safety': 'true' if use_obstacle_safety else 'false',
-            'use_rviz':            'true',
+            # Forwarded, not hardcoded: `robot max` decides. It was pinned to
+            # 'true' here, which silently swallowed use_rviz:=false — rviz2 then
+            # started with no DISPLAY exported (tty/SSH launch) and just died.
+            'use_rviz':            'true' if use_rviz else 'false',
             # We start joy/teleop ourselves below (correct device-by-name +
             # cmd_vel_safe remap). Force bringup's own joy OFF so it doesn't
             # also spawn one — our 'use_joy' arg is inherited into bringup
@@ -251,6 +255,10 @@ def generate_launch_description():
                         'stuck (cmd_vel commanded but no displacement) near walls/'
                         'doorways and does a BackUp/creep escape before Nav2 loops '
                         'raw Spin/BackUp into an ABORT. HW-confirmed 2026-07-07.'),
+        DeclareLaunchArgument(
+            'use_rviz', default_value='true',
+            description='Open RViz on the local display (`robot max` sets this; '
+                        'the VNC :2 session runs its own rviz2 for the phone)'),
         DeclareLaunchArgument(
             'use_perception', default_value='false',
             description='Bring up the YOLO detector + tracker, the dynamic-obstacle '
