@@ -1,0 +1,188 @@
+"""Tests for the dashboard's 3D point-cloud stream (web_dashboard_node).
+
+The camera publishes 148 815 points x 20 bytes at 28 Hz — 3 MB a message. What
+reaches the browser is subsampled to ~4000 points and quantised to int16
+millimetres + RGB, which is nine bytes a point. Both halves of that conversion
+are hand-rolled binary, so both are tested here: the Python encoder directly,
+and the browser's decoder by running the real JS through node.
+
+    cd ~/robot_ws/src/home_robot && python3 -m pytest tests/test_dashboard_cloud.py -q
+"""
+import base64
+import json
+import re
+import shutil
+import struct
+import subprocess
+import time
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+_SRC = (Path(__file__).resolve().parents[1]
+        / 'home_robot' / 'nodes' / 'web_dashboard_node.py').read_text()
+
+_ENC = re.search(r'^    CLOUD_MAX_POINTS = .*?^    def _cb_cloud.*?'
+                 r'(?=\n\n    def )', _SRC, re.M | re.S)
+assert _ENC, 'could not extract _cb_cloud from web_dashboard_node.py'
+
+# PointCloud2 is only an annotation on the callback, but the class body is
+# evaluated, so it has to resolve to something.
+_ns = {'np': np, 'time': time, 'base64': base64, 'PointCloud2': object}
+exec(compile('class Dash:\n' + _ENC.group(0),  # noqa: S102 - test extraction
+             'dash_cloud', 'exec'), _ns)
+Dash = _ns['Dash']
+
+POINT_STEP = 20          # what realsense actually publishes: x y z _ rgb
+
+
+class FakeState:
+    def __init__(self):
+        self.sent = []
+
+    def broadcast(self, msg, remember=True):
+        self.sent.append(msg)
+
+
+class FakeMsg:
+    def __init__(self, xyz, bgr):
+        n = len(xyz)
+        buf = np.zeros((n, POINT_STEP), dtype=np.uint8)
+        buf[:, 0:12] = np.asarray(xyz, dtype='<f4').view(np.uint8).reshape(n, 12)
+        buf[:, 16:19] = np.asarray(bgr, dtype=np.uint8)
+        self.data = buf.tobytes()
+        self.width, self.height = n, 1
+        self.point_step = POINT_STEP
+
+        class H:
+            frame_id = 'camera_depth_optical_frame'
+        self.header = H()
+
+
+def encode(xyz, bgr, viewers=True):
+    d = Dash()
+    d._state = FakeState()
+    d._cloud_ws = {'a browser'} if viewers else set()
+    d._cloud_last = 0.0
+    d._cb_cloud(FakeMsg(xyz, bgr))
+    return d._state.sent
+
+
+def decode(msg):
+    raw = base64.b64decode(msg['data'])
+    out = []
+    for i in range(msg['n']):
+        x, y, z = struct.unpack_from('<hhh', raw, i * 9)
+        out.append(((x / 1000, y / 1000, z / 1000),
+                    (raw[i*9+6], raw[i*9+7], raw[i*9+8])))
+    return out
+
+
+# ── the stream only runs for someone who is watching ─────────────────────────
+
+def test_nothing_is_sent_with_no_viewers():
+    """150 kB/s to a phone that is not on the 3D tab is the whole reason the
+    browser has to ask for this stream."""
+    assert encode([(0.1, 0.2, 1.0)], [(1, 2, 3)], viewers=False) == []
+
+
+def test_a_viewer_gets_a_cloud():
+    assert len(encode([(0.1, 0.2, 1.0)], [(1, 2, 3)])) == 1
+
+
+def test_the_rate_is_throttled_below_the_camera():
+    """The camera runs at 28 Hz; forwarding all of it would be 4 MB/s."""
+    d = Dash()
+    d._state = FakeState()
+    d._cloud_ws = {'x'}
+    d._cloud_last = 0.0
+    for _ in range(10):                    # ten frames back to back
+        d._cb_cloud(FakeMsg([(0.0, 0.0, 1.0)], [(1, 2, 3)]))
+    assert len(d._state.sent) == 1, 'throttle is not holding'
+    assert Dash.CLOUD_PERIOD >= 0.2
+
+
+# ── the numbers must survive the round trip ──────────────────────────────────
+
+def test_coordinates_survive_to_the_millimetre():
+    pts = [(0.123, -0.456, 1.789)]
+    got = decode(encode(pts, [(0, 0, 0)])[0])
+    (x, y, z), _ = got[0]
+    assert (round(x, 3), round(y, 3), round(z, 3)) == (0.123, -0.456, 1.789)
+
+
+def test_negative_coordinates_are_not_mangled():
+    """int16 by hand: a missing sign extension turns -1 m into +64 m."""
+    got = decode(encode([(-1.5, -2.25, 3.0)], [(0, 0, 0)])[0])
+    (x, y, z), _ = got[0]
+    assert x == pytest.approx(-1.5) and y == pytest.approx(-2.25)
+
+
+def test_colour_is_converted_from_bgr_to_rgb():
+    """realsense packs the rgb float as B G R; sending it raw makes every
+    person in the room blue."""
+    got = decode(encode([(0.0, 0.0, 1.0)], [(10, 20, 30)])[0])   # B=10 G=20 R=30
+    assert got[0][1] == (30, 20, 10)
+
+
+def test_nan_points_are_dropped_not_sent_as_zero():
+    pts = [(float('nan'), 0.0, 1.0), (0.1, 0.1, 1.0)]
+    msg = encode(pts, [(1, 1, 1), (2, 2, 2)])[0]
+    assert msg['n'] == 1
+
+
+def test_a_cloud_of_only_nan_sends_nothing():
+    assert encode([(float('nan'),) * 3], [(1, 1, 1)]) == []
+
+
+def test_large_clouds_are_subsampled_and_report_the_original_size():
+    n = 50000
+    xyz = [(0.0, 0.0, 1.0)] * n
+    msg = encode(xyz, [(1, 2, 3)] * n)[0]
+    assert msg['n'] <= Dash.CLOUD_MAX_POINTS
+    assert msg['total'] == n, 'the browser needs the true count for its badge'
+    assert len(base64.b64decode(msg['data'])) == msg['n'] * 9
+
+
+def test_payload_is_nine_bytes_per_point():
+    msg = encode([(0.0, 0.0, 1.0)] * 10, [(1, 2, 3)] * 10)[0]
+    assert len(base64.b64decode(msg['data'])) == 10 * 9
+
+
+# ── the browser's own decoder, run for real ──────────────────────────────────
+
+JS_DECODE = re.search(r'function onCloud\(m\)\{(.*?)\n\}', _SRC, re.S)
+
+
+@pytest.mark.skipif(shutil.which('node') is None, reason='node not installed')
+def test_the_browser_decoder_agrees_with_the_encoder():
+    """The JS reads the payload out of a *binary string* from atob(), one
+    charCode at a time, and sign-extends int16 by hand. Nothing about that is
+    obvious, so run the real code and compare it against Python."""
+    assert JS_DECODE, 'onCloud() changed shape'
+    pts = [(0.5, -0.25, 2.0), (-1.234, 0.0, 0.75), (0.0, 3.21, 9.99)]
+    bgr = [(10, 20, 30), (200, 100, 50), (0, 255, 128)]
+    msg = encode(pts, bgr)[0]
+
+    body = JS_DECODE.group(1)
+    # Stub the two lines that touch the page; keep every byte of the maths.
+    body = re.sub(r"\$\('cloud-info'\).*?;", '', body, flags=re.S)
+    body = body.replace('cloudDraw();', '')
+    script = f'''
+const m = {json.dumps(msg)};
+function atob(s){{ return Buffer.from(s, 'base64').toString('binary'); }}
+let cloudPts, cloudRGB;
+{body}
+console.log(JSON.stringify({{xyz: Array.from(cloudPts), rgb: Array.from(cloudRGB)}}));
+'''
+    out = subprocess.run(['node', '-e', script], capture_output=True, text=True,
+                         timeout=30)
+    assert out.returncode == 0, out.stderr
+    got = json.loads(out.stdout)
+    for i, (x, y, z) in enumerate(pts):
+        assert got['xyz'][i*3]     == pytest.approx(x, abs=1e-3)
+        assert got['xyz'][i*3 + 1] == pytest.approx(y, abs=1e-3)
+        assert got['xyz'][i*3 + 2] == pytest.approx(z, abs=1e-3)
+    for i, (b, g, r) in enumerate(bgr):
+        assert (got['rgb'][i*3], got['rgb'][i*3+1], got['rgb'][i*3+2]) == (r, g, b)

@@ -23,6 +23,7 @@ inherits the token check instead of exposing an unauthenticated port.
 """
 
 import asyncio
+import re
 import base64
 import json
 import math
@@ -47,9 +48,11 @@ from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 from rcl_interfaces.msg import Log as RosoutLog
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
-from sensor_msgs.msg import Image, JointState, LaserScan
+from sensor_msgs.msg import Image, JointState, LaserScan, PointCloud2
 from std_msgs.msg import Bool, Float32, String
 from std_srvs.srv import Empty
+
+from home_robot.dashboard_i18n import LANGUAGES, as_js_table
 
 import uvicorn
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -62,6 +65,14 @@ SHARE = get_package_share_directory('home_robot')
 # under `ros2 run` (lib/home_robot/../config does not exist).
 LOCATIONS_FILE = os.path.join(SHARE, 'config', 'locations.yaml')
 GUI_SESSION_SH = os.path.join(SHARE, 'scripts', 'gui_session.sh')
+# Maps and map_session.sh are read from the SOURCE tree, the same precedence
+# localize.launch.py's _resolve_map uses: a map saved during this session lands
+# in src/, and `robot stop` kills anything running out of install/ — including,
+# if we ran it from there, the very script doing the restart.
+SRC_HOME = os.path.expanduser('~/robot_ws/src/home_robot')
+SRC_MAPS_DIR = (os.path.join(SRC_HOME, 'maps')
+                if os.path.isdir(os.path.join(SRC_HOME, 'maps'))
+                else os.path.join(SHARE, 'maps'))
 NOVNC_DIR = '/usr/share/novnc'
 
 # Must match the display map in scripts/gui_session.sh.
@@ -264,6 +275,24 @@ class DashboardNode(Node):
         # ── Arm ─────────────────────────────────────────────────────────────
         self.create_subscription(JointState, '/arm/joint_states', self._cb_arm, 10)
 
+        # ── 3D point cloud ──────────────────────────────────────────────────
+        # 148814 points x 20 bytes = 3 MB per message at 28 Hz. Nothing about
+        # that is sendable to a phone, so _cb_cloud subsamples and quantises,
+        # and the browser asks for the stream only while the 3D tab is open
+        # (dispatch 'cloud'). depth=1 + BEST_EFFORT: a late cloud is worthless,
+        # dropping it is better than queueing it.
+        # Which sockets are on the 3D tab. A plain counter leaked: a browser
+        # closed while the tab was open never sent its 'off', so the stream ran
+        # forever at 150 kB/s with nobody watching.
+        self._cloud_ws: Set[object] = set()
+        self._cloud_last = 0.0
+        self._map_cache = None          # (fetched_at, name); see active_map()
+        self.create_subscription(
+            PointCloud2, '/camera/camera/depth/color/points', self._cb_cloud,
+            QoSProfile(depth=1,
+                       reliability=QoSReliabilityPolicy.BEST_EFFORT,
+                       durability=QoSDurabilityPolicy.VOLATILE))
+
         # ── Log tail ────────────────────────────────────────────────────────
         # Every node publishes /rosout RELIABLE + TRANSIENT_LOCAL with a 10 s
         # lifespan (checked with `ros2 topic info -v /rosout`, 66 publishers).
@@ -395,6 +424,50 @@ class DashboardNode(Node):
     def _cb_room(self, msg: String):
         self._state.broadcast({'type': 'room', 'name': msg.data})
 
+    # Roughly what a phone on wifi can take: 4000 points x 9 bytes is ~36 kB,
+    # ~48 kB once base64'd, three times a second.
+    CLOUD_MAX_POINTS = 4000
+    CLOUD_PERIOD = 0.33
+
+    def _cb_cloud(self, msg: PointCloud2):
+        if not self._cloud_ws:
+            return
+        now = time.time()
+        if now - self._cloud_last < self.CLOUD_PERIOD:
+            return
+        self._cloud_last = now
+
+        n = msg.width * msg.height
+        if n == 0 or msg.point_step < 20:
+            return
+        raw = np.frombuffer(msg.data, dtype=np.uint8)
+        raw = raw[:n * msg.point_step].reshape(n, msg.point_step)
+        # Ceiling, not floor: n // MAX rounds the stride DOWN, which lets the
+        # result overshoot the cap by up to 25% (148815 points came out as
+        # 4023, not 4000). The cap is a bandwidth budget, so it has to hold.
+        stride = max(1, -(-n // self.CLOUD_MAX_POINTS))
+        raw = raw[::stride]
+
+        xyz = raw[:, 0:12].copy().view(np.float32).reshape(-1, 3)
+        # rgb is a float32 whose BITS are 0x00RRGGBB — reading it as a number
+        # gives garbage, so take the bytes. Little-endian, so B G R _.
+        bgr = raw[:, 16:19]
+
+        good = np.isfinite(xyz).all(axis=1)
+        xyz, bgr = xyz[good], bgr[good]
+        if not len(xyz):
+            return
+
+        # Millimetres in int16 covers +-32 m; the D435 stops at 10.
+        mm = np.clip(xyz * 1000.0, -32000, 32000).astype('<i2')
+        rgb = bgr[:, ::-1].copy()          # BGR -> RGB for the browser
+        payload = np.concatenate([mm.view(np.uint8).reshape(len(mm), 6), rgb],
+                                 axis=1).tobytes()
+        self._state.broadcast({
+            'type': 'cloud', 'n': len(mm), 'frame': msg.header.frame_id,
+            'total': n, 'data': base64.b64encode(payload).decode(),
+        }, remember=False)
+
     def _cb_rosout(self, msg: RosoutLog):
         # WARN(30) and up only — see State.logs. Nav2's costmaps alone publish
         # INFO faster than a browser can render it.
@@ -470,7 +543,49 @@ class DashboardNode(Node):
 
     # ── Handle frontend messages ─────────────────────────────────────────────
 
-    def dispatch(self, msg: dict):
+    # ── Which map is loaded ─────────────────────────────────────────────────
+    # map_server holds the answer in its `yaml_filename` parameter, which is the
+    # only source that stays right when the stack is launched by hand with
+    # map:=something. `ros2 param get` costs a second or two, hence the cache.
+    MAP_CACHE_TTL = 15.0
+
+    def _node_running(self, name: str) -> bool:
+        try:
+            return any(n == name for n, _ in self.get_node_names_and_namespaces())
+        except Exception:
+            return False
+
+    def is_mapping(self) -> bool:
+        """True while slam_toolbox is building a map (there is no map_server)."""
+        return self._node_running('slam_toolbox')
+
+    def perception_on(self) -> bool:
+        return self._node_running('object_detector')
+
+    def active_map(self):
+        if self.is_mapping():
+            return None
+        now = time.time()
+        if self._map_cache and now - self._map_cache[0] < self.MAP_CACHE_TTL:
+            return self._map_cache[1]
+        name = None
+        try:
+            r = subprocess.run(['ros2', 'param', 'get', '/map_server',
+                                'yaml_filename'],
+                               capture_output=True, text=True, timeout=10)
+            hit = re.search(r'([A-Za-z0-9_-]+)\.yaml', r.stdout or '')
+            if hit:
+                name = hit.group(1)
+        except Exception:
+            pass
+        self._map_cache = (now, name)
+        return name
+
+    def release_client(self, client):
+        """A browser went away — forget anything it had switched on."""
+        self._cloud_ws.discard(client)
+
+    def dispatch(self, msg: dict, client=None):
         t = msg.get('type')
         if t == 'cmd_vel':
             tw = Twist()
@@ -503,6 +618,14 @@ class DashboardNode(Node):
                 g.pose.orientation.z = math.sin(yaw / 2)
                 g.pose.orientation.w = math.cos(yaw / 2)
                 self._goal_pub.publish(g)
+        elif t == 'cloud':
+            # Tracked per socket, so two phones on the 3D tab do not have the
+            # first one to leave switch off the other's stream.
+            if client is not None:
+                if msg.get('on'):
+                    self._cloud_ws.add(client)
+                else:
+                    self._cloud_ws.discard(client)
         elif t == 'localize':
             if self._loc_client.service_is_ready():
                 self._loc_client.call_async(Empty.Request())
@@ -607,6 +730,89 @@ async def gui(request: Request, app_name: str, action: str, t: str = ''):
             'running': out.startswith('running')}
 
 
+# ── Maps ──────────────────────────────────────────────────────────────────────
+# The map is baked into map_server at launch: there is no runtime swap, so
+# switching one means restarting the stack. That is why the UI confirms first
+# and why the work is handed to a detached script — this node is one of the
+# processes about to be killed.
+
+MAP_SESSION_SH = os.path.normpath(
+    os.path.join(SRC_MAPS_DIR, os.pardir, 'scripts', 'map_session.sh'))
+
+
+def _list_maps() -> list:
+    """Saved maps, newest first. A map is a .yaml with its .pgm next to it."""
+    out = []
+    try:
+        for f in sorted(os.listdir(SRC_MAPS_DIR)):
+            if not f.endswith('.yaml'):
+                continue
+            name = f[:-5]
+            pgm = os.path.join(SRC_MAPS_DIR, name + '.pgm')
+            if not os.path.exists(pgm):
+                continue          # a yaml with no image cannot be loaded
+            out.append({
+                'name': name,
+                'mtime': os.path.getmtime(os.path.join(SRC_MAPS_DIR, f)),
+                'kb': round(os.path.getsize(pgm) / 1024),
+                # slam_toolbox can only RESUME (extend) a map that has these.
+                'resumable': os.path.exists(os.path.join(SRC_MAPS_DIR,
+                                                         name + '.posegraph')),
+            })
+    except OSError:
+        pass
+    return sorted(out, key=lambda m: -m['mtime'])
+
+
+@app.get('/maps')
+async def maps(request: Request, t: str = ''):
+    if not _authorised(t, request.cookies):
+        return JSONResponse({'error': 'unauthorized'}, status_code=401)
+    if ros_node is None:
+        return {'maps': _list_maps(), 'active': None, 'mapping': False}
+    # active_map() shells out to `ros2 param get`, which takes a second or two —
+    # off the event loop, or every other browser request stalls behind it.
+    active = await asyncio.to_thread(ros_node.active_map)
+    return {'maps': _list_maps(), 'active': active,
+            'mapping': ros_node.is_mapping()}
+
+
+@app.get('/maps/{action}/{name}')
+async def maps_action(request: Request, action: str, name: str, t: str = ''):
+    if not _authorised(t, request.cookies):
+        return JSONResponse({'error': 'unauthorized'}, status_code=401)
+    # Names go into a shell command and a file path, so they are whitelisted
+    # rather than escaped.
+    if action not in ('switch', 'save', 'new') or not re.fullmatch(r'[A-Za-z0-9_-]{1,40}', name):
+        return JSONResponse({'error': 'bad request'}, status_code=400)
+    if action == 'switch' and name not in {m['name'] for m in _list_maps()}:
+        return JSONResponse({'error': f'no such map: {name}'}, status_code=404)
+
+    args = ['bash', MAP_SESSION_SH, action]
+    if action != 'new':
+        args.append(name)
+    # Carry the current perception setting across the restart, or switching a
+    # map would silently turn the 3D tab and the object detector off.
+    if action in ('switch', 'new') and ros_node and ros_node.perception_on():
+        args.append('use_perception:=true')
+    try:
+        # switch/new outlive this process, so they are detached; save is quick
+        # and its result is worth waiting for.
+        if action == 'save':
+            r = await asyncio.to_thread(
+                lambda: subprocess.run(args, capture_output=True, text=True,
+                                       timeout=120))
+            ok = r.returncode == 0
+            return {'action': action, 'name': name, 'ok': ok,
+                    'result': (r.stdout or r.stderr).strip()[:400]}
+        subprocess.Popen(args, start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return {'action': action, 'name': name, 'ok': True,
+                'result': 'restarting'}
+    except Exception as e:
+        return JSONResponse({'error': repr(e)}, status_code=500)
+
+
 @app.websocket('/vnc/{app_name}')
 async def vnc_bridge(ws: WebSocket, app_name: str, t: str = ''):
     """noVNC <-> Xvnc. This is websockify, minus the extra daemon.
@@ -692,13 +898,15 @@ async def ws_endpoint(ws: WebSocket, t: str = ''):
             data = await ws.receive_text()
             msg  = json.loads(data)
             if ros_node:
-                ros_node.dispatch(msg)
+                ros_node.dispatch(msg, ws)
     except WebSocketDisconnect:
         pass
     except Exception:
         pass
     finally:
         state.remove_client(ws)
+        if ros_node:
+            ros_node.release_client(ws)
 
 
 # ── HTML frontend ──────────────────────────────────────────────────────────────
@@ -718,7 +926,9 @@ def _make_html(rooms: list, token: str = '') -> str:
             .replace('__VNC_PASS__', json.dumps(VNC_PASSWORD))
             .replace('__ARM_LIMITS__', json.dumps(ARM_LIMITS))
             .replace('__ARM_JOINTS__', json.dumps(ARM_JOINTS))
-            .replace('__HAS_NOVNC__', json.dumps(os.path.isdir(NOVNC_DIR))))
+            .replace('__HAS_NOVNC__', json.dumps(os.path.isdir(NOVNC_DIR)))
+            .replace('__I18N__', json.dumps(as_js_table(), ensure_ascii=False))
+            .replace('__LANGS__', json.dumps(LANGUAGES, ensure_ascii=False)))
 
 
 HTML_TEMPLATE = r"""<!DOCTYPE html>
@@ -986,6 +1196,43 @@ button{font:inherit;color:inherit}
       </div>
     </section>
 
+    <section class="pane" id="p-cloud">
+      <div class="card" style="flex:1;display:flex;flex-direction:column;min-height:0">
+        <h3>3D κάμερα (D435)
+          <span class="badge" id="cloud-info">—</span>
+          <button class="btn" id="b-cloud-reset" style="float:right">Επαναφορά όψης</button>
+        </h3>
+        <canvas id="cloud-canvas" style="flex:1;width:100%;min-height:0;
+          background:#0a0a0b;border-radius:8px;touch-action:none;cursor:grab"></canvas>
+        <div style="color:#71717a;font-size:11.5px;margin-top:6px">
+          Σύρε για περιστροφή · ροδέλα ή τσίμπημα για ζουμ
+        </div>
+      </div>
+    </section>
+
+    <section class="pane" id="p-set">
+      <div class="card">
+        <h3>Γλώσσα</h3>
+        <div class="row" id="lang-buttons"></div>
+        <div style="color:#71717a;font-size:11.5px;margin-top:8px">
+          Αλλάζει μόνο αυτή τη σελίδα. Το ρομπότ συνεχίζει να μιλά ελληνικά.
+        </div>
+      </div>
+
+      <div class="card" style="flex:1;overflow:auto">
+        <h3>Χάρτες <span class="badge" id="map-active">—</span></h3>
+        <div id="map-list" style="margin:8px 0"></div>
+        <div class="row" style="margin-top:10px">
+          <button class="btn pri" id="b-map-new">🆕 Νέος χάρτης (SLAM)</button>
+          <input id="map-save-name" placeholder="όνομα χάρτη"
+                 style="flex:1;min-width:120px;background:#18181b;border:1px solid #27272a;
+                        color:#e4e4e7;border-radius:8px;padding:8px 10px">
+          <button class="btn" id="b-map-save">💾 Αποθήκευση</button>
+        </div>
+        <div id="map-msg" style="color:#71717a;font-size:11.5px;margin-top:8px"></div>
+      </div>
+    </section>
+
     <section class="pane" id="p-log">
       <div class="card" style="flex:1;display:flex;flex-direction:column;min-height:0">
         <h3>Προειδοποιήσεις &amp; σφάλματα (/rosout)
@@ -1024,6 +1271,7 @@ const $ = id => document.getElementById(id);
 const TABS = [
   ['map',    '🗺️', 'Χάρτης'],
   ['cam',    '📷', 'Κάμερα'],
+  ['cloud',  '🧿', '3D'],
   ['rviz',   '🧊', 'RViz'],
   ['moveit', '🎯', 'MoveIt'],
   ['arm',    '🦾', 'Βραχίονας'],
@@ -1032,15 +1280,23 @@ const TABS = [
   ['gazebo', '🌍', 'Gazebo'],
   ['sys',    '📊', 'Σύστημα'],
   ['log',    '📜', 'Log'],
+  ['set',    '⚙️', 'Ρυθμίσεις'],
 ];
-const tabNav = $('tabs');
-TABS.forEach(([id, icon, label]) => {
-  const b = document.createElement('div');
-  b.className = 'tab'; b.dataset.pane = id;
-  b.innerHTML = `<span class="ic">${icon}</span><span>${label}</span>`;
-  b.onclick = () => showTab(id);
-  tabNav.appendChild(b);
-});
+// Rebuilt on every language change; the labels come from the same t() as the
+// rest of the page. Preserves which tab is active across the rebuild.
+function renderTabs(){
+  const tabNav = $('tabs');
+  const active = (document.querySelector('.tab.active') || {}).dataset;
+  tabNav.innerHTML = '';
+  TABS.forEach(([id, icon, label]) => {
+    const b = document.createElement('div');
+    b.className = 'tab' + (active && active.pane === id ? ' active' : '');
+    b.dataset.pane = id;
+    b.innerHTML = `<span class="ic">${icon}</span><span>${t(label)}</span>`;
+    b.onclick = () => showTab(id);
+    tabNav.appendChild(b);
+  });
+}
 function showTab(id){
   document.querySelectorAll('.tab').forEach(t =>
     t.classList.toggle('active', t.dataset.pane === id));
@@ -1048,6 +1304,8 @@ function showTab(id){
     p.classList.toggle('active', p.id === 'p-' + id));
   if (id === 'map') resize();
   if (VNC_APPS[id]) ensureVnc(id);
+  cloudSetActive(id === 'cloud');
+  if (id === 'set') mapsRefresh();
 }
 // NB: the initial showTab() call lives at the bottom of the script — calling it
 // here would touch VNC_APPS before its `const` is initialised (temporal dead
@@ -1090,11 +1348,11 @@ function renderVnc(app, mode, detail){
     box.innerHTML =
       `<div style="font-size:34px">${mode === 'starting' ? '⏳' : '🖥️'}</div>` +
       `<div><b>${meta.title}</b><br>${detail || ''}</div>` +
-      `<div style="max-width:440px;font-size:12px;color:#71717a">${meta.note}</div>`;
+      `<div style="max-width:440px;font-size:12px;color:#71717a">${t(meta.note)}</div>`;
     if (mode !== 'starting'){
       const b = document.createElement('button');
       b.className = 'btn pri';
-      b.textContent = 'Εκκίνηση ' + meta.title;
+      b.textContent = t('Εκκίνηση') + ' ' + meta.title;
       b.onclick = () => startVnc(app);
       box.appendChild(b);
     }
@@ -1111,11 +1369,11 @@ function renderVnc(app, mode, detail){
     b.className = 'btn ' + (cls||''); b.textContent = label; b.onclick = fn;
     row.appendChild(b);
   };
-  mk('↻ Επανασύνδεση', '', () => refreshVnc(app));
-  if (app !== 'rviz') mk('■ Τερματισμός', 'warn', () => stopVnc(app));
+  mk(t('↻ Επανασύνδεση'), '', () => refreshVnc(app));
+  if (app !== 'rviz') mk(t('■ Τερματισμός'), 'warn', () => stopVnc(app));
   const s = document.createElement('span');
   s.className = 'pill ' + (mode === 'live' ? 'ok' : '');
-  s.textContent = mode === 'live' ? 'ενεργό' : mode === 'starting' ? 'ξεκινά…' : 'σταματημένο';
+  s.textContent = mode === 'live' ? t('ενεργό') : mode === 'starting' ? t('ξεκινά…') : t('σταματημένο');
   row.appendChild(s);
   card.appendChild(row);
   pane.appendChild(card);
@@ -1131,16 +1389,16 @@ async function ensureVnc(app){
   const st = vncState[app];
   if (st.frame || st.busy) return;      // already live or mid-flight
   if (!HAS_NOVNC){
-    renderVnc(app, 'off', 'Λείπει το noVNC — <code>sudo apt install novnc</code>');
+    renderVnc(app, 'off', t('Λείπει το noVNC — <code>sudo apt install novnc</code>'));
     return;
   }
   st.busy = true;
   try {
     const j = await guiCall(app, 'status');
     renderVnc(app, j.running ? 'live' : 'off',
-              j.running ? '' : 'Η συνεδρία δεν τρέχει.');
+              j.running ? '' : t('Η συνεδρία δεν τρέχει.'));
   } catch(e){
-    renderVnc(app, 'off', 'Δεν απαντά ο server.');
+    renderVnc(app, 'off', t('Δεν απαντά ο server.'));
   } finally { st.busy = false; }
 }
 
@@ -1149,19 +1407,19 @@ async function startVnc(app){
   if (st.busy) return;
   st.busy = true;
   renderVnc(app, 'starting',
-    app === 'gazebo' ? 'Το Gazebo θέλει ~75 δευτερόλεπτα σε software rendering…'
-                     : 'Ξεκινά η γραφική συνεδρία…');
+    app === 'gazebo' ? t('Το Gazebo θέλει ~75 δευτερόλεπτα σε software rendering…')
+                     : t('Ξεκινά η γραφική συνεδρία…'));
   try {
     const j = await guiCall(app, 'start');
     renderVnc(app, j.running ? 'live' : 'off', j.running ? '' : j.result);
   } catch(e){
-    renderVnc(app, 'off', 'Απέτυχε η εκκίνηση.');
+    renderVnc(app, 'off', t('Απέτυχε η εκκίνηση.'));
   } finally { st.busy = false; }
 }
 
 async function stopVnc(app){
   vncState[app].frame = null;
-  renderVnc(app, 'off', 'Σταμάτησε.');
+  renderVnc(app, 'off', t('Σταμάτησε.'));
   try { await guiCall(app, 'stop'); } catch(e){}
   ensureVnc(app);
 }
@@ -1293,15 +1551,15 @@ const HANDLERS = {
   },
   roomba(m){
     const OI = {0:'off', 1:'passive', 2:'safe', 3:'full'};
-    const flag = (on, bad) => `<span class="pill ${on?(bad?'bad':'ok'):''}">${on?'ΝΑΙ':'όχι'}</span>`;
+    const flag = (on, bad) => `<span class="pill ${on?(bad?'bad':'ok'):''}">${on?t('ΝΑΙ'):t('όχι')}</span>`;
     const age = m.link_age_s;
     // > ~3 s of silence means the base has gone to sleep. Calling that out here
     // is the whole point of the panel: a sleeping Roomba fakes nav bugs.
     $('r-link').innerHTML = age === null || age === undefined
       ? '<span class="pill">—</span>'
-      : `<span class="pill ${age<3?'ok':'bad'}">${age.toFixed(1)}s ${age<3?'':'· ΚΟΙΜΑΤΑΙ'}</span>`;
+      : `<span class="pill ${age<3?'ok':'bad'}">${age.toFixed(1)}s ${age<3?'':'· '+t('ΚΟΙΜΑΤΑΙ')}</span>`;
     $('r-mode').innerHTML = `<span class="pill ${m.oi_mode===3||m.oi_mode===2?'ok':'warn'}">`
-      + (OI[m.oi_mode] || '—') + `</span> <span style="color:#52525b">ζητά ${m.oi_mode_want}</span>`;
+      + (OI[m.oi_mode] || '—') + `</span> <span style="color:#52525b">${t('ζητά')} ${m.oi_mode_want}</span>`;
     $('r-bump').innerHTML  = flag(m.bump, true);
     $('r-cliff').innerHTML = flag(m.cliff, true);
     $('r-wheel').innerHTML = flag(m.wheel_drop, true);
@@ -1312,13 +1570,14 @@ const HANDLERS = {
   estop(m){
     estop = !!m.on;
     $('estop').classList.toggle('engaged', estop);
-    $('estop').textContent = estop ? '▶ ΞΕΜΠΛΟΚΑΡΙΣΜΑ' : '■ STOP';
+    $('estop').textContent = estop ? t('▶ ΞΕΜΠΛΟΚΑΡΙΣΜΑ') : '■ STOP';
   },
   speaking(m){
     $('title').style.opacity = m.on ? '.55' : '1';
   },
   chat(m){ addMsg(m.role, m.text); },
   log(m){ addLog(m); },
+  cloud(m){ onCloud(m); },
   sys(m){
     $('s-cpu').textContent  = m.cpu.toFixed(0)+'%';
     $('s-mem').textContent  = m.mem+'% ('+m.mem_gb+' GB)';
@@ -1332,7 +1591,10 @@ const HANDLERS = {
 function connect(){
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws${TOKEN_QS}`);
-  ws.onopen  = ()=> $('dot').classList.add('on');
+  // Re-arm the cloud stream on reconnect: the node tracks viewers per socket,
+  // so after a restart (or a map switch) it has forgotten this tab is open.
+  ws.onopen  = ()=>{ $('dot').classList.add('on');
+                     if(cloudOn) send({type:'cloud', on:true}); };
   ws.onclose = ()=>{ $('dot').classList.remove('on'); setTimeout(connect,2000); };
   ws.onmessage = e=>{
     const m=JSON.parse(e.data);
@@ -1433,12 +1695,28 @@ $('b-arm-home').onclick = ()=>{
   send({type:'arm_joint',joint:'wrist',pos:0.0});
 };
 $('b-arm-limp').onclick = ()=>{
-  if(confirm('Κόβεται η ροπή — ο βραχίονας θα πέσει. Τον κρατάς;'))
+  if(confirm(t('Κόβεται η ροπή — ο βραχίονας θα πέσει. Τον κρατάς;')))
     send({type:'arm_raw',cmd:'{"T":210,"cmd":0}'});
 };
 $('b-arm-init').onclick = ()=>send({type:'arm_raw',cmd:'{"T":210,"cmd":1}'});
 $('b-arm-moveit').onclick = ()=>showTab('moveit');
 $('b-log-clear').onclick  = ()=>{ $('log-list').innerHTML=''; logSeen=0; $('log-count').textContent='0'; };
+$('b-cloud-reset').onclick = cloudReset;
+$('b-map-new').onclick  = mapNew;
+$('b-map-save').onclick = mapSave;
+cloudBind();
+
+// ‼️ Order matters: collect the ORIGINAL Greek markup before anything writes
+// translated text into the page, or the second language switch has nothing
+// Greek left to look up.
+i18nCollect();
+for(const [code, name] of LANGS){
+  const b = document.createElement('button');
+  b.className = 'btn'; b.dataset.lang = code; b.textContent = name;
+  b.onclick = () => setLang(code);
+  $('lang-buttons').appendChild(b);
+}
+applyLang();
 
 // ── vacuum ─────────────────────────────────────────────────────────────────
 $('b-dock').onclick   = ()=>send({type:'dock',on:true});
@@ -1449,11 +1727,258 @@ const chat=$('chat');
 function addMsg(role,text){
   const d=document.createElement('div');
   d.className='msg '+role;
-  d.textContent = role==='wake' ? '— ξύπνησε ('+text+') —' : text;
+  d.textContent = role==='wake' ? t('— ξύπνησε (')+text+') —' : text;
   chat.appendChild(d);
   while(chat.children.length>80) chat.removeChild(chat.firstChild);
   chat.scrollTop=chat.scrollHeight;
 }
+// ── language ───────────────────────────────────────────────────────────────
+// Greek is the source: it is what is written in the markup, and t() is a
+// lookup BY the Greek string. An untranslated string therefore renders as
+// Greek instead of as a missing key, which is the failure mode that matters
+// when a translation is added late.
+const I18N  = __I18N__;
+const LANGS = __LANGS__;
+let LANG = 'el';
+try { LANG = localStorage.getItem('hr_lang') || 'el'; } catch(e) {}
+
+function t(s){
+  if(LANG === 'el' || !s) return s;
+  const e = I18N[String(s).replace(/\s+/g, ' ').trim()];
+  return (e && e[LANG]) || s;
+}
+
+// Static markup is translated by walking the DOM once. The original Greek is
+// kept per node, because translating an already-translated node would look up
+// English text in a Greek-keyed table and find nothing — the page would be
+// stuck in whatever language it was switched to first.
+let i18nNodes = null;
+function i18nCollect(){
+  i18nNodes = [];
+  const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+    acceptNode: n => (n.parentNode && /^(SCRIPT|STYLE)$/.test(n.parentNode.nodeName))
+      ? NodeFilter.FILTER_REJECT
+      : (n.nodeValue.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT)
+  });
+  let n;
+  while((n = walk.nextNode())) i18nNodes.push({node: n, orig: n.nodeValue});
+  for(const el of document.querySelectorAll('[placeholder],[title]')){
+    for(const attr of ['placeholder', 'title']){
+      const v = el.getAttribute(attr);
+      if(v) i18nNodes.push({el: el, attr: attr, orig: v});
+    }
+  }
+}
+
+function applyLang(){
+  if(!i18nNodes) i18nCollect();
+  for(const rec of i18nNodes){
+    // Keep the surrounding whitespace: it is what indents the notes.
+    const lead  = rec.orig.match(/^\s*/)[0];
+    const trail = rec.orig.match(/\s*$/)[0];
+    const val   = lead + t(rec.orig) + trail;
+    if(rec.node) rec.node.nodeValue = val;
+    else rec.el.setAttribute(rec.attr, t(rec.orig));
+  }
+  document.documentElement.lang = LANG;
+  renderTabs();
+  for(const b of document.querySelectorAll('#lang-buttons .btn'))
+    b.classList.toggle('pri', b.dataset.lang === LANG);
+  if(document.querySelector('#p-set.active')) mapsRefresh();
+}
+
+function setLang(code){
+  LANG = code;
+  try { localStorage.setItem('hr_lang', code); } catch(e) {}
+  applyLang();
+}
+
+// ── maps ───────────────────────────────────────────────────────────────────
+// Switching a map restarts the whole stack: map_server takes its map as a
+// launch parameter and there is no runtime swap. Hence the confirm() — losing
+// navigation for ~90 s should never be one stray tap away.
+async function mapsRefresh(){
+  let d;
+  try { d = await (await fetch('/maps' + (TOKEN_QS || ''))).json(); }
+  catch(e){ return; }
+  $('map-active').textContent = d.mapping ? t('χαρτογράφηση…')
+                                          : (d.active || '—');
+  const box = $('map-list');
+  box.innerHTML = '';
+  for(const m of d.maps){
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:6px 0;'
+                      + 'border-bottom:1px solid #27272a';
+    const isActive = m.name === d.active;
+    const when = new Date(m.mtime * 1000).toLocaleDateString('el-GR');
+    row.innerHTML = `<span style="flex:1">${isActive ? '● ' : ''}<b>${m.name}</b>`
+      + `<span style="color:#71717a;font-size:11.5px"> · ${when} · ${m.kb} kB`
+      + `${m.resumable ? ' · ' + t('επεκτάσιμος') : ''}</span></span>`;
+    if(!isActive){
+      const b = document.createElement('button');
+      b.className = 'btn'; b.textContent = t('Ενεργοποίηση');
+      b.onclick = () => mapSwitch(m.name);
+      row.appendChild(b);
+    }
+    box.appendChild(row);
+  }
+}
+
+function mapMsg(s){ $('map-msg').textContent = s; }
+
+async function mapSwitch(name){
+  if(!confirm(t('Θα σταματήσει η πλοήγηση και θα ξαναξεκινήσουν όλα με τον χάρτη')
+              + ' "' + name + '".\n' + t('Διαρκεί περίπου 90 δευτερόλεπτα. Να συνεχίσω;'))) return;
+  mapMsg(t('Επανεκκίνηση… η σελίδα θα ξανασυνδεθεί μόνη της.'));
+  try { await fetch('/maps/switch/' + encodeURIComponent(name) + (TOKEN_QS || '')); }
+  catch(e){ /* the server is going down under us; that IS the success case */ }
+}
+
+async function mapNew(){
+  if(!confirm(t('Ξεκινά ΝΕΑ χαρτογράφηση (SLAM). Ο τρέχων χάρτης δεν χάνεται, '
+             + 'αλλά η πλοήγηση σταματά μέχρι να αποθηκεύσεις τον καινούργιο. Να συνεχίσω;'))) return;
+  mapMsg(t('Ξεκινά χαρτογράφηση… οδήγησε το ρομπότ σε όλο τον χώρο και μετά αποθήκευσε.'));
+  try { await fetch('/maps/new/new' + (TOKEN_QS || '')); } catch(e){}
+}
+
+async function mapSave(){
+  const name = $('map-save-name').value.trim();
+  if(!/^[A-Za-z0-9_-]{1,40}$/.test(name)){
+    mapMsg(t('Δώσε όνομα με λατινικά γράμματα, αριθμούς, - ή _')); return;
+  }
+  mapMsg(t('Αποθήκευση…'));
+  try {
+    const r = await (await fetch('/maps/save/' + encodeURIComponent(name)
+                                 + (TOKEN_QS || ''))).json();
+    mapMsg(r.ok ? t('Αποθηκεύτηκε') + ': ' + name : t('Απέτυχε') + ': ' + (r.result || ''));
+    mapsRefresh();
+  } catch(e){ mapMsg(t('Απέτυχε') + ': ' + e); }
+}
+
+// ── 3D point cloud ─────────────────────────────────────────────────────────
+// Canvas 2D, not WebGL and not three.js: the page must stay self-contained
+// (no CDN) and 4000 points sorted back-to-front is about a millisecond, so the
+// extra machinery would buy nothing. Points arrive as int16 millimetres +
+// RGB, in the camera optical frame: +x right, +y DOWN, +z forward.
+let cloudPts = null, cloudRGB = null;
+let cloudYaw = 0, cloudPitch = -0.15, cloudZoom = 1, cloudOn = false;
+
+function cloudReset(){ cloudYaw = 0; cloudPitch = -0.15; cloudZoom = 1; cloudDraw(); }
+
+function onCloud(m){
+  const bin = atob(m.data);
+  const n = m.n;
+  const xyz = new Float32Array(n * 3);
+  const rgb = new Uint8Array(n * 3);
+  for(let i = 0; i < n; i++){
+    const o = i * 9;
+    // int16 little-endian, by hand: this is a binary string, not a buffer.
+    for(let k = 0; k < 3; k++){
+      let v = bin.charCodeAt(o + k*2) | (bin.charCodeAt(o + k*2 + 1) << 8);
+      if(v & 0x8000) v -= 0x10000;
+      xyz[i*3 + k] = v / 1000;
+    }
+    rgb[i*3]     = bin.charCodeAt(o + 6);
+    rgb[i*3 + 1] = bin.charCodeAt(o + 7);
+    rgb[i*3 + 2] = bin.charCodeAt(o + 8);
+  }
+  cloudPts = xyz; cloudRGB = rgb;
+  $('cloud-info').textContent = m.n + ' / ' + m.total + ' ' + t('σημεία');
+  cloudDraw();
+}
+
+function cloudDraw(){
+  const cv = $('cloud-canvas');
+  if(!cv) return;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if(cv.width !== w || cv.height !== h){ cv.width = w; cv.height = h; }
+  const g = cv.getContext('2d');
+  g.fillStyle = '#0a0a0b'; g.fillRect(0, 0, w, h);
+  if(!cloudPts){
+    g.fillStyle = '#52525b'; g.font = '13px system-ui'; g.textAlign = 'center';
+    g.fillText(t('αναμονή για νέφος σημείων…'), w/2, h/2);
+    return;
+  }
+  const n = cloudPts.length / 3;
+  const cy = Math.cos(cloudYaw), sy = Math.sin(cloudYaw);
+  const cp = Math.cos(cloudPitch), sp = Math.sin(cloudPitch);
+  const f = Math.min(w, h) * 0.9 * cloudZoom;
+
+  // Painter's algorithm — without the sort, far points overwrite near ones and
+  // the cloud looks inside out.
+  const order = new Int32Array(n), depth = new Float32Array(n);
+  const px = new Float32Array(n), py = new Float32Array(n);
+  let count = 0;
+  for(let i = 0; i < n; i++){
+    const x = cloudPts[i*3], y = cloudPts[i*3 + 1], z = cloudPts[i*3 + 2];
+    if(!(z > 0.05)) continue;
+    // Orbit around a point a metre and a half in front of the camera.
+    const x1 =  x * cy + (z - 1.5) * sy;
+    const z1 = -x * sy + (z - 1.5) * cy;
+    const y1 =  y * cp - z1 * sp;
+    const z2 =  y * sp + z1 * cp + 1.5;
+    if(z2 < 0.15) continue;
+    order[count] = i; depth[count] = z2;
+    px[count] = w/2 + f * x1 / z2;
+    py[count] = h/2 + f * y1 / z2;
+    count++;
+  }
+  const idx = Array.from({length: count}, (_, i) => i)
+                   .sort((a, b) => depth[b] - depth[a]);
+  for(const j of idx){
+    const i = order[j];
+    const s = Math.max(1, Math.min(4, 2.2 * cloudZoom / depth[j]));
+    g.fillStyle = 'rgb(' + cloudRGB[i*3] + ',' + cloudRGB[i*3+1] + ',' + cloudRGB[i*3+2] + ')';
+    g.fillRect(px[j], py[j], s, s);
+  }
+}
+
+function cloudBind(){
+  const cv = $('cloud-canvas');
+  let drag = null, pinch = null;
+  cv.addEventListener('pointerdown', e => {
+    drag = {x: e.clientX, y: e.clientY}; cv.setPointerCapture(e.pointerId);
+    cv.style.cursor = 'grabbing';
+  });
+  cv.addEventListener('pointermove', e => {
+    if(!drag) return;
+    cloudYaw   += (e.clientX - drag.x) * 0.008;
+    cloudPitch += (e.clientY - drag.y) * 0.008;
+    cloudPitch = Math.max(-1.4, Math.min(1.4, cloudPitch));
+    drag = {x: e.clientX, y: e.clientY};
+    cloudDraw();
+  });
+  const stop = () => { drag = null; cv.style.cursor = 'grab'; };
+  cv.addEventListener('pointerup', stop);
+  cv.addEventListener('pointercancel', stop);
+  cv.addEventListener('wheel', e => {
+    e.preventDefault();
+    cloudZoom = Math.max(0.25, Math.min(6, cloudZoom * (e.deltaY < 0 ? 1.12 : 0.89)));
+    cloudDraw();
+  }, {passive: false});
+  cv.addEventListener('touchmove', e => {
+    if(e.touches.length !== 2) return;
+    e.preventDefault();
+    const d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX,
+                         e.touches[0].clientY - e.touches[1].clientY);
+    if(pinch) {
+      cloudZoom = Math.max(0.25, Math.min(6, cloudZoom * d / pinch));
+      cloudDraw();
+    }
+    pinch = d;
+  }, {passive: false});
+  cv.addEventListener('touchend', () => { pinch = null; });
+  window.addEventListener('resize', () => { if(cloudOn) cloudDraw(); });
+}
+
+// The stream is 150 kB/s, so it runs only while the tab is actually open.
+function cloudSetActive(on){
+  if(on === cloudOn) return;
+  cloudOn = on;
+  send({type: 'cloud', on: on});
+  if(on) cloudDraw();
+}
+
 // ── log tail ───────────────────────────────────────────────────────────────
 // Levels are rcl_interfaces/Log: 30 WARN, 40 ERROR, 50 FATAL. Auto-scroll is
 // suppressed when the user has scrolled up to read something — otherwise the
