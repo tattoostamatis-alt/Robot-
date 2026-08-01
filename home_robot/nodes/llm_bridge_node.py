@@ -427,7 +427,10 @@ class LLMBridgeNode(Node):
         try:
             from google import genai
             from google.genai import types
-            api_key = os.environ.get('GEMINI_API_KEY', '')
+            # Through the helper, not os.environ: a node started without the
+            # dotenv path would silently return None here and the robot would
+            # answer vision questions with nothing, blaming the camera.
+            api_key = api_keys.gemini_key()
             if not api_key:
                 return None
             client = genai.Client(api_key=api_key)
@@ -437,7 +440,10 @@ class LLMBridgeNode(Node):
                 f'Question: {question}'
             )
             resp = client.models.generate_content(
-                model='gemini-flash-lite-latest',
+                # Was pinned to 'gemini-flash-lite-latest', which ListModels no
+                # longer serves at all — this path 404'd while the main one
+                # worked. Follow the node's own parameter instead.
+                model=self.gemini_model,
                 contents=[
                     types.Part.from_bytes(data=frame_jpg, mime_type='image/jpeg'),
                     prompt,

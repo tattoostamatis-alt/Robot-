@@ -15,15 +15,19 @@ from dotenv import load_dotenv
 
 load_dotenv(os.path.expanduser('~/.env'))
 
+import sys as _s, pathlib as _p
+_s.path.insert(0, str(_p.Path.home() / 'robot_ws/src/home_robot'))
+from home_robot import api_keys
 from google import genai  # noqa: E402
 from google.genai import errors  # noqa: E402
 
-MODEL = sys.argv[1] if len(sys.argv) > 1 else 'gemini-flash-latest'
+# 'gemini-flash-latest' is no longer served (404 NOT_FOUND, 2026-08-01).
+MODEL = sys.argv[1] if len(sys.argv) > 1 else 'gemini-3.5-flash-lite'
 MAX_PROBES = 20
 
 
 def main():
-    client = genai.Client(api_key=os.environ['GEMINI_API_KEY'])
+    client = genai.Client(api_key=api_keys.gemini_key())
     ok_count = 0
 
     for i in range(1, MAX_PROBES + 1):
