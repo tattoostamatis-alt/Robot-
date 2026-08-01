@@ -17,9 +17,22 @@ while the robot sits idle. That is the price of never having to press CLEAN.
 It stands down whenever roomba_driver.py is running -- only one process can own
 /dev/roomba, and the driver manages OI mode itself while driving.
 
-‼️ TIMING. The 879 sleeps after ~90 SECONDS in Passive mode, not the 5 minutes
-the OI spec suggests (measured 2026-07-27). The cycle below must stay well under
-that; at the old 60s it could poke a robot that had already dozed off in the gap.
+‼️ TIMING. In Passive the 879 sleeps somewhere between 3 and 5 minutes -- awake
+at 180 s, gone by 300 s (re-measured 2026-08-01). Essentially the OI spec's 5
+minutes. The cycle below must stay well under that; at the old 60s it could poke
+a robot that had already dozed off in the gap.
+
+  The header used to claim ~90 SECONDS, "measured 2026-07-27". That number does
+  not reproduce, and the likely reason is a trap worth knowing about: os.open()
+  asserts DTR on Linux, i.e. it pulls BRC LOW the instant the port opens (see
+  roomba_driver.py, which releases it explicitly for this reason). A liveness
+  check that REOPENS the port therefore delivers its own BRC falling edge, so a
+  robot that dozed off and was woken by that edge reads as "still awake" -- and
+  the moment it finally reads asleep looks like the sleep threshold. Measure
+  this by opening the port ONCE and keeping it open, never by reopening.
+
+  Nothing here changed as a result: 30 s is comfortably inside either figure.
+  The old number was simply wrong about the hardware, presented as measured.
 
 ‼️ VERIFY, DON'T ASSUME (2026-07-25). This used to write start->full and call it
 a success without ever checking whether anything answered, and it logged nothing
@@ -28,13 +41,25 @@ been asleep since yesterday" produced identical (empty) journals. Every cycle
 now ends with a sensor query and logs awake/asleep transitions, because a
 keep-alive that cannot tell you it has failed is worse than none.
 
-‼️ BRC IS PHYSICALLY DEAD as of 2026-07-28 (mini-DIN pin 5). The wake path below
-is correct and verified at the electrical level -- TIOCMGET read-back proves the
-DTR line really moves -- but the robot answers neither 115200 nor 19200 after a
-clean falling edge. So today only a CLEAN press wakes it, and this daemon tells
-you when that is needed instead of failing silently. The suspects are a cut pin-5
-wire or the power bank cutting output; both need a physical check. When either is
-fixed, wake starts working here with no code change.
+‼️ BRC IS PHYSICALLY DEAD (mini-DIN pin 5). First found 2026-07-28; RE-TESTED
+2026-08-01 with the reopen artefact above ruled out, same result. That run is the
+one to reproduce, because it is the only design that can tell the difference:
+
+    port opened ONCE and held; 128 -> Passive confirmed; awake at 180 s; asleep
+    (0 bytes) at 300 s with no falling edge delivered in between; then a single
+    pulse, DTR read back LOW mid-pulse via TIOCMGET; 0 bytes at 115200 AND at
+    19200 (baud switched on the same fd, still no reopen).
+
+So the wake path here is correct and proven live at the electrical level -- our
+side of the wire really moves -- and the signal still does not reach the robot.
+Only a CLEAN press wakes it; this daemon says so instead of failing silently.
+Suspects, all physical: a cut pin-5 wire, the wrong pin in the mini-DIN, a bad
+contact, or the power bank cutting output. When any is fixed, wake starts working
+here with no code change.
+
+‼️ One pulse per attempt, always. Three inside 5 s put the robot on 19200 baud
+(OI spec), and a robot silently sitting on the wrong baud looks exactly like a
+dead one -- which is why the test above checks 19200 before concluding anything.
 """
 import fcntl
 import os
@@ -47,7 +72,7 @@ import time
 PORT = '/dev/roomba'
 
 # ── Cycle timing ──────────────────────────────────────────────────────────────
-# 30s, comfortably inside the ~90s Passive-mode sleep window.
+# 30s, comfortably inside the 3-5 min Passive-mode sleep window (see header).
 INTERVAL_S = 30.0
 
 # ── OI opcodes (iRobot Open Interface spec) ──────────────────────────────────
