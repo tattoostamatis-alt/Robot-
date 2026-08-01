@@ -51,13 +51,10 @@ def follower():
         'std_msgs': _mod('std_msgs'),
         'std_msgs.msg': _mod('std_msgs.msg',
                              Float32=lambda data=0.0: _ns(data=data),
-                             Bool=lambda data=False: _ns(data=data)),
-        'sensor_msgs': _mod('sensor_msgs'),
-        'sensor_msgs.msg': _mod('sensor_msgs.msg', Image=object),
+                             Bool=lambda data=False: _ns(data=data),
+                             String=lambda data='': _ns(data=data)),
         'geometry_msgs': _mod('geometry_msgs'),
         'geometry_msgs.msg': _mod('geometry_msgs.msg', Twist=_twist()),
-        'cv_bridge': _mod('cv_bridge', CvBridge=lambda: None),
-        'numpy': __import__('numpy'),
     }
     mod = _load(f'{PKG}/home_robot/nodes/person_follower_node.py', mods)
     return mod, mod.PersonFollowerNode()
@@ -65,11 +62,18 @@ def follower():
 
 def test_follower_listens_to_a_topic_that_exists(follower):
     """‼️ THE BUG: one namespace level short, so the node heard nothing at all
-    and the whole follow feature was silently dead."""
+    and the whole follow feature was silently dead.
+
+    The depth subscription is gone entirely as of 2026-08-01 — following now
+    reads object_detector's detections, which carry bearing AND distance for a
+    box actually labelled 'person'. Kept as a regression test on the wiring:
+    the failure mode was subscribing to something nobody publishes, and
+    `detected_objects` is the topic that must be there now.
+    """
     mod, node = follower
     topics = [t for t, _cb in node.subs]
-    assert '/camera/camera/depth/image_rect_raw' in topics
-    assert '/camera/depth/image_rect_raw' not in topics
+    assert 'detected_objects' in topics
+    assert not any('depth' in t for t in topics), 'the dead depth path is back'
 
 
 def test_follower_turns_toward_a_speaker_on_the_right(follower):

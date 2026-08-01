@@ -556,6 +556,43 @@ class RoombaDriver(Node):
         self._cur_angular += max(-step, min(step, requested - self._cur_angular))
         return self._cur_angular
 
+    # Below this, the "forward" component of a wheel pair is indistinguishable
+    # from the right_trim asymmetry: the trim multiplies the right wheel only,
+    # so even a pure spin averages slightly positive (~4 mm/s at the 1.2 rad/s
+    # teleop ceiling). Treating that as forward would make the guards below
+    # block turning on the spot — the one manoeuvre that gets the robot out of
+    # what it just hit. 20 mm/s is well clear of the artefact and far below any
+    # deliberate forward speed (mapping, the slowest, uses 30 mm/s).
+    _FORWARD_EPS_MM_S = 20.0
+
+    @classmethod
+    def _is_forward(cls, target_left, target_right):
+        """Does this wheel pair move the robot forward overall?
+
+        ‼️ Forward speed is the AVERAGE of the two wheels, not the sign of each
+        one. This used to be written `target_left > 0 and target_right > 0`,
+        which misses every arc: at this chassis' wheel_base, 0.10 m/s with
+        1.0 rad/s of turn comes out left=-9, right=+216 — still 103 mm/s
+        forward, i.e. the full commanded speed — but with one wheel negative
+        the per-wheel test let it through with the bumper pressed or a cliff
+        under the nose. Anything with |angular| > linear/0.109 hits this, and
+        MPPI, the spin recovery and doorway manoeuvres all arc constantly, so
+        it was the common case rather than an edge one. Found 2026-08-01.
+        """
+        return (target_left + target_right) / 2.0 > cls._FORWARD_EPS_MM_S
+
+    @staticmethod
+    def _strip_forward(target_left, target_right):
+        """Cancel the net forward motion of a wheel pair, keeping the turn.
+
+        Subtracting the average from both wheels leaves their difference — the
+        rotation — exactly as commanded, so a blocked robot can still turn away
+        from the obstacle instead of sitting against it until something else
+        gives up. Reverse is never routed here at all (see _is_forward).
+        """
+        forward = (target_left + target_right) / 2.0
+        return target_left - forward, target_right - forward
+
     def _ramp_step(self, current, target, dt):
         """How much this wheel's speed may change this tick, in mm/s.
 
@@ -611,8 +648,8 @@ class RoombaDriver(Node):
         # (only cliff/wheel-drop/charger), so this is the only bump protection
         # the robot has, in teleop and under Nav2 alike.
         if self.bump_stop and (now - self._last_bump_time) < self.bump_block_s:
-            if target_left > 0 and target_right > 0:
-                target_left = target_right = 0.0
+            if self._is_forward(target_left, target_right):
+                target_left, target_right = self._strip_forward(target_left, target_right)
                 if not self._bump_warned:
                     self._bump_warned = True
                     self.get_logger().warn('Bumper pressed — forward motion blocked')
@@ -624,8 +661,8 @@ class RoombaDriver(Node):
         # Blocks FORWARD only — reverse is exactly how the robot backs away
         # from an edge, so taking that away would strand it on the lip.
         if self.cliff_stop and (now - self._last_cliff_time) < self.cliff_block_s:
-            if target_left > 0 and target_right > 0:
-                target_left = target_right = 0.0
+            if self._is_forward(target_left, target_right):
+                target_left, target_right = self._strip_forward(target_left, target_right)
                 if not self._cliff_warned:
                     self._cliff_warned = True
                     self.get_logger().warn(

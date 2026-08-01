@@ -1,43 +1,48 @@
 #!/usr/bin/env python3
-"""Person follower node — follows a person using RealSense D435 depth and DoA angle.
+"""Person follower node — follows a person using object_detector's detections.
 
 Subscribes:
-  /follow_command              (std_msgs/Bool)     — True = start following, False = stop
-  /doa/wake                    (std_msgs/Float32)  — wake angle [0-359°]; only updates the
-                                                     target direction, does NOT activate
-  /camera/camera/depth/image_rect_raw (sensor_msgs/Image, 16UC1) — depth in mm
+  /follow_command   (std_msgs/Bool)    — True = start following, False = stop
+  /doa/wake         (std_msgs/Float32) — wake angle [0-359°]; seeds WHICH person to
+                                         lock onto, does NOT activate following
+  detected_objects  (std_msgs/String)  — object_detector.py's JSON detections,
+                                         carrying label + pixel box + box_distance
 
 Publishes:
-  /cmd_vel                     (geometry_msgs/Twist) — velocity commands
+  /cmd_vel          (geometry_msgs/Twist) — velocity commands
 
 Following logic:
   - Activates ONLY on an explicit follow_command=True (the llm_bridge 'follow' tool,
     i.e. the user said "ακολούθησέ με"). Stays active up to follow_timeout seconds.
-  - Uses the latest DoA wake angle to aim at the speaker (projected onto the depth
-    image column, D435 87° HFOV) — a fresh wake fired just before the command.
-  - Reads median depth in a vertical strip around that column.
-  - Turns to bring that bearing to the image centre, and moves forward when the
-    person is too far, stops when too close, holds in range.
+  - Each detection frame, picks the 'person' box nearest the current target column
+    (seeded from the DoA wake angle) and re-aims at it.
+  - Turns to bring that person to the image centre, and moves forward when they are
+    too far, stops when too close, holds in range.
   - Deactivates on follow_command=False or timeout; publishes a zero-velocity stop.
 
-Note: chmod +x this file after creation.
+‼️ This used to run open-loop off a vertical depth strip at the DoA column, and
+`_doa_col` was written ONLY by the wake callback — so during a follow the bearing
+error was a CONSTANT. `_turn_for` therefore returned the same non-zero rate on
+every frame and the robot spun on the spot for the full 30 s, measuring depth at
+an image column it had long since turned away from. Nothing in the loop could
+ever reduce the error, because nothing in the loop looked at where the person
+actually was. The fix is this file's whole point: the bearing now comes from the
+detector every frame, so turning toward the person is what makes the error shrink.
+Found 2026-08-01.
 """
 
+import json
 import math
 import threading
 import time
 
-import numpy as np
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float32, Bool
-from sensor_msgs.msg import Image
+from std_msgs.msg import Float32, Bool, String
 from geometry_msgs.msg import Twist
-from cv_bridge import CvBridge
 
 
-_IMAGE_WIDTH  = 640
-_IMAGE_HEIGHT = 480
+_IMAGE_WIDTH  = 640                # DoA seed projection only; frames carry img_w
 _CENTER_COL   = _IMAGE_WIDTH // 2  # 320
 
 
@@ -50,8 +55,11 @@ class PersonFollowerNode(Node):
         self.declare_parameter('follow_distance_max', 1.5)
         self.declare_parameter('follow_speed',        0.15)
         self.declare_parameter('follow_timeout',      30.0)
-        self.declare_parameter('depth_strip_width',   60)
         self.declare_parameter('camera_hfov_deg',     87.0)
+        # How long a person may be out of view before the robot stops moving.
+        # ‼️ Not cosmetic: acting on a stale bearing is exactly what made the
+        # old open-loop version spin forever. No fresh sighting, no motion.
+        self.declare_parameter('person_timeout',      1.0)
         # ‼️ Turning. The docstring has always claimed this node "aims at the
         # speaker", but _control only ever set linear.x — the DoA column picked
         # which depth strip to MEASURE and nothing more, so the robot drove
@@ -70,8 +78,8 @@ class PersonFollowerNode(Node):
         self._dist_max    = self.get_parameter('follow_distance_max').value
         self._speed       = self.get_parameter('follow_speed').value
         self._timeout     = self.get_parameter('follow_timeout').value
-        self._strip_width = self.get_parameter('depth_strip_width').value
         self._hfov        = self.get_parameter('camera_hfov_deg').value
+        self._lost_after  = self.get_parameter('person_timeout').value
         self._turn_gain   = self.get_parameter('turn_gain').value
         self._turn_dead   = self.get_parameter('turn_deadband_px').value
         self._turn_min    = self.get_parameter('min_turn_speed').value
@@ -80,10 +88,14 @@ class PersonFollowerNode(Node):
         # --- Internal state (all access via _lock) ------------------------
         self._lock         = threading.Lock()
         self._active       = False
-        self._active_until = 0.0       # monotonic timestamp when mode expires
+        self._active_until = 0.0          # monotonic timestamp when mode expires
         self._doa_col      = _CENTER_COL  # image column derived from DoA angle
-
-        self._bridge = CvBridge()
+        # Where the followed person was last SEEN. Seeded from _doa_col when a
+        # follow starts, then re-written from the detector on every frame —
+        # that write is what closes the control loop.
+        self._target_col   = _CENTER_COL
+        self._last_seen    = 0.0          # monotonic; staleness clock for _lost_after
+        self._lost_warned  = False
 
         # --- Publishers ---------------------------------------------------
         self._cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
@@ -93,16 +105,14 @@ class PersonFollowerNode(Node):
                                  self._follow_cmd_cb, 10)
         self.create_subscription(Float32, '/doa/wake',
                                  self._doa_cb, 10)
-        # ‼️ /camera/CAMERA/... — the realsense2_camera launch nests the camera
-        # name under the camera namespace, so every other node in this package
-        # uses the doubled prefix (object_detector, global_localizer,
-        # web_dashboard). This one was missing a level and subscribed to a topic
-        # NOBODY PUBLISHES, with no remapping in bringup.launch.py to save it:
-        # "ακολούθησέ με" logged "Following activated", never received a single
-        # frame, never published a single Twist, and silently timed out 30 s
-        # later. The whole feature was dead, on by default, since it was written.
-        self.create_subscription(Image, '/camera/camera/depth/image_rect_raw',
-                                 self._depth_cb, 10)
+        # object_detector.py already runs YOLO on the colour frame and pairs each
+        # box with a median depth, which is both halves of what following needs
+        # (bearing + distance) from a node that is up anyway. Reading the depth
+        # image directly here — as this node used to — meant a second consumer of
+        # the heaviest topic on the bus that still could not tell a person from a
+        # wall, which is how it ended up steering by a stale DoA angle.
+        self.create_subscription(String, 'detected_objects',
+                                 self._detections_cb, 10)
 
         self.get_logger().info(
             f'PersonFollowerNode ready '
@@ -138,9 +148,17 @@ class PersonFollowerNode(Node):
             with self._lock:
                 self._active       = True
                 self._active_until = time.monotonic() + self._timeout
-                col = self._doa_col
+                # The wake angle picks WHICH person to lock onto on the first
+                # frame; from there the detector takes over.
+                self._target_col   = self._doa_col
+                # Start the staleness clock now, so a follow where nobody is
+                # ever detected says so after person_timeout instead of sitting
+                # silent for the full 30 s.
+                self._last_seen    = time.monotonic()
+                self._lost_warned  = False
+                col = self._target_col
             self.get_logger().info(
-                f'Following activated (target col={col}, timeout={self._timeout:.0f}s)')
+                f'Following activated (seed col={col}, timeout={self._timeout:.0f}s)')
         else:
             with self._lock:
                 was_active   = self._active
@@ -150,76 +168,114 @@ class PersonFollowerNode(Node):
                 self.get_logger().info('Following stopped: stop command received')
 
     # ------------------------------------------------------------------
-    # Depth image callback — main control loop
+    # Person selection
     # ------------------------------------------------------------------
-    def _depth_cb(self, msg: Image):
-        """Process depth frame and issue cmd_vel; only acts when active."""
-        # Fast gate — check active flag under lock
+    @staticmethod
+    def _pick_person(objects, target_col):
+        """The 'person' box nearest `target_col`, as (centre_col, distance_m, img_w).
+
+        Nearest-to-last-seen rather than nearest-to-camera or biggest: with two
+        people in frame those two rules swap targets the moment someone walks
+        past, whereas continuity keeps the robot on whoever it was already
+        following. On the first frame `target_col` is the DoA seed, so the
+        person the speaker's voice came from wins.
+
+        Detections without a usable box or distance are skipped — a person with
+        no depth (all-zero pixels, too close, too far) gives a bearing we could
+        turn to but no distance to decide forward motion on, and half a control
+        input is worse than none.
+        """
+        best = None
+        for obj in objects:
+            if obj.get('label') != 'person':
+                continue
+            x1, x2 = obj.get('x1'), obj.get('x2')
+            distance, img_w = obj.get('box_distance'), obj.get('img_w')
+            if None in (x1, x2, distance, img_w):
+                continue
+            centre = (x1 + x2) / 2.0
+            gap = abs(centre - target_col)
+            if best is None or gap < best[0]:
+                best = (gap, centre, float(distance), int(img_w))
+        if best is None:
+            return None
+        _, centre, distance, img_w = best
+        return centre, distance, img_w
+
+    # ------------------------------------------------------------------
+    # Detections callback — main control loop
+    # ------------------------------------------------------------------
+    def _detections_cb(self, msg: String):
+        """Re-aim at the followed person and issue cmd_vel; only acts when active."""
         with self._lock:
             if not self._active:
                 return
             now = time.monotonic()
             if now >= self._active_until:
                 self._active = False
-                self.get_logger().info('Following stopped: 30-second timeout')
+                self.get_logger().info(
+                    f'Following stopped: {self._timeout:.0f}-second timeout')
                 self._publish_stop()
                 return
-            col = self._doa_col
+            target_col = self._target_col
+            last_seen  = self._last_seen
 
-        # Convert ROS Image → numpy array (16UC1, depth in millimetres)
         try:
-            depth_img = self._bridge.imgmsg_to_cv2(msg, '16UC1')
-        except Exception as exc:
-            self.get_logger().warn(f'cv_bridge conversion error: {exc}')
+            objects = json.loads(msg.data)
+        except json.JSONDecodeError:
             return
 
-        # Extract vertical strip around the target column
-        half      = self._strip_width // 2
-        col_start = max(0, col - half)
-        col_end   = min(depth_img.shape[1], col + half)
-        strip     = depth_img[:, col_start:col_end]
+        found = self._pick_person(objects, target_col)
 
-        # Flatten and discard invalid (zero) readings
-        flat  = strip.flatten()
-        valid = flat[flat > 0]
-
-        if valid.size == 0:
-            self.get_logger().debug(
-                f'No valid depth pixels in strip (col={col_start}-{col_end}), skipping'
-            )
+        if found is None:
+            # Out of view. Keep the follow alive so they can step back in, but
+            # STOP — the old code kept steering at the last bearing, which is
+            # what turned a lost target into an endless spin.
+            if last_seen and (now - last_seen) > self._lost_after:
+                self._publish_stop()
+                with self._lock:
+                    warn, self._lost_warned = not self._lost_warned, True
+                if warn:
+                    self.get_logger().info(
+                        'Δεν σε βλέπω — σταματώ μέχρι να ξαναφανείς')
             return
 
-        median_mm = float(np.median(valid))
-        median_m  = median_mm / 1000.0
+        centre, distance_m, img_w = found
+        with self._lock:
+            # Remembers WHO to follow next frame (see _pick_person). The control
+            # loop itself is closed one line further down, by handing _control
+            # `centre` — this frame's measurement — rather than this stored one.
+            self._target_col  = centre
+            self._last_seen   = now
+            was_lost, self._lost_warned = self._lost_warned, False
+        if was_lost:
+            self.get_logger().info('Σε ξαναβρήκα')
 
-        self.get_logger().debug(
-            f'Strip col={col_start}-{col_end}: {valid.size} valid px, '
-            f'median={median_m:.3f}m'
-        )
-
-        self._control(median_m, col)
+        self._control(distance_m, centre, img_w)
 
     # ------------------------------------------------------------------
     # Control logic
     # ------------------------------------------------------------------
-    def _turn_for(self, col: int) -> float:
+    def _turn_for(self, col: float, img_w: int = _IMAGE_WIDTH) -> float:
         """Angular velocity that brings `col` toward the image centre.
 
         Quantized to the chassis' real capability: below min_turn_speed the
         wheels do not move at all, so anything smaller is commanded as zero
-        rather than as a stall.
+        rather than as a stall. That quantization is also why the deadband
+        matters — without it the robot would hunt around centre at 0.35 rad/s,
+        never able to command the small correction it actually needs.
         """
-        err = col - _CENTER_COL            # +ve: target is right of centre
+        err = col - img_w / 2.0            # +ve: target is right of centre
         if abs(err) <= self._turn_dead:
             return 0.0
         wz = -self._turn_gain * err        # +z is left (CCW) in REP-103
         mag = min(max(abs(wz), self._turn_min), self._turn_max)
         return math.copysign(mag, wz)
 
-    def _control(self, depth_m: float, col: int):
+    def _control(self, depth_m: float, col: float, img_w: int = _IMAGE_WIDTH):
         """Publish Twist based on measured distance to, and bearing of, person."""
         twist = Twist()
-        twist.angular.z = self._turn_for(col)
+        twist.angular.z = self._turn_for(col, img_w)
 
         if depth_m > self._dist_max:
             # Person is too far away — drive toward them

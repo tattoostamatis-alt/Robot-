@@ -15,7 +15,6 @@ bare object rather than a live node, so no serial port or rclpy context.
 
     cd ~/robot_ws/src/home_robot && python3 -m pytest tests/test_soft_start.py -q
 """
-import importlib.util
 import os
 import re
 import types
@@ -39,7 +38,11 @@ def _ramp():
     those parameters.
     """
     src = open(DRIVER).read()
-    match = re.search(r'\n    def _ramp_step\(self.*?\n(?=    def )', src, re.S)
+    # Stop at a decorator as well as a `def`: without the `@`, extraction ran on
+    # past the end of the method and swallowed the next one's decorator line,
+    # leaving a dangling `@classmethod` that exec() rejects. Adding a decorated
+    # method anywhere below broke these tests rather than the driver.
+    match = re.search(r'\n    def _ramp_step\(self.*?\n(?=    (?:def |@))', src, re.S)
     assert match, '_ramp_step not found — was it renamed?'
     ns = {}
     exec('class _Stub:\n' + match.group(0), ns)
@@ -170,7 +173,7 @@ def _angular(monotonic):
     the method executes in gets a fake `time` — no sleeping in tests.
     """
     src = open(DRIVER).read()
-    match = re.search(r'\n    def _ramp_angular\(self.*?\n(?=    def )', src, re.S)
+    match = re.search(r'\n    def _ramp_angular\(self.*?\n(?=    (?:def |@))', src, re.S)
     assert match, '_ramp_angular not found — was it renamed?'
     ns = {'time': types.SimpleNamespace(monotonic=monotonic)}
     exec('class _Stub:\n' + match.group(0), ns)
