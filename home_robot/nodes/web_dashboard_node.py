@@ -1706,18 +1706,6 @@ $('b-map-new').onclick  = mapNew;
 $('b-map-save').onclick = mapSave;
 cloudBind();
 
-// ‼️ Order matters: collect the ORIGINAL Greek markup before anything writes
-// translated text into the page, or the second language switch has nothing
-// Greek left to look up.
-i18nCollect();
-for(const [code, name] of LANGS){
-  const b = document.createElement('button');
-  b.className = 'btn'; b.dataset.lang = code; b.textContent = name;
-  b.onclick = () => setLang(code);
-  $('lang-buttons').appendChild(b);
-}
-applyLang();
-
 // ── vacuum ─────────────────────────────────────────────────────────────────
 $('b-dock').onclick   = ()=>send({type:'dock',on:true});
 $('b-undock').onclick = ()=>send({type:'dock',on:false});
@@ -2010,6 +1998,25 @@ $('b-say').onclick  = ()=>sendChat('say');
 $('chat-text').addEventListener('keydown',e=>{ if(e.key==='Enter') sendChat('ask'); });
 
 // ── start ──────────────────────────────────────────────────────────────────
+// ‼️ Everything that RUNS lives here, at the bottom, after every declaration.
+// `let`/`const` are hoisted but not initialised, so calling i18nCollect() from
+// higher up the file — where it used to be, next to the button wiring — threw
+// "Cannot access 'i18nNodes' before initialization" and killed the whole
+// script. Nothing below the throw ran: no tabs, no camera, no websocket, so
+// the page rendered its layout and then sat there completely dead. That is
+// what it looked like from the MacBook on 2026-08-01.
+//
+// Collect the ORIGINAL Greek markup before anything writes translated text
+// into the page, or a second language switch has no Greek left to look up.
+i18nCollect();
+for(const [code, name] of LANGS){
+  const b = document.createElement('button');
+  b.className = 'btn'; b.dataset.lang = code; b.textContent = name;
+  b.onclick = () => setLang(code);
+  $('lang-buttons').appendChild(b);
+}
+applyLang();               // also builds the tabs, so it precedes showTab()
+
 // Set in JS so the stream carries the same token as the page.
 $('cam').src = '/camera.mjpeg' + TOKEN_QS;
 showTab('map');

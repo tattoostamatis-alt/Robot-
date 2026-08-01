@@ -192,3 +192,69 @@ console.log(JSON.stringify(out));
     assert got[2] == ''
     assert got[3] is None                        # must not crash on null
     assert got[4] == 'Χάρτης'                    # el is the source language
+
+
+# ── the page has to actually run ─────────────────────────────────────────────
+# ‼️ 2026-08-01: i18nCollect() was called next to the button wiring, ABOVE the
+# `let i18nNodes` that it assigns to. let/const are hoisted but not
+# initialised, so the browser threw "Cannot access 'i18nNodes' before
+# initialization" and the ENTIRE script died there. Everything after it —
+# building the tabs, the camera stream, connect() — never ran, so the page drew
+# its layout and then sat there dead. The string tests above all passed
+# throughout: they check the table, not whether the page executes.
+
+def _js_lines():
+    return _COMMENTS.sub('', _JS).splitlines()
+
+
+@pytest.mark.parametrize('name', ['i18nNodes', 'LANGS', 'I18N', 'LANG'])
+def test_no_top_level_use_before_declaration(name):
+    """A `let`/`const` may not be used by top-level code above its declaration."""
+    lines = _js_lines()
+    decl = next((i for i, ln in enumerate(lines)
+                 if re.match(rf'\s*(let|const)\s+{name}\b', ln)), None)
+    assert decl is not None, f'{name} is no longer declared'
+    for i, ln in enumerate(lines[:decl]):
+        # Top-level statements only: anything indented is inside a function,
+        # which does not run until it is called.
+        if ln.startswith((' ', '\t', '}')) or not ln.strip():
+            continue
+        assert not re.search(rf'\b{name}\b', ln), (
+            f'line {i + 1} uses {name} before it is declared on line {decl + 1}: '
+            f'{ln.strip()!r}')
+
+
+def test_the_startup_calls_are_in_the_start_block():
+    """They belong at the bottom, after every declaration — not next to the
+    button wiring, which is where they were when the page died.
+
+    Top-level calls only: applyLang() also appears inside setLang(), which is a
+    function body and does not run at load.
+    """
+    # Locate the block on the un-stripped source: _COMMENTS would remove the
+    # very marker being looked for.
+    start = _JS.index('// ── start')
+    tail = _JS[start:]
+    js = _COMMENTS.sub('', _JS)
+    for call in ('i18nCollect();', 'applyLang();', 'connect();'):
+        # Unindented = top level. The lines carry trailing comments and
+        # `resize(); connect();` shares a line, so match on containment.
+        top_level = [ln for ln in js.splitlines()
+                     if call in ln and not ln.startswith((' ', '\t'))]
+        assert top_level, f'{call} is no longer called at the top level'
+        assert call in tail, f'{call} runs before the start block'
+
+
+def test_connect_is_the_last_thing_that_runs():
+    """If anything after connect() throws it only loses that feature; if
+    anything BEFORE it throws, the robot goes silent behind a page that looks
+    perfectly fine. Keep the websocket last."""
+    js = _COMMENTS.sub('', _JS).split('</script>')[0].rstrip()
+    assert js.endswith('connect();'), 'connect() is no longer last'
+
+
+def test_tabs_are_built_before_the_first_showTab():
+    """showTab() marks a tab active; if applyLang() has not built them yet the
+    page opens with no navigation at all."""
+    js = _COMMENTS.sub('', _JS)
+    assert js.index('applyLang();') < js.index("showTab('map');")
