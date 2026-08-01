@@ -756,6 +756,197 @@ async def gui(request: Request, app_name: str, action: str, t: str = ''):
             'running': out.startswith('running')}
 
 
+# ── VNC viewer page ───────────────────────────────────────────────────────────
+# We serve our own page instead of the packaged /novnc/vnc.html, which failed
+# with a bare "Script error." on some browsers.  Two independent causes, both
+# fixed by not using that page:
+#
+#   * vnc.html loads its UI as <script type="module" crossorigin="anonymous">.
+#     A module fetched in CORS mode has its errors MUTED unless the response
+#     carries Access-Control-Allow-Origin, and StaticFiles sends none — so
+#     every failure inside it reaches window.onerror as the useless string
+#     "Script error." with no file, line, or stack.
+#   * app/ui.js reads its settings straight out of localStorage with no
+#     try/catch (app/webutil.js:159).  When the browser denies site storage —
+#     Safari "Block All Cookies" / Lockdown Mode, private windows, strict
+#     tracking protection — that throws during UI.start() and noVNC never
+#     paints.  Reproduced here with cookies blocked.
+#
+# This page uses core/rfb.js directly (the protocol half, which touches no
+# storage), imports it dynamically so a load failure is catchable, and reports
+# whatever goes wrong to the parent frame in words.
+VNC_VIEW_HTML = r"""<!DOCTYPE html>
+<html lang="el">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__APP__ — noVNC</title>
+<style>
+html,body{margin:0;height:100%;background:#0c0c0e;overflow:hidden}
+#screen{position:absolute;inset:0}
+#msg{position:absolute;left:0;right:0;top:0;z-index:5;padding:8px 12px;
+     font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
+     white-space:pre-wrap;word-break:break-word;display:none}
+#msg.err{display:block;background:#3b0d0d;color:#fecaca;border-bottom:1px solid #7f1d1d}
+#msg.info{display:block;background:#1c1c20;color:#a1a1aa;border-bottom:1px solid #2c2c32}
+</style>
+<!-- Classic script, deliberately first and non-module: it is installed before
+     anything can throw, and it is what the parent frame listens to. -->
+<script>
+(function(){
+  var APP = __APP_JS__;
+  var sent = null;
+  window.__vncReport = function(kind, text){
+    text = String(text == null ? '' : (text.stack || text.message || text));
+    // Only the first failure is interesting; later ones are fallout.
+    if (kind === 'error' && sent) return;
+    if (kind === 'error') sent = text;
+    try {
+      parent.postMessage({source:'vncview', app:APP, kind:kind, text:text},
+                         location.origin);
+    } catch(e){}
+    var el = document.getElementById('msg');
+    if (!el) return;
+    if (kind === 'ok'){ el.className = ''; el.textContent = ''; return; }
+    el.className = (kind === 'error') ? 'err' : 'info';
+    el.textContent = (kind === 'error' ? '⚠ ' : '') + text;
+  };
+  window.addEventListener('error', function(e){
+    // e.message is "Script error." only for muted cross-origin scripts; this
+    // page loads none, so the real text always survives.
+    __vncReport('error', (e.message || 'error') +
+                (e.filename ? '\n' + e.filename + ':' + e.lineno : ''));
+  });
+  window.addEventListener('unhandledrejection', function(e){
+    __vncReport('error', e.reason);
+  });
+})();
+</script>
+</head>
+<body>
+<div id="screen"></div>
+<div id="msg" class="info">Σύνδεση…</div>
+<script nomodule>
+  __vncReport('error', 'Ο browser δεν υποστηρίζει ES modules — χρειάζεται νεότερη έκδοση.');
+</script>
+<script type="module">
+// Dynamic import so a missing/broken /usr/share/novnc is a caught exception
+// with a real message, not a silent dead frame.
+let RFB;
+try {
+  RFB = (await import('/novnc/core/rfb.js')).default;
+} catch (e) {
+  __vncReport('error', 'Δεν φορτώνει το noVNC (/novnc/core/rfb.js): ' + e);
+  throw e;
+}
+
+const APP  = __APP_JS__;
+const PASS = __PASS_JS__;
+const QS   = __QS_JS__;
+const url  = (location.protocol === 'https:' ? 'wss' : 'ws') +
+             '://' + location.host + '/vnc/' + APP + QS;
+
+let rfb, connected = false;
+try {
+  rfb = new RFB(document.getElementById('screen'), url,
+                {credentials: {password: PASS}});
+} catch (e) {
+  __vncReport('error', 'RFB: ' + e);
+  throw e;
+}
+// The Xvnc geometry is fixed by gui_session.sh, so scale to the pane rather
+// than asking the server to resize (RViz would relayout on every phone turn).
+rfb.scaleViewport = true;
+rfb.resizeSession  = false;
+rfb.showDotCursor  = true;
+
+rfb.addEventListener('connect', () => {
+  connected = true;
+  __vncReport('ok', '');
+  // A reconnect that worked must not leave the counter armed, or the next
+  // drop hours later would burn the last retry immediately.
+  retry = 0;
+  try { history.replaceState(null, '', location.pathname + location.search); }
+  catch (e) {}
+});
+rfb.addEventListener('desktopname',
+  e => { if (e.detail && e.detail.name) document.title = e.detail.name; });
+// A wrong VNC password lands here, not in 'disconnect'.
+rfb.addEventListener('securityfailure', e => {
+  const d = e.detail || {};
+  __vncReport('error', 'Απορρίφθηκε ο κωδικός VNC (' +
+              (d.reason || 'status ' + d.status) + ') — δες το HOME_ROBOT_VNC_PASSWORD.');
+});
+rfb.addEventListener('credentialsrequired', () => {
+  __vncReport('error', PASS ? 'Ο server ζήτησε ξανά κωδικό — λάθος κωδικός VNC.'
+                            : 'Ο server ζητά κωδικό VNC και δεν έχει ρυθμιστεί.');
+});
+// The stock page had reconnect=1; keep that, because a phone that sleeps drops
+// the socket every time. The count rides in the location hash — per-session
+// browser storage is exactly what may be denied here — so a session that is
+// genuinely gone stops after a few tries instead of reloading forever.
+const MAX_RETRY = 5;
+let retry = parseInt((location.hash.match(/r=(\d+)/) || [])[1] || '0', 10);
+rfb.addEventListener('disconnect', () => {
+  if (!connected){
+    __vncReport('error', 'Δεν συνδέθηκε στο :__DISP__ (θύρα __PORT__). ' +
+                'Τρέχει η συνεδρία; scripts/gui_session.sh status ' + APP);
+    return;
+  }
+  if (retry >= MAX_RETRY){
+    __vncReport('error', 'Χάθηκε η σύνδεση και μετά από ' + MAX_RETRY +
+                ' προσπάθειες — η γραφική συνεδρία μάλλον σταμάτησε.');
+    return;
+  }
+  __vncReport('info', 'Χάθηκε η σύνδεση — επανασύνδεση…');
+  setTimeout(() => {
+    location.hash = 'r=' + (retry + 1);
+    location.reload();
+  }, 2000 * (retry + 1));
+});
+// Without this a refused websocket just leaves a black rectangle: RFB retries
+// internally and never fires anything the page can see.
+setTimeout(() => { if (!connected) __vncReport('error',
+  'Λήξη χρόνου σύνδεσης (15s) στο :__DISP__.'); }, 15000);
+</script>
+</body>
+</html>
+"""
+
+
+@app.get('/vncview/{app_name}', response_class=HTMLResponse)
+async def vnc_view(request: Request, app_name: str, t: str = ''):
+    """The RFB viewer itself. Token-checked so the VNC password, which is
+    baked into the page, is never handed to an anonymous caller — and so it
+    stops travelling in the iframe's URL the way ?password= used to."""
+    if not _authorised(t, request.cookies):
+        return HTMLResponse('Unauthorized', status_code=401)
+    if app_name not in VNC_PORTS:
+        return HTMLResponse('bad request', status_code=400)
+    if not os.path.isdir(NOVNC_DIR):
+        return HTMLResponse('noVNC is not installed (sudo apt install novnc)',
+                            status_code=503)
+    # Built from TOKEN, not from `t`: the caller may have been let in by the
+    # cookie, in which case `t` is empty (or junk) and the frame's own
+    # websocket would arrive unauthenticated.
+    token_qs = '' if NO_AUTH else '?t=' + quote(TOKEN, safe='')
+    port = VNC_PORTS[app_name]
+    # json.dumps for anything that lands inside a JS string literal; the extra
+    # </ guard is for a password containing "</script>", which would otherwise
+    # close the block no matter how well the string itself is escaped.
+    def js(v):
+        return json.dumps(v).replace('</', '<\\/')
+    html = (VNC_VIEW_HTML
+            .replace('__APP_JS__', js(app_name))
+            .replace('__APP__', app_name)
+            .replace('__PASS_JS__', js(VNC_PASSWORD))
+            .replace('__QS_JS__', js(token_qs))
+            .replace('__DISP__', str(port - 5900))
+            .replace('__PORT__', str(port)))
+    # The page carries a credential; keep it out of shared caches.
+    return HTMLResponse(html, headers={'Cache-Control': 'no-store'})
+
+
 # ── Maps ──────────────────────────────────────────────────────────────────────
 # The map is baked into map_server at launch: there is no runtime swap, so
 # switching one means restarting the stack. That is why the UI confirms first
@@ -954,8 +1145,6 @@ def _make_html(rooms: list, token: str = '') -> str:
     return (HTML_TEMPLATE
             .replace('__ROOMS__', json.dumps(rooms))
             .replace('__TOKEN_QS__', json.dumps(token_qs))
-            .replace('__VNC_QS__', json.dumps(quote(token_qs, safe='')))
-            .replace('__VNC_PASS__', json.dumps(VNC_PASSWORD))
             .replace('__ARM_LIMITS__', json.dumps(ARM_LIMITS))
             .replace('__ARM_JOINTS__', json.dumps(ARM_JOINTS))
             .replace('__HAS_NOVNC__', json.dumps(os.path.isdir(NOVNC_DIR)))
@@ -1287,8 +1476,6 @@ button{font:inherit;color:inherit}
 // ── constants ──────────────────────────────────────────────────────────────
 const ROOMS      = __ROOMS__;
 const TOKEN_QS   = __TOKEN_QS__;    // '' when auth is disabled
-const VNC_QS     = __VNC_QS__;      // same, url-encoded for noVNC's ?path=
-const VNC_PASS   = __VNC_PASS__;
 const ARM_LIMITS = __ARM_LIMITS__;
 const ARM_JOINTS = __ARM_JOINTS__;
 const HAS_NOVNC  = __HAS_NOVNC__;
@@ -1362,66 +1549,48 @@ Object.keys(VNC_APPS).forEach(k => vncState[k] = {frame:null, busy:false});
 
 function vncPane(app){ return $('p-' + app); }
 
-// noVNC reports trouble in two places, both buried in the iframe: a red
-// fallback banner for uncaught script errors, and its status bar for a refused
-// or dropped connection. Surface whichever fires, with the real text.
-function vncPeekError(app, f){
-  const st = vncState[app];
-  clearInterval(st.peek);
-  let tries = 0;
-  st.peek = setInterval(() => {
-    let text = '';
-    try {
-      const d = f.contentDocument;
-      if (!d) return;
-      const box = d.getElementById('noVNC_fallback_error');
-      if (box && box.classList.contains('noVNC_open'))
-        text = (d.getElementById('noVNC_fallback_errormsg') || {}).textContent || '';
-      if (!text){
-        const bar = d.getElementById('noVNC_status');
-        if (bar && bar.classList.contains('noVNC_open') &&
-            bar.classList.contains('noVNC_status_error'))
-          text = bar.textContent || '';
-      }
-    } catch(e){
-      // Cross-origin should be impossible here; stop rather than spin.
-      clearInterval(st.peek); return;
-    }
-    if (text){ clearInterval(st.peek); showVncError(app, text.trim()); }
-    else if (++tries > 40) clearInterval(st.peek);   // ~20s, then give up
-  }, 500);
+// /vncview reports its own failures by postMessage — no DOM scraping and no
+// polling, so a viewer that dies before it paints still says why. The old
+// version read noVNC's fallback banner out of the iframe, which could only
+// ever repeat what that banner said: "Script error."
+window.addEventListener('message', ev => {
+  if (ev.origin !== location.origin) return;
+  const m = ev.data;
+  if (!m || m.source !== 'vncview' || !VNC_APPS[m.app]) return;
+  if (m.kind === 'ok') clearVncError(m.app);
+  else if (m.kind === 'error') showVncError(m.app, m.text);
+});
+
+function clearVncError(app){
+  const pane = vncPane(app), b = pane && pane.querySelector('.vnc-err');
+  if (b) b.remove();
 }
 
 function showVncError(app, text){
   const host = vncPane(app).querySelector('.vnc-host');
-  if (!host || host.querySelector('.vnc-err')) return;
-  const b = document.createElement('div');
-  b.className = 'vnc-err';
+  if (!host) return;
+  let b = host.querySelector('.vnc-err');
+  if (!b){
+    b = document.createElement('div');
+    b.className = 'vnc-err';
+    host.insertBefore(b, host.firstChild);
+  }
   b.textContent = '⚠ noVNC: ' + text;
-  host.insertBefore(b, host.firstChild);
 }
 
 function renderVnc(app, mode, detail){
   const pane = vncPane(app), meta = VNC_APPS[app], st = vncState[app];
-  clearInterval(st.peek);          // the old frame is about to be thrown away
-  pane.innerHTML = '';
+  pane.innerHTML = '';             // the old frame, and its error banner, go
   const host = document.createElement('div');
   host.className = 'vnc-host';
   pane.appendChild(host);
 
   if (mode === 'live'){
     const f = document.createElement('iframe');
-    // noVNC reads these from its query string: connect straight away, scale to
-    // the iframe, and answer the VncAuth challenge without prompting (the page
-    // itself is already behind the dashboard token).
-    f.src = '/novnc/vnc.html?autoconnect=1&reconnect=1&resize=scale'
-          + '&path=' + encodeURIComponent('vnc/' + app) + VNC_QS
-          + '&password=' + encodeURIComponent(VNC_PASS);
-    // noVNC swallows its own failures into a banner *inside* the iframe, which
-    // is easy to miss on a scaled-down view and impossible to copy out of. The
-    // frame is same-origin, so mirror that text into our own pane instead of
-    // leaving the user with "the VNC has an error".
-    f.addEventListener('load', () => vncPeekError(app, f));
+    // Our own viewer, not noVNC's stock UI — see VNC_VIEW_HTML for why. The
+    // VNC credential is baked into that page server-side instead of riding in
+    // this URL, where it ended up in history and in every referrer.
+    f.src = '/vncview/' + app + TOKEN_QS;
     host.appendChild(f);
     st.frame = f;
   } else {
