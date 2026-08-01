@@ -215,6 +215,13 @@ class ObjectMemoryNode(Node):
                 continue
             self._last_pushed[inst['id']] = fact
             self.store_pub.publish(String(data=fact))
+        # Forget instances the memory itself has dropped. This dict is only a
+        # de-duplication cache for the push above, but it was never pruned, so
+        # it grew for every instance id the robot ever saw and outlived the
+        # objects themselves.
+        live = {inst['id'] for inst in items}
+        for gone in [k for k in self._last_pushed if k not in live]:
+            del self._last_pushed[gone]
 
     # ── persistence ───────────────────────────────────────────────────────
     def _load(self):

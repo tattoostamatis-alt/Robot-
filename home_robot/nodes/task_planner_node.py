@@ -44,6 +44,7 @@ from std_msgs.msg import Bool, String
 
 from home_robot.status_query import (room_el, room_locative_el,
                                      rooms_from_locations)
+from home_robot.stop_command import is_stop_command
 
 
 def _yaw_to_quaternion(yaw):
@@ -79,22 +80,38 @@ class TaskPlannerNode(Node):
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
 
         self._latest_objects = None
+        self._objects_rx = 0.0            # monotonic time of the last detection msg
         self._busy = threading.Lock()
         self._pick_event = threading.Event()
         self._pick_result = None
+        # ‼️ There was NO way to stop a running task. llm_bridge's emergency stop
+        # publishes patrol_command=False, and _on_patrol dropped it on the floor
+        # ("if not msg.data: return"), so a patrol kept visiting rooms and
+        # issuing fresh Nav2 goals: the robot halted for a fraction of a second
+        # on the zeroed cmd_vel and then drove off again on the next goal.
+        self._cancel = threading.Event()
 
         self.create_subscription(String, 'tidy_command', self._on_tidy, 10)
         self.create_subscription(Bool, 'patrol_command', self._on_patrol, 10)
         self.create_subscription(String, 'detected_objects', self._on_detected_objects, 10)
         self.create_subscription(String, 'pick_result', self._on_pick_result, 10)
+        # Belt and braces: honour a spoken stop directly, so a task still stops
+        # when llm_bridge is down (or busy failing) and never relays the cancel.
+        self.create_subscription(String, 'speech_text', self._on_speech_text, 10)
 
         self.get_logger().info('Task planner started')
 
     def _on_detected_objects(self, msg: String):
         try:
             self._latest_objects = json.loads(msg.data)
+            self._objects_rx = time.monotonic()
         except json.JSONDecodeError:
             pass
+
+    def _on_speech_text(self, msg: String):
+        if is_stop_command(msg.data) and self._busy.locked():
+            self.get_logger().warn('Spoken stop — cancelling the running task')
+            self._cancel.set()
 
     def _on_pick_result(self, msg: String):
         try:
@@ -108,12 +125,20 @@ class TaskPlannerNode(Node):
             data = json.loads(msg.data)
         except json.JSONDecodeError:
             data = {}
+        if data.get('cancel'):
+            self._cancel.set()
+            return
         room = data.get('room', 'all')
         rooms = self.room_order if room == 'all' else [room]
         self._run(self._tidy_run, rooms)
 
     def _on_patrol(self, msg: Bool):
         if not msg.data:
+            # ‼️ THE cancel signal, not a no-op. This is what llm_bridge's
+            # emergency stop sends, and there is one _busy lock for the whole
+            # node, so cancelling "the patrol" cancels whatever task is running
+            # — tidy included, which has no stop signal of its own.
+            self._cancel.set()
             return
         self._run(self._patrol_run, self.room_order)
 
@@ -121,6 +146,7 @@ class TaskPlannerNode(Node):
         if not self._busy.acquire(blocking=False):
             self.get_logger().warn('Already executing a task, ignoring new request')
             return
+        self._cancel.clear()
         threading.Thread(target=self._wrapped, args=(target, rooms), daemon=True).start()
 
     def _wrapped(self, target, rooms):
@@ -131,15 +157,24 @@ class TaskPlannerNode(Node):
 
     def _tidy_run(self, rooms):
         for room in rooms:
+            if self._cancel.is_set():
+                break
             self._visit_and_report(room)
-        if len(rooms) > 1:
+        if self._cancel.is_set():
+            self._say('Σταμάτησα την τακτοποίηση.')
+        elif len(rooms) > 1:
             self._say('Ολοκλήρωσα τον γύρο τακτοποίησης σε όλο το σπίτι.')
 
     def _patrol_run(self, rooms):
         self._say('Ξεκινάω περιπολία.')
         for room in rooms:
+            if self._cancel.is_set():
+                break
             self._visit_and_report(room)
-        self._say('Η περιπολία τελείωσε.')
+        if self._cancel.is_set():
+            self._say('Σταμάτησα την περιπολία.')
+        else:
+            self._say('Η περιπολία τελείωσε.')
 
     def _visit_and_report(self, room):
         loc = self.locations.get(room)
@@ -149,6 +184,8 @@ class TaskPlannerNode(Node):
             return
 
         ok, reason = self._navigate(loc)
+        if self._cancel.is_set():
+            return          # the run loop announces the cancellation once
         if not ok:
             self._say(f'Δεν κατάφερα να φτάσω {room_name} ({reason}).')
             return
@@ -163,6 +200,8 @@ class TaskPlannerNode(Node):
 
         if self.use_arm:
             for label in clutter:
+                if self._cancel.is_set():
+                    return
                 self._pick(label)
 
     def _pick(self, label):
@@ -207,16 +246,45 @@ class TaskPlannerNode(Node):
             return False, 'ο στόχος απορρίφθηκε'
 
         result_future = goal_handle.get_result_async()
-        result = self._await_future(result_future, self.nav_timeout)
+        # ‼️ Poll so a cancel can interrupt the leg, and — the part that was
+        # missing — CANCEL THE GOAL on the way out. Giving up on the future
+        # while leaving the goal active meant "λήξη χρόνου πλοήγησης" was a lie:
+        # Nav2 kept driving to that room while the planner moved to the next
+        # one, and on the last room of a patrol nothing preempted it at all.
+        deadline = time.monotonic() + self.nav_timeout
+        while rclpy.ok() and not result_future.done():
+            if self._cancel.is_set():
+                goal_handle.cancel_goal_async()
+                return False, 'ακυρώθηκε'
+            if time.monotonic() >= deadline:
+                goal_handle.cancel_goal_async()
+                return False, 'λήξη χρόνου πλοήγησης'
+            time.sleep(0.05)
+
+        result = result_future.result()
         if result is None:
-            return False, 'λήξη χρόνου πλοήγησης'
+            return False, 'η πλοήγηση απέτυχε'
+        if result.status == GoalStatus.STATUS_CANCELED:
+            return False, 'ακυρώθηκε'
         if result.status != GoalStatus.STATUS_SUCCEEDED:
             return False, 'η πλοήγηση απέτυχε'
         return True, None
 
     def _check_clutter(self):
-        time.sleep(self.detect_wait)
-        if not self._latest_objects:
+        # Interruptible settle: a cancel during the detector wait should not
+        # have to sit through it before the next room is skipped.
+        self._cancel.wait(self.detect_wait)
+        if self._cancel.is_set() or not self._latest_objects:
+            return []
+        # ‼️ Only trust detections that arrived while we were standing HERE.
+        # _latest_objects is whatever came last, so a detector that went quiet
+        # (camera crashed, YOLO wedged) left the previous room's objects in
+        # place and this room got reported with the last room's clutter.
+        age = time.monotonic() - self._objects_rx
+        if age > self.detect_wait * 2:
+            self.get_logger().warn(
+                f'detected_objects is {age:.1f}s stale — reporting no clutter '
+                'rather than the previous room\'s')
             return []
         return [o['label'] for o in self._latest_objects if o.get('clutter')]
 

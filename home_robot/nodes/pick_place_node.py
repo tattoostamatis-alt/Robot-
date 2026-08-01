@@ -68,10 +68,15 @@ from std_msgs.msg import Float32, String
 from tf2_geometry_msgs import do_transform_point
 
 from home_robot.servo_filter import median_point, spread, converged
+from home_robot.stop_command import is_stop_command
 
 
 CAMERA_FRAME = 'camera_color_optical_frame'
 ARM_FRAME = 'arm_base'
+
+
+class _Cancelled(Exception):
+    """A stop arrived between two arm motions."""
 
 
 class PickPlaceNode(Node):
@@ -131,12 +136,20 @@ class PickPlaceNode(Node):
 
         self._latest_objects = None
         self._busy = threading.Lock()
+        # A pick is ~10 s of blocking arm moves with no way to interrupt it.
+        # Cancellation here is deliberately CONSERVATIVE: it stops before
+        # starting the next motion, and only up to the moment the gripper
+        # closes. Once the object is held, the lift completes — abandoning the
+        # arm mid-descent, or opening the gripper in mid-air, is worse than
+        # finishing the step.
+        self._cancel = threading.Event()
 
         self.create_subscription(String, 'detected_objects', self._on_detected_objects, 10)
         self.create_subscription(String, 'pick_command', self._on_pick_command, 10)
         # Release a held object (used by the fetch mission after carrying it to
         # the user). JSON {} → drop at the default drop pose, or {"x","y","z"}.
         self.create_subscription(String, 'place_command', self._on_place_command, 10)
+        self.create_subscription(String, 'speech_text', self._on_speech_text, 10)
 
         self.get_logger().info('Pick-place node started (HW-unverified — see module docstring)')
 
@@ -146,11 +159,20 @@ class PickPlaceNode(Node):
         except json.JSONDecodeError:
             pass
 
+    def _on_speech_text(self, msg: String):
+        if is_stop_command(msg.data) and self._busy.locked():
+            self.get_logger().warn('Spoken stop — cancelling the arm sequence')
+            self._cancel.set()
+
     def _on_pick_command(self, msg: String):
         try:
             data = json.loads(msg.data) if msg.data else {}
         except json.JSONDecodeError:
             data = {}
+
+        if data.get('cancel'):
+            self._cancel.set()
+            return
 
         if not self._busy.acquire(blocking=False):
             self.get_logger().warn('Already executing a pick, ignoring new request')
@@ -159,6 +181,7 @@ class PickPlaceNode(Node):
         # hold=true: grasp and lift but do NOT place/return — the object stays in
         # the gripper for transport (fetch). Default false = legacy pick-and-drop.
         hold = bool(data.get('hold', False))
+        self._cancel.clear()
         threading.Thread(target=self._wrapped, args=(data.get('label'), hold), daemon=True).start()
 
     def _on_place_command(self, msg: String):
@@ -186,8 +209,18 @@ class PickPlaceNode(Node):
     def _wrapped(self, label, hold):
         try:
             self._run_pick(label, hold)
+        except _Cancelled:
+            self.get_logger().warn('Pick cancelled before the grasp — arm returned to init')
+            self._raw({'T': 100})            # known-safe pose, nothing held
+            self._say('Σταμάτησα τον βραχίονα.')
+            self._publish_result('cancelled', 'stopped by user')
         finally:
             self._busy.release()
+
+    def _abort_point(self):
+        """Raise if a stop arrived. Only ever called BEFORE a motion starts."""
+        if self._cancel.is_set():
+            raise _Cancelled()
 
     def _select_target(self, label):
         if not self._latest_objects:
@@ -217,20 +250,27 @@ class PickPlaceNode(Node):
         self.get_logger().info(
             f'Pick target "{target["label"]}" at arm_base ({ax:.3f}, {ay:.3f}, {az:.3f})')
 
+        self._abort_point()
         self._gripper(self.gripper_open)
+        self._abort_point()
         self._cartesian(ax, ay, hover_z)
 
         # Closed-loop XY refinement while hovering (see module docstring).
         if self.servo_enabled:
+            self._abort_point()
             ax, ay, az = self._servo(target['label'], ax, ay, az, hover_z)
 
         # Align the wrist to the object's short axis (grasp geometry from -seg).
         roll = self._grasp_roll(target)
         if roll is not None:
             self.get_logger().info(f'Grasp roll aligned to object axis: {math.degrees(roll):.0f}°')
+            self._abort_point()
             self._cartesian(ax, ay, hover_z, roll=roll)  # re-orient before descending
         r = roll or 0.0
 
+        # ‼️ LAST abort point. Past the descend+close pair the object is in the
+        # gripper, and the lift below has to finish.
+        self._abort_point()
         self._cartesian(ax, ay, az, roll=r)
         self._gripper(self.gripper_closed)
         self._cartesian(ax, ay, hover_z, roll=r)   # lift, object grasped

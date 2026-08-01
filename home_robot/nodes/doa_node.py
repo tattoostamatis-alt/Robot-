@@ -142,6 +142,13 @@ class DoaNode(Node):
         self.declare_parameter('led_enabled',       True)
         self.declare_parameter('led_brightness',    150)
         self.declare_parameter('listen_timeout',    12.0)  # max STT window seconds
+        # ‼️ Do not turn the base toward a voice while something else is driving
+        # it. The only guard used to be "not already rotating", so saying the
+        # wake word mid-goto put this node and Nav2's controller on cmd_vel at
+        # the same time — six independent publishers share that topic and the
+        # last write of each 20 Hz driver tick wins. Turning toward the speaker
+        # is a nicety; not fighting the navigator is not.
+        self.declare_parameter('rotate_block_s',    1.5)   # s since the last drive command
 
         poll_hz               = self.get_parameter('poll_hz').value
         self._rotate_on_wake  = self.get_parameter('rotate_on_wake').value
@@ -150,6 +157,7 @@ class DoaNode(Node):
         self._led_enabled     = self.get_parameter('led_enabled').value
         self._led_brightness  = self.get_parameter('led_brightness').value
         self._listen_timeout  = self.get_parameter('listen_timeout').value
+        self._rotate_block_s  = self.get_parameter('rotate_block_s').value
 
         self._angle_pub   = self.create_publisher(Float32, 'doa/angle', 10)
         self._wake_pub    = self.create_publisher(Float32, 'doa/wake',  10)
@@ -157,10 +165,15 @@ class DoaNode(Node):
 
         self.create_subscription(String, 'wake_word',   self._on_wake_word,   10)
         self.create_subscription(String, 'speech_text', self._on_speech_text, 10)
+        # Commanded intent, upstream of the collision monitor — the same signal
+        # recovery_manager watches. Non-zero here means a navigator (or teleop
+        # via the smoother) owns the base right now.
+        self.create_subscription(Twist, 'cmd_vel_smoothed', self._on_drive_cmd, 10)
 
         self._dev        = None
         self._last_angle = 0.0
         self._rotating   = False
+        self._last_drive = 0.0        # monotonic time of the last non-zero drive cmd
         self._led_state  = self._STATE_IDLE
         self._listen_timer = None
         self._lock       = threading.Lock()
@@ -234,8 +247,20 @@ class DoaNode(Node):
         self._listen_timer.daemon = True
         self._listen_timer.start()
 
-        if self._rotate_on_wake and not self._rotating:
+        if self._rotate_on_wake and not self._rotating and not self._base_is_busy():
             threading.Thread(target=self._rotate_toward, args=(angle,), daemon=True).start()
+
+    def _on_drive_cmd(self, msg: Twist):
+        if (abs(msg.linear.x) + abs(msg.linear.y) + abs(msg.angular.z)) > 0.01:
+            self._last_drive = time.monotonic()
+
+    def _base_is_busy(self) -> bool:
+        """True while someone else is driving, so we keep off cmd_vel."""
+        busy = (time.monotonic() - self._last_drive) < self._rotate_block_s
+        if busy:
+            self.get_logger().info(
+                'Wake word while navigating — not turning toward the speaker')
+        return busy
 
     def _on_listen_timeout(self):
         self.get_logger().info('Listen timeout — returning to idle')
@@ -272,6 +297,14 @@ class DoaNode(Node):
         try:
             t_end = time.monotonic() + duration
             while time.monotonic() < t_end and rclpy.ok():
+                # A goal can start after we did; yield the base the moment a
+                # navigator asks for it rather than fighting it to the end of
+                # the sweep. (Our own turn goes out on cmd_vel, not
+                # cmd_vel_smoothed, so this never self-triggers.)
+                if (time.monotonic() - self._last_drive) < self._rotate_block_s:
+                    self.get_logger().info(
+                        'Navigation took the base — abandoning the turn')
+                    break
                 self._cmd_vel_pub.publish(twist)
                 time.sleep(0.05)
         finally:

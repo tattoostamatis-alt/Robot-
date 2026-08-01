@@ -10,6 +10,8 @@ import base64
 import json
 import math
 import os
+import secrets
+import socket
 import threading
 from typing import Optional, Set
 
@@ -29,13 +31,64 @@ from std_srvs.srv import Empty
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 
 PORT = 8080
 # Resolve via the installed share dir — a path relative to __file__ breaks
 # under `ros2 run` (lib/home_robot/../config does not exist).
 LOCATIONS_FILE = os.path.join(
     get_package_share_directory('home_robot'), 'config', 'locations.yaml')
+
+# ── Access token ───────────────────────────────────────────────────────────────
+# ‼️ This dashboard binds 0.0.0.0 and hands out full teleop, click-to-navigate
+# and a live camera feed. It had no authentication at all, so anyone on the LAN
+# — or anything reaching it over Tailscale — could drive the robot. The token is
+# generated once and PERSISTED, so the phone bookmark keeps working across
+# restarts; delete the file to rotate it. Set HOME_ROBOT_DASHBOARD_NO_AUTH=1 to
+# go back to the open behaviour on a trusted, isolated network.
+TOKEN_FILE = os.path.expanduser('~/.home_robot/dashboard_token')
+NO_AUTH = os.environ.get('HOME_ROBOT_DASHBOARD_NO_AUTH') == '1'
+
+
+def _load_or_create_token() -> str:
+    try:
+        with open(TOKEN_FILE) as f:
+            tok = f.read().strip()
+        if tok:
+            return tok
+    except OSError:
+        pass
+    tok = secrets.token_urlsafe(16)
+    try:
+        os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
+        with open(TOKEN_FILE, 'w') as f:
+            f.write(tok + '\n')
+        os.chmod(TOKEN_FILE, 0o600)
+    except OSError:
+        pass          # a non-persisted token still secures this run
+    return tok
+
+
+TOKEN = '' if NO_AUTH else _load_or_create_token()
+
+
+def _authorised(supplied: Optional[str]) -> bool:
+    if NO_AUTH:
+        return True
+    return bool(supplied) and secrets.compare_digest(supplied, TOKEN)
+
+
+def _lan_ip() -> str:
+    """Best-effort local address for the startup banner (was hardcoded)."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(('10.255.255.255', 1))   # no packet is actually sent
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except OSError:
+        return 'localhost'
 
 # ── Locations ──────────────────────────────────────────────────────────────────
 
@@ -217,8 +270,9 @@ class DashboardNode(Node):
 
 # ── HTML frontend ──────────────────────────────────────────────────────────────
 
-def _make_html(rooms: list) -> str:
+def _make_html(rooms: list, token: str = '') -> str:
     rooms_json = json.dumps(rooms)
+    token_qs = json.dumps(f'?t={token}' if token else '')
     return f"""<!DOCTYPE html>
 <html lang="el">
 <head>
@@ -305,11 +359,11 @@ html,body{{height:100%;overflow:hidden;background:#1a1a1a;color:#e0e0e0;
   <div id="map-wrap">
     <canvas id="map-canvas"></canvas>
     <div id="map-lbl">MAP · click to navigate</div>
-    <div id="nav-lbl" id="nav-lbl">Navigating…</div>
+    <div id="nav-lbl">Navigating…</div>
   </div>
   <div id="right">
     <div id="cam-wrap">
-      <img id="cam" src="/camera.mjpeg" alt="">
+      <img id="cam" alt="">
       <div id="cam-lbl">📷 D435</div>
     </div>
     <div id="info">
@@ -341,8 +395,13 @@ html,body{{height:100%;overflow:hidden;background:#1a1a1a;color:#e0e0e0;
 <script>
 // ── constants ──────────────────────────────────────────────────────────────
 const ROOMS = {rooms_json};
+const TOKEN_QS = {token_qs};   // '' when auth is disabled
 const LIN = 0.10, ANG = 0.10;
-const LASER_X = 0.00, LASER_YAW_OFFSET = 0.0; // laser TF
+// ‼️ Must match bringup.launch.py's tf_base_laser: x=0, yaw=pi. This said 0.0
+// and drew every scan point mirrored through the robot, so the dots never
+// landed on the walls and the dashboard looked like a localization failure
+// when localization was fine.
+const LASER_X = 0.00, LASER_YAW_OFFSET = Math.PI; // laser TF (base_link->laser)
 
 // ── state ──────────────────────────────────────────────────────────────────
 let ws=null, mapInfo=null, mapImg=null, pose=null, scan=null, goal=null;
@@ -430,7 +489,7 @@ new ResizeObserver(resize).observe(wrap);
 
 // ── websocket ──────────────────────────────────────────────────────────────
 function connect(){{
-  ws = new WebSocket(`ws://${{location.host}}/ws`);
+  ws = new WebSocket(`ws://${{location.host}}/ws${{TOKEN_QS}}`);
   ws.onopen  = ()=> document.getElementById('dot').classList.add('on');
   ws.onclose = ()=>{{ document.getElementById('dot').classList.remove('on'); setTimeout(connect,2000); }};
   ws.onmessage = e=>{{
@@ -505,6 +564,8 @@ document.getElementById('btn-xnav').addEventListener('click',()=>{{
 }});
 
 // ── start ──────────────────────────────────────────────────────────────────
+// Set in JS so the stream carries the same token as the page.
+document.getElementById('cam').src = '/camera.mjpeg' + TOKEN_QS;
 resize(); connect();
 </script>
 </body>
@@ -526,11 +587,15 @@ async def _lifespan(app: FastAPI):
 app = FastAPI(lifespan=_lifespan)
 
 @app.get('/', response_class=HTMLResponse)
-async def index():
-    return HTMLResponse(_make_html(list(locations.keys())))
+async def index(t: str = ''):
+    if not _authorised(t):
+        return HTMLResponse('Unauthorized', status_code=401)
+    return HTMLResponse(_make_html(list(locations.keys()), t))
 
 @app.get('/camera.mjpeg')
-async def camera():
+async def camera(t: str = ''):
+    if not _authorised(t):
+        return Response('Unauthorized', status_code=401)
     async def stream():
         while True:
             jpg = state.camera_jpg
@@ -542,7 +607,10 @@ async def camera():
                              media_type='multipart/x-mixed-replace; boundary=frame')
 
 @app.websocket('/ws')
-async def ws_endpoint(ws: WebSocket):
+async def ws_endpoint(ws: WebSocket, t: str = ''):
+    if not _authorised(t):
+        await ws.close(code=1008)      # policy violation
+        return
     await ws.accept()
     state.add_client(ws)
 
@@ -582,7 +650,14 @@ def main():
     t = threading.Thread(target=_spin, args=(ros_node,), daemon=True)
     t.start()
 
-    print(f'\n🤖  Web dashboard → http://192.168.178.62:{PORT}\n')
+    qs = f'?t={TOKEN}' if TOKEN else ''
+    print(f'\n🤖  Web dashboard → http://{_lan_ip()}:{PORT}/{qs}')
+    if NO_AUTH:
+        print('    ‼️  HOME_ROBOT_DASHBOARD_NO_AUTH=1 — anyone who can reach '
+              'this port can drive the robot.')
+    else:
+        print(f'    token stored in {TOKEN_FILE} (delete it to rotate)')
+    print()
     uvicorn.run(app, host='0.0.0.0', port=PORT, log_level='warning')
 
 

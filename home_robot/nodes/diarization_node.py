@@ -91,12 +91,21 @@ class DiarizationNode(Node):
         self.declare_parameter('max_segment_frames',  200)    # ~6s max
         self.declare_parameter('similarity_threshold', 0.75)
         self.declare_parameter('auto_enroll',          True)  # label new voices automatically
+        # ‼️ Ceiling on auto-enrolment. Every segment scoring below
+        # similarity_threshold used to mint a new Speaker_N AND rewrite the
+        # whole profiles file, so a household with background TV, or a
+        # threshold set slightly too strict, grew the store without bound and
+        # re-saved it on every utterance. Past this many auto profiles, an
+        # unrecognised voice is reported as 'unknown' instead. Manual enrolments
+        # (enroll_command) are deliberate and are NOT capped.
+        self.declare_parameter('max_auto_speakers',     8)
 
         self._dev_idx   = self.get_parameter('device_index').value
         self._n_ch      = self.get_parameter('mic_channels').value
         self._ch        = self.get_parameter('mic_channel').value
         self._sim_thr   = self.get_parameter('similarity_threshold').value
         self._auto_enr  = self.get_parameter('auto_enroll').value
+        self._max_auto  = self.get_parameter('max_auto_speakers').value
         self._min_sp    = self.get_parameter('min_speech_frames').value
         self._sil_lim   = self.get_parameter('silence_frames').value
         self._max_seg   = self.get_parameter('max_segment_frames').value
@@ -129,6 +138,11 @@ class DiarizationNode(Node):
         )
 
     # ── Profile persistence ──────────────────────────────────────────
+
+    def _auto_enrolled_count(self) -> int:
+        """How many of the stored profiles this node named itself."""
+        with self._profiles_lock:
+            return sum(1 for n in self._profiles if n.startswith('Speaker_'))
 
     def _load_profiles(self):
         if os.path.exists(PROFILES_FILE):
@@ -256,7 +270,7 @@ class DiarizationNode(Node):
                 best_sim, best_name = sim, name
 
         if best_sim < self._sim_thr:
-            if self._auto_enr:
+            if self._auto_enr and self._auto_enrolled_count() < self._max_auto:
                 best_name = f'Speaker_{self._auto_count}'
                 self._auto_count += 1
                 with self._profiles_lock:
