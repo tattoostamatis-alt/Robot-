@@ -60,6 +60,21 @@ here with no code change.
 ‼️ One pulse per attempt, always. Three inside 5 s put the robot on 19200 baud
 (OI spec), and a robot silently sitting on the wrong baud looks exactly like a
 dead one -- which is why the test above checks 19200 before concluding anything.
+
+✔ A POWER CYCLE WAKES IT (found 2026-08-01). Unplugging the robot from the power
+bank for ~10 s and plugging it back in brings the OI straight back, no CLEAN.
+Attribution is solid rather than assumed: this daemon's own handshake -- which
+sends 128 -- had been answered with silence three times at 13:28-13:29, so the
+robot was genuinely asleep and not merely sitting in OFF (a powered robot in OFF
+ignores a bare query but DOES answer 128, which is the trap to avoid here); the
+power cycle was the only thing that happened before it answered 128 at 13:35.
+
+  Not automatable as wired today: the robot hangs off a POWER BANK, which the PC
+  cannot switch. It becomes automatable the moment there is a PC-controlled
+  switch in that DC line (a USB relay is the cheap option) -- at which point this
+  daemon can power-cycle instead of asking, and the CLEAN press disappears for
+  good. Deliberately not written until that switch exists: untestable code for
+  absent hardware is how the BRC path came to look finished for months.
 """
 import fcntl
 import os
@@ -251,13 +266,13 @@ def boot_wake() -> bool:
             log(f'startup wake: port unavailable ({e})')
         if attempt < BOOT_WAKE_ATTEMPTS:
             time.sleep(BOOT_WAKE_GAP_S)
-    log('startup wake FAILED — press CLEAN on the robot. '
-        'BRC (mini-DIN pin 5) is not reaching the robot: either the wire is cut '
-        'or the power bank is not powering it. Serial cannot wake it until that '
-        'is fixed.')
+    log('startup wake FAILED — CLEAN press, or unplug the robot from the power '
+        'bank for ~10s and plug it back in (verified 2026-08-01: a power cycle '
+        'brings the OI back with no CLEAN at all). BRC (mini-DIN pin 5) does not '
+        'reach the robot, so serial cannot do either for us.')
     notify('Roomba is asleep',
-           'The PC is up but the robot did not answer. Press CLEAN on the robot '
-           'to wake it — BRC wake over serial is not working.')
+           'The PC is up but the robot did not answer. Press CLEAN, or power-cycle '
+           'it at the power bank for ~10s — either brings it back.')
     return False
 
 
@@ -290,10 +305,11 @@ def main() -> int:
                 if awake:
                     log('robot is AWAKE and held in Full mode by keep-alive')
                 else:
-                    log('robot went ASLEEP (or lost power) — press CLEAN. '
-                        'BRC wake over serial does not reach it.')
+                    log('robot went ASLEEP (or lost power) — press CLEAN, or '
+                        'power-cycle it at the power bank for ~10s. BRC wake over '
+                        'serial does not reach it, so we cannot do either.')
                     notify('Roomba fell asleep',
-                           'Press CLEAN on the robot to bring it back.')
+                           'Press CLEAN, or unplug it from the power bank for ~10s.')
                 state = new_state
         except OSError as e:
             # Port missing (robot unplugged) or briefly grabbed by someone
