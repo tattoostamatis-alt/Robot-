@@ -152,7 +152,9 @@ class DoaNode(Node):
 
         poll_hz               = self.get_parameter('poll_hz').value
         self._rotate_on_wake  = self.get_parameter('rotate_on_wake').value
-        self._rotate_speed    = self.get_parameter('rotate_speed').value
+        # Guarded: this is a divisor in _rotation_duration, and 0 would take
+        # the node down with a ZeroDivisionError on the first turn.
+        self._rotate_speed    = max(0.01, float(self.get_parameter('rotate_speed').value))
         self._min_angle_deg   = self.get_parameter('min_angle_deg').value
         self._led_enabled     = self.get_parameter('led_enabled').value
         self._led_brightness  = self.get_parameter('led_brightness').value

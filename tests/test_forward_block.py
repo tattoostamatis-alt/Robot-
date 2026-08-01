@@ -182,7 +182,8 @@ def motor():
     """
     src = open(DRIVER).read()
     body = ''
-    for name in ('_is_forward', '_strip_forward', '_ramp_step', '_motor_control'):
+    for name in ('_is_forward', '_strip_forward', '_ramp_step', '_drive',
+                 '_on_write_failure', '_sensors_fresh', '_motor_control'):
         match = re.search(
             rf'\n    (?:@(?:class|static)method\n    )?def {name}\(.*?\n(?=    (?:def |@))',
             src, re.S)
@@ -208,6 +209,16 @@ def motor():
     stub._last_bump_time = stub._last_cliff_time = -1e9   # nothing triggered
     stub._bump_warned = stub._cliff_warned = False
     stub._wheel_drop = stub._wheel_drop_warned = False
+    # Serial-link state (2026-08-01): every wheel write now goes through
+    # _drive(), and stale bumper/cliff readings block forward motion. A healthy
+    # link is the default here so the guard under test stays the bumper/cliff.
+    stub.sensor_stale_s = 1.0
+    stub._last_ok_time = __import__('time').monotonic()
+    stub._stale_warned = False
+    stub._write_failures = 0
+    stub._last_write_ok = 0.0
+    stub._cur_angular = 0.0
+    stub._connect_oi = lambda: None
     stub.sent = sent
     return stub
 
@@ -270,14 +281,17 @@ def test_motor_control_passes_straight_forward_when_nothing_is_triggered(motor):
 
 # ── The guards are actually wired to these methods ────────────────────
 
-def test_bumper_and_cliff_both_use_the_shared_test():
-    """Both guards must go through _is_forward — the bug was one open-coded
-    condition duplicated in two places, and a partial fix is the likely relapse."""
+def test_every_forward_guard_uses_the_shared_test():
+    """All of them must go through _is_forward — the bug was one open-coded
+    condition duplicated in two places, and a partial fix is the likely relapse.
+
+    Three guards since 2026-08-01: bumper, cliff, and stale sensor readings.
+    """
     src = open(DRIVER).read()
     control = src[src.index('def _motor_control'):]
     control = control[:control.index('\n    def _check_idle')]
-    assert control.count('self._is_forward(target_left, target_right)') == 2
-    assert control.count('self._strip_forward(target_left, target_right)') == 2
+    assert control.count('self._is_forward(target_left, target_right)') == 3
+    assert control.count('self._strip_forward(target_left, target_right)') == 3
     # ...and none of them open-codes the per-wheel test again. Checked against
     # the method body only: the docstrings quote the old condition on purpose.
     assert 'target_left > 0 and target_right > 0' not in control, \

@@ -82,9 +82,11 @@ class RecoveryManagerNode(Node):
         self._cmd_thr         = self.get_parameter('cmd_threshold').value
         self._max_attempts    = self.get_parameter('max_attempts').value
         self._backup_dist     = self.get_parameter('backup_distance').value
-        self._backup_speed    = self.get_parameter('backup_speed').value
+        # Divisors when the time allowance is computed; 0 would crash the
+        # recovery that is meant to be rescuing a stuck robot.
+        self._backup_speed    = max(0.01, float(self.get_parameter('backup_speed').value))
         self._drive_dist      = self.get_parameter('drive_distance').value
-        self._drive_speed     = self.get_parameter('drive_speed').value
+        self._drive_speed     = max(0.01, float(self.get_parameter('drive_speed').value))
         self._spin_angle      = self.get_parameter('spin_angle').value
         self._enabled         = self.get_parameter('enabled').value
         self._nudge_linear    = self.get_parameter('nudge_linear_speed').value

@@ -326,6 +326,10 @@ class RoombaDriver(Node):
         # Keep forward blocked this long after the bumper releases, so the
         # rebound doesn't drive straight back into the same obstacle.
         self.declare_parameter('bump_block_s', 1.0)
+        # How stale the bumper/cliff readings may be before forward motion is
+        # refused. They are only refreshed by get_encoders() at 20 Hz, so a
+        # second is twenty missed reads — a stalled link, not a slow one.
+        self.declare_parameter('sensor_stale_s', 1.0)
         # Reverse felt too fast at the same scale_linear.x as forward —
         # scales the commanded speed down (not a calibration trim like
         # right_trim_reverse above, just a deliberate speed cap) whenever
@@ -354,6 +358,10 @@ class RoombaDriver(Node):
         self.max_angular_accel = self.get_parameter('max_angular_accel').value
         self.bump_stop = self.get_parameter('bump_stop').value
         self.bump_block_s = self.get_parameter('bump_block_s').value
+        self.sensor_stale_s = max(0.1, float(self.get_parameter('sensor_stale_s').value))
+        self._write_failures = 0
+        self._last_write_ok = 0.0
+        self._stale_warned = False
         self._bump = False
         self._bump_warned = False
         self._last_bump_time = 0.0
@@ -494,6 +502,78 @@ class RoombaDriver(Node):
                 self.reverse_speed_scale = p.value
         return SetParametersResult(successful=True)
 
+    def _drive(self, right_mm_s, left_mm_s) -> bool:
+        """The ONE place wheels are commanded. Returns whether the write landed.
+
+        ‼️ Why this exists at all. The OI holds the last velocity it was given —
+        it has no watchdog of its own, and in `full` mode (the default here) the
+        Roomba does not act on its own bumper or cliff either. So a serial write
+        that throws is not "a dropped frame": the robot carries on at whatever
+        it was last told, blind, and the exception takes the 20 Hz timer with
+        it, so no zero ever gets sent. A link lost at 200 mm/s meant 200 mm/s
+        until somebody caught the robot.
+
+        On failure the only thing worth doing is trying to stop, hard and
+        repeatedly, before anything else — hence the immediate zero retries and
+        the reconnect. Driving does not resume until a write succeeds.
+        """
+        try:
+            self.bot.drive_direct(int(right_mm_s), int(left_mm_s))
+        except Exception as exc:                          # noqa: BLE001
+            self._on_write_failure(exc)
+            return False
+        if self._write_failures:
+            self.get_logger().info('Serial link back — wheels under control again')
+            self._write_failures = 0
+        self._last_write_ok = time.monotonic()
+        return True
+
+    def _on_write_failure(self, exc):
+        self._write_failures += 1
+        # Our own ramp state has to go to zero too, or a link that comes back
+        # resumes at the old speed instead of ramping up from a standstill.
+        self._target_left = self._target_right = 0.0
+        self._cur_left = self._cur_right = 0.0
+        self._cur_angular = 0.0
+
+        if self._write_failures == 1:
+            self.get_logger().error(
+                f'Wheel command failed ({exc!r}) — THE ROOMBA KEEPS ITS LAST '
+                'SPEED, so stopping it is now the only thing that matters.')
+        # Three fast attempts at a zero: a single dropped byte is common and
+        # usually the next write goes through immediately.
+        for _ in range(3):
+            try:
+                self.bot.drive_direct(0, 0)
+                self.get_logger().warn('Wheels stopped after a failed write')
+                self._last_write_ok = time.monotonic()
+                return
+            except Exception:                             # noqa: BLE001, S110
+                time.sleep(0.02)
+        # Still nothing. Re-open the port; _connect_oi() re-enters the drive
+        # mode, and the next tick's zero write will land if the port is back.
+        if self._write_failures in (4, 20) or self._write_failures % 100 == 0:
+            self.get_logger().error(
+                f'Wheels have not answered {self._write_failures} times — '
+                'reconnecting the serial link. If the robot is still moving, '
+                'stop it by hand.')
+        try:
+            self._connect_oi()
+        except Exception:                                 # noqa: BLE001, S110
+            pass
+
+    def _sensors_fresh(self) -> bool:
+        """Is the bumper/cliff state recent enough to be trusted?
+
+        Both are only refreshed inside get_encoders(). When the link stalls they
+        freeze at their last value while `bump_block_s` quietly expires, so the
+        forward block lifts on a timer with nobody actually watching the front
+        of the robot. Unknown is treated as unsafe.
+        """
+        if not self._last_ok_time:
+            return False              # nothing read yet since startup
+        return (time.monotonic() - self._last_ok_time) < self.sensor_stale_s
+
     def _estop_cb(self, msg: Bool):
         if msg.data == self._estop:
             return
@@ -503,10 +583,7 @@ class RoombaDriver(Node):
             self._target_left = self._target_right = 0.0
             self._cur_left = self._cur_right = 0.0
             self._cur_angular = 0.0
-            try:
-                self.bot.drive_direct(0, 0)
-            except Exception as e:  # never let a serial hiccup swallow the e-stop
-                self.get_logger().error(f'e-stop drive_direct(0,0) failed: {e!r}')
+            self._drive(0, 0)   # retries + reconnects on failure; see _drive()
             self._stopped = True
             self.get_logger().warn('EMERGENCY STOP engaged — ignoring cmd_vel until reset')
         else:
@@ -632,7 +709,7 @@ class RoombaDriver(Node):
         if self._estop:
             # keep the wheels pinned at zero for as long as the e-stop is held
             self._cur_left = self._cur_right = 0.0
-            self.bot.drive_direct(0, 0)
+            self._drive(0, 0)
             return
 
         # The dock seek drives the robot itself, so stop fighting it. Note the
@@ -660,6 +737,24 @@ class RoombaDriver(Node):
         # that is how the robot gets out. Safe mode does NOT cover the bumper
         # (only cliff/wheel-drop/charger), so this is the only bump protection
         # the robot has, in teleop and under Nav2 alike.
+        # Stale sensors = unknown, and unknown is treated as unsafe. The bumper
+        # and cliff are only refreshed inside get_encoders(); if that stalls,
+        # they freeze at their last value while bump_block_s quietly expires, so
+        # the forward block would lift on a timer with nothing actually watching
+        # the front of the robot. Turning and reversing stay available, exactly
+        # as with a real bump — this is not a full stop.
+        if (self.bump_stop or self.cliff_stop) and not self._sensors_fresh():
+            if self._is_forward(target_left, target_right):
+                target_left, target_right = self._strip_forward(target_left, target_right)
+                if not self._stale_warned:
+                    self._stale_warned = True
+                    self.get_logger().warn(
+                        'No fresh bumper/cliff reading — blocking forward motion '
+                        'until the serial link answers again')
+        elif self._stale_warned and self._sensors_fresh():
+            self._stale_warned = False
+            self.get_logger().info('Bumper/cliff readings are fresh again')
+
         if self.bump_stop and (now - self._last_bump_time) < self.bump_block_s:
             if self._is_forward(target_left, target_right):
                 target_left, target_right = self._strip_forward(target_left, target_right)
@@ -703,7 +798,7 @@ class RoombaDriver(Node):
         self._cur_left  += max(-step_left,  min(step_left,  target_left  - self._cur_left))
         self._cur_right += max(-step_right, min(step_right, target_right - self._cur_right))
 
-        self.bot.drive_direct(round(self._cur_right), round(self._cur_left))
+        self._drive(round(self._cur_right), round(self._cur_left))
 
     def _check_idle(self):
         if self._docking:      # drive_direct(0,0) would abort the dock approach
@@ -712,7 +807,7 @@ class RoombaDriver(Node):
             self._idle = True
             self._target_left = self._target_right = 0.0
             self._cur_left = self._cur_right = 0.0
-            self.bot.drive_direct(0, 0)
+            self._drive(0, 0)
             self._stopped = True
             # Wheels stopped, OI mode untouched — this does NOT enter Passive,
             # and it must not: Passive is where the sleep timer lives.
@@ -1013,7 +1108,7 @@ class RoombaDriver(Node):
             # beams itself, on a stricter test than _dock_seated below. Only
             # the timeout at the bottom still applies, as a backstop.
             if (time.monotonic() - self._dock_started) > self.dock_timeout:
-                self.bot.drive_direct(0, 0)
+                self._drive(0, 0)
                 self._docking = False
                 self._homing = None
                 self.get_logger().warn(
@@ -1106,7 +1201,7 @@ class RoombaDriver(Node):
                                                time.monotonic())
 
         if status == ir_homing.SEATED:
-            self.bot.drive_direct(0, 0)
+            self._drive(0, 0)
             self._docking = False
             self._homing = None
             self.get_logger().info(
@@ -1116,7 +1211,7 @@ class RoombaDriver(Node):
             self._connect_oi()
             return
         if status == ir_homing.LOST:
-            self.bot.drive_direct(0, 0)
+            self._drive(0, 0)
             self._docking = False
             self._homing = None
             self.get_logger().warn(
@@ -1130,7 +1225,7 @@ class RoombaDriver(Node):
                                    f'(omni={omni} L={left} R={right})')
             self._homing_last_status = status
             self._publish_dock_status(status)
-        self.bot.drive_direct(round(r_mm), round(l_mm))
+        self._drive(round(r_mm), round(l_mm))
 
     def _safe_get_encoders(self):
         """Read packets 43/44 (encoder counts) + 7 (bumps/wheel drops), με retry.
@@ -1318,7 +1413,7 @@ class RoombaDriver(Node):
         self.battery_pub.publish(msg)
 
     def destroy_node(self):
-        self.bot.drive_direct(0, 0)
+        self._drive(0, 0)
         self.bot.stop()
         super().destroy_node()
 

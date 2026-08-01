@@ -78,7 +78,8 @@ class PersonFollowerNode(Node):
         self._dist_max    = self.get_parameter('follow_distance_max').value
         self._speed       = self.get_parameter('follow_speed').value
         self._timeout     = self.get_parameter('follow_timeout').value
-        self._hfov        = self.get_parameter('camera_hfov_deg').value
+        # Divisor for the pixels-per-degree conversion.
+        self._hfov        = max(1.0, float(self.get_parameter('camera_hfov_deg').value))
         self._lost_after  = self.get_parameter('person_timeout').value
         self._turn_gain   = self.get_parameter('turn_gain').value
         self._turn_dead   = self.get_parameter('turn_deadband_px').value

@@ -276,7 +276,10 @@ def test_driver_stops_the_wheels_when_seated_or_lost(driver_src):
     step = driver_src.split('def _ir_homing_step')[1].split('def _safe_get_encoders')[0]
     for status in ('ir_homing.SEATED', 'ir_homing.LOST'):
         branch = step.split(f'if status == {status}:')[1][:200]
-        assert 'drive_direct(0, 0)' in branch
+        # Wheel writes go through _drive() since 2026-08-01 — it is the one path
+        # with failure handling. A bare drive_direct here would be a stop that
+        # can silently not happen.
+        assert '_drive(0, 0)' in branch
 
 
 def test_swap_buoys_is_exposed_as_a_parameter(driver_src):

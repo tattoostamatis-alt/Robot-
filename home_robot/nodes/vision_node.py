@@ -159,7 +159,13 @@ class VisionNode(Node):
         }
         r = requests.post(f'{self.lemonade_url}/chat/completions', json=payload, timeout=60)
         r.raise_for_status()
-        return (r.json()['choices'][0]['message'].get('content') or '').strip()
+        body = r.json()
+        # FLM reports template/prefill errors in a 200 body, so raise_for_status
+        # passes and the next line dies on a KeyError that names nothing useful.
+        # Same guard as llm_bridge_node._call_lemonade — it is the same server.
+        if 'choices' not in body:
+            raise RuntimeError(f'FLM error: {body.get("error", body)}')
+        return (body['choices'][0]['message'].get('content') or '').strip()
 
     def _query_gemini(self, jpg_bytes, question):
         from google.genai import types
