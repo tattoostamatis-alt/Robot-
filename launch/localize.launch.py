@@ -117,6 +117,13 @@ def _launch_setup(context, *args, **kwargs):
             # flag combination for weeks. `robot max` should always get the
             # dashboard, so it is decided here.
             'use_dashboard':       'true' if use_dashboard else 'false',
+            # Third instance of the same omission (use_situational, use_planner,
+            # now this): `llm_backend` was not forwarded at all, so
+            # `robot max llm_backend:=gemini` was accepted on the command line
+            # and then silently ignored — bringup fell back to its 'lemonade'
+            # default and the robot kept thinking on the NPU. Nothing errored;
+            # the only symptom was the 4.7 GB that never got freed.
+            'llm_backend':         LaunchConfiguration('llm_backend', default='lemonade'),
             'use_recovery':        'true' if use_recovery else 'false',
             'use_obstacle_safety': 'true' if use_obstacle_safety else 'false',
             # Forwarded, not hardcoded: `robot max` decides. It was pinned to
@@ -277,5 +284,11 @@ def generate_launch_description():
                         'costmap layers (predicted/semantic) and semantic object '
                         'memory during navigation. Starts the full camera (replaces '
                         'the lean depth-only stream); costs iGPU/CPU.'),
+        DeclareLaunchArgument(
+            'llm_backend', default_value='lemonade',
+            description="Which LLM answers: 'lemonade' is FastFlowLM on the NPU "
+                        "(offline, ~4.7 GB RAM), 'gemini' is the cloud (frees that "
+                        "RAM, needs ~/.home_robot/gemini_api_key and a network), "
+                        "'ollama' is a local GGUF server."),
         OpaqueFunction(function=_launch_setup),
     ])

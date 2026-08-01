@@ -20,6 +20,7 @@ import rclpy
 import requests
 from cv_bridge import CvBridge
 from dotenv import load_dotenv
+from home_robot import api_keys
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
@@ -46,7 +47,7 @@ class VisionNode(Node):
 
         self.declare_parameter('backend', 'lemonade')
         self.declare_parameter('model', 'qwen3-vl:4b-instruct')
-        self.declare_parameter('gemini_model', 'gemini-flash-lite-latest')
+        self.declare_parameter('gemini_model', 'gemini-3.5-flash-lite')
         # See llm_bridge_node: FastFlowLM on :52625 /v1 is what actually runs.
         # qwen3.5:4b is multimodal (verified 2026-07-30: reads text off a frame),
         # so this backend stays usable even though bringup defaults to gemini.
@@ -64,7 +65,12 @@ class VisionNode(Node):
         self._gemini_client = None
         if self.backend == 'gemini':
             from google import genai
-            self._gemini_client = genai.Client(api_key=os.environ['GEMINI_API_KEY'])
+            key = api_keys.gemini_key()
+            if not key:
+                self.get_logger().error(api_keys.MISSING_MSG)
+                raise RuntimeError(api_keys.MISSING_MSG)
+            self.get_logger().info(f'Gemini key from {api_keys.describe()}')
+            self._gemini_client = genai.Client(api_key=key)
 
         self.bridge = CvBridge()
         self._latest_frame = None

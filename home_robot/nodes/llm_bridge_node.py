@@ -42,6 +42,7 @@ from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
 from dotenv import load_dotenv
 from geometry_msgs.msg import Quaternion, Twist
+from home_robot import api_keys
 from home_robot.status_query import (ROOM_NAMES_EL, format_location,
                                      format_status, is_location_query,
                                      is_status_query, wants_battery)
@@ -271,7 +272,11 @@ class LLMBridgeNode(Node):
 
         self.declare_parameter('backend', 'ollama')
         self.declare_parameter('model', 'qwen3-vl:4b-instruct')
-        self.declare_parameter('gemini_model', 'gemini-flash-lite-latest')
+        # 2026-08-01: the user asked for 1.5 Flash; it is GONE — ListModels no
+        # longer serves any 1.5 model, and generateContent returns 404
+        # NOT_FOUND. gemini-3.6-flash is the current Flash tier. A 404 naming
+        # the model (rather than a 401) always means the model, not the key.
+        self.declare_parameter('gemini_model', 'gemini-3.5-flash-lite')
         # Defaults match what `robot max` actually serves: FastFlowLM on :52625
         # (base path /v1, NOT Lemonade's /api/v1) running qwen3.5:4b. They used to
         # name a Lemonade endpoint that has answered model_not_found since 11.0.0
@@ -304,7 +309,15 @@ class LLMBridgeNode(Node):
         self._gemini_tool = None
         if self.backend == 'gemini':
             from google import genai
-            self._gemini_client = genai.Client(api_key=os.environ['GEMINI_API_KEY'])
+            key = api_keys.gemini_key()
+            if not key:
+                # Loud and actionable. os.environ['GEMINI_API_KEY'] used to
+                # raise a bare KeyError here, which named the variable but
+                # not what to do about it.
+                self.get_logger().error(api_keys.MISSING_MSG)
+                raise RuntimeError(api_keys.MISSING_MSG)
+            self.get_logger().info(f'Gemini key from {api_keys.describe()}')
+            self._gemini_client = genai.Client(api_key=key)
             self._gemini_tool = _build_gemini_tool()
 
         locations_path = os.path.join(get_package_share_directory('home_robot'),
