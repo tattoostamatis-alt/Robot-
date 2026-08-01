@@ -35,6 +35,7 @@ used instead; T:210 semantics remain unconfirmed (raw_cmd only).
 
 import json
 import threading
+import time
 
 import rclpy
 from rclpy.node import Node
@@ -96,8 +97,12 @@ class ArmDriver(Node):
         self.speed = self.get_parameter('speed').value
         self.accel = self.get_parameter('accel').value
 
+        self._port, self._baud = port, baud
         self.ser = serial.Serial(port, baud, timeout=0.1)
         self._lock = threading.Lock()
+        # Backoff for _reopen(); see _read_serial for why this exists at all.
+        self._reopen_at = 0.0
+        self._reopen_delay = 1.0
         self.get_logger().info(f'Arm connected on {port} @ {baud}')
 
         # Last known joint positions (radians), populated from T:105
@@ -130,8 +135,12 @@ class ArmDriver(Node):
     # ------------------------------------------------------------------
     def _send_json(self, cmd: dict):
         line = (json.dumps(cmd) + '\n').encode('utf-8')
-        with self._lock:
-            self.ser.write(line)
+        try:
+            with self._lock:
+                self.ser.write(line)
+        except (OSError, serial.SerialException) as e:
+            self.get_logger().warn(f'Arm write failed: {e!r}', throttle_duration_sec=5.0)
+            self._mark_disconnected()
 
     def _joint_cmd_cb(self, msg: JointState):
         if self._current_joints is None:
@@ -197,12 +206,54 @@ class ArmDriver(Node):
     def _request_feedback(self):
         self._send_json({'T': 105})
 
+    def _mark_disconnected(self):
+        """Drop the port and schedule a reopen."""
+        try:
+            self.ser.close()
+        except Exception:                                  # noqa: BLE001
+            pass
+        self.ser = None
+        self._reopen_at = time.monotonic() + self._reopen_delay
+        self._reopen_delay = min(self._reopen_delay * 2, 30.0)
+
+    def _reopen(self):
+        if time.monotonic() < self._reopen_at:
+            return
+        try:
+            self.ser = serial.Serial(self._port, self._baud, timeout=0.1)
+            self._reopen_delay = 1.0
+            self._current_joints = None      # pose is unknown again after a drop
+            self.get_logger().info(f'Arm reconnected on {self._port}')
+        except (OSError, serial.SerialException) as e:
+            self._reopen_at = time.monotonic() + self._reopen_delay
+            self._reopen_delay = min(self._reopen_delay * 2, 30.0)
+            self.get_logger().warn(
+                f'Arm reopen failed ({e!r}); retrying in {self._reopen_delay:.0f}s',
+                throttle_duration_sec=10.0)
+
     def _read_serial(self):
+        """Drain replies, and survive the arm going away.
+
+        ‼️ This used to catch only JSONDecodeError. `self.ser.in_waiting` raises
+        SerialException the moment the adapter disappears — and these
+        peripherals hang off an external USB hub that has glitched before — so
+        an unplug/hub reset threw out of a TIMER callback, which takes rclpy's
+        spin down with it: the whole arm driver died rather than waiting for the
+        arm to come back. imu_node has reconnected like this all along.
+        """
+        if self.ser is None:
+            self._reopen()
+            return
         while True:
-            with self._lock:
-                if self.ser.in_waiting == 0:
-                    return
-                line = self.ser.readline()
+            try:
+                with self._lock:
+                    if self.ser.in_waiting == 0:
+                        return
+                    line = self.ser.readline()
+            except (OSError, serial.SerialException) as e:
+                self.get_logger().warn(f'Arm serial error: {e!r} — reopening')
+                self._mark_disconnected()
+                return
 
             if not line:
                 return

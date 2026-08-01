@@ -249,3 +249,99 @@ def test_mp3_decode_is_bounded():
     src = open(f'{PKG}/home_robot/nodes/tts_node.py').read()
     decode = src.split('def _decode_mp3')[1].split('def ')[0]
     assert 'timeout=' in decode, '_decode_mp3 still runs ffmpeg unbounded'
+
+
+# ── arm_driver ──────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def arm(monkeypatch):
+    class _SerialException(Exception):
+        pass
+
+    opened = []
+
+    class _Port:
+        """A port that dies on demand, then can be reopened."""
+        def __init__(self, *a, **k):
+            opened.append(1)
+            self.dead = False
+
+        @property
+        def in_waiting(self):
+            if self.dead:
+                raise _SerialException('device disconnected')
+            return 0
+
+        def readline(self):
+            return b''
+
+        def write(self, _b):
+            if self.dead:
+                raise _SerialException('device disconnected')
+
+        def close(self):
+            pass
+
+    serial_mod = _mod('serial', Serial=_Port, SerialException=_SerialException)
+    mods = {
+        'serial': serial_mod,
+        'rclpy': _mod('rclpy', init=lambda *a, **k: None,
+                      spin=lambda *a, **k: None, ok=lambda: True,
+                      try_shutdown=lambda *a, **k: None),
+        'rclpy.node': _mod('rclpy.node', Node=_BaseNode),
+        'sensor_msgs': _mod('sensor_msgs'),
+        'sensor_msgs.msg': _mod('sensor_msgs.msg',
+                                JointState=lambda: _ns(header=_ns(stamp=None),
+                                                       name=[], position=[])),
+        'std_msgs': _mod('std_msgs'),
+        'std_msgs.msg': _mod('std_msgs.msg',
+                             String=lambda data='': _ns(data=data),
+                             Float32=lambda data=0.0: _ns(data=data)),
+    }
+    mod = _load(f'{PKG}/home_robot/nodes/arm_driver.py', mods)
+    return mod, mod.ArmDriver(), opened
+
+
+def test_arm_survives_the_serial_going_away(arm):
+    """‼️ THE BUG: _read_serial caught only JSONDecodeError, so a SerialException
+    from in_waiting escaped a TIMER callback and took rclpy's spin down with it
+    — the whole arm driver died instead of waiting for the arm to come back."""
+    mod, node, opened = arm
+    node.ser.dead = True
+
+    node._read_serial()          # must not raise
+
+    assert node.ser is None, 'the dead port was kept'
+
+
+def test_arm_reopens_after_a_drop(arm, monkeypatch):
+    mod, node, opened = arm
+    before = len(opened)
+    node.ser.dead = True
+    node._read_serial()
+    node._reopen_at = 0.0        # pretend the backoff elapsed
+
+    node._read_serial()          # this call should reopen
+
+    assert len(opened) > before, 'the port was never reopened'
+    assert node.ser is not None
+
+
+def test_arm_pose_is_forgotten_across_a_reconnect(arm):
+    """T:102 sets ALL joints at once, so acting on a pre-unplug pose would snap
+    un-commanded joints to a stale value."""
+    mod, node, opened = arm
+    node._current_joints = {'base': 0.5}
+    node.ser.dead = True
+    node._read_serial()
+    node._reopen_at = 0.0
+    node._read_serial()
+
+    assert node._current_joints is None
+
+
+def test_arm_write_failure_does_not_raise(arm):
+    mod, node, opened = arm
+    node.ser.dead = True
+    node._send_json({'T': 105})      # must not raise
+    assert node.ser is None
