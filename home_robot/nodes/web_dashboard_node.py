@@ -1,8 +1,25 @@
 #!/usr/bin/env python3
-"""Web dashboard — RViz-like robot UI for browser and iPhone.
+"""Web dashboard — the whole robot in one browser tab.
 
     ros2 run home_robot web_dashboard_node.py
-    Open: http://192.168.178.62:8080
+    Open: http://<host>:8080/?t=<token>
+
+Started automatically by `robot max` (use_dashboard:=false to skip it).
+
+Two kinds of panel live here:
+
+  * Native panels rendered from ROS topics — map, camera, arm, vacuum, voice,
+    system.  Cheap, phone-friendly, and they work with nothing else running.
+
+  * The real Qt GUIs — RViz, MoveIt, Gazebo — streamed as pixels from headless
+    VNC displays owned by scripts/gui_session.sh.  These are the actual
+    applications, not lookalikes: RViz is RViz, with every display plugin and
+    the MoveIt motion-planning panel.
+
+Both go through this one port, so a phone on Tailscale needs a single URL and a
+single token.  The VNC leg is bridged in-process (`/vnc/{app}`) rather than by
+shelling out to websockify — one fewer daemon to supervise, and the bridge
+inherits the token check instead of exposing an unauthenticated port.
 """
 
 import asyncio
@@ -12,11 +29,15 @@ import math
 import os
 import secrets
 import socket
+import subprocess
 import threading
+import time
 from typing import Optional, Set
+from urllib.parse import quote
 
 import cv2
 import numpy as np
+import psutil
 import yaml
 
 import rclpy
@@ -24,28 +45,53 @@ from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
-from nav_msgs.msg import OccupancyGrid
-from sensor_msgs.msg import Image, LaserScan
-from std_msgs.msg import String
+from nav_msgs.msg import OccupancyGrid, Odometry, Path
+from sensor_msgs.msg import Image, JointState, LaserScan
+from std_msgs.msg import Bool, Float32, String
 from std_srvs.srv import Empty
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 PORT = 8080
+SHARE = get_package_share_directory('home_robot')
 # Resolve via the installed share dir — a path relative to __file__ breaks
 # under `ros2 run` (lib/home_robot/../config does not exist).
-LOCATIONS_FILE = os.path.join(
-    get_package_share_directory('home_robot'), 'config', 'locations.yaml')
+LOCATIONS_FILE = os.path.join(SHARE, 'config', 'locations.yaml')
+GUI_SESSION_SH = os.path.join(SHARE, 'scripts', 'gui_session.sh')
+NOVNC_DIR = '/usr/share/novnc'
+
+# Must match the display map in scripts/gui_session.sh.
+VNC_PORTS = {'rviz': 5902, 'gazebo': 5903, 'moveit': 5904}
+# TigerVNC sessions authenticate from ~/.vnc/passwd, which we cannot read back
+# (it is DES-obfuscated).  The browser side needs the cleartext to answer the
+# RFB challenge, so it is configured here rather than typed into every tab.
+VNC_PASSWORD = os.environ.get('HOME_ROBOT_VNC_PASSWORD', 'RobotView1')
+
+# The arm's USABLE envelope, not its mechanical range — measured by hand on
+# 2026-07-31 with the torque cut.  Keep in sync with arm_driver's limit_*
+# parameters in bringup.launch.py and with config/arm_joy_ps5.yaml.
+# ‼️ On the shoulder, UP is the NEGATIVE direction: `lo` is how high it may go.
+ARM_LIMITS = {
+    'base':     [-3.015, 0.016],
+    'shoulder': [-0.169, 1.570],
+    'elbow':    [0.141, 3.079],
+    'wrist':    [-1.143, 1.407],
+    'roll':     [-1.165, 1.372],
+    'hand':     [1.080, 3.140],
+}
+ARM_JOINTS = ['base', 'shoulder', 'elbow', 'wrist', 'roll']
 
 # ── Access token ───────────────────────────────────────────────────────────────
-# ‼️ This dashboard binds 0.0.0.0 and hands out full teleop, click-to-navigate
-# and a live camera feed. It had no authentication at all, so anyone on the LAN
-# — or anything reaching it over Tailscale — could drive the robot. The token is
-# generated once and PERSISTED, so the phone bookmark keeps working across
-# restarts; delete the file to rotate it. Set HOME_ROBOT_DASHBOARD_NO_AUTH=1 to
-# go back to the open behaviour on a trusted, isolated network.
+# ‼️ This dashboard binds 0.0.0.0 and hands out full teleop, click-to-navigate,
+# arm control and a live camera feed. It had no authentication at all, so anyone
+# on the LAN — or anything reaching it over Tailscale — could drive the robot.
+# The token is generated once and PERSISTED, so the phone bookmark keeps working
+# across restarts; delete the file to rotate it. Set
+# HOME_ROBOT_DASHBOARD_NO_AUTH=1 to go back to the open behaviour on a trusted,
+# isolated network.
 TOKEN_FILE = os.path.expanduser('~/.home_robot/dashboard_token')
 NO_AUTH = os.environ.get('HOME_ROBOT_DASHBOARD_NO_AUTH') == '1'
 
@@ -109,6 +155,11 @@ class State:
         self.map_png:   Optional[bytes] = None
         self.map_info:  Optional[dict]  = None
         self.camera_jpg: Optional[bytes] = None
+        # Replayed to every browser that connects, so a tab opened an hour into
+        # a session is populated immediately instead of waiting for the next
+        # message on each topic. Keyed by message type.
+        self.latest: dict = {}
+        self.chat: list = []            # rolling voice/LLM transcript
 
     def set_loop(self, loop: asyncio.AbstractEventLoop):
         self._loop = loop
@@ -119,11 +170,19 @@ class State:
     def remove_client(self, ws: WebSocket):
         with self._lock: self._clients.discard(ws)
 
-    def broadcast(self, msg: dict):
+    def broadcast(self, msg: dict, remember: bool = True):
+        if remember:
+            self.latest[msg.get('type', '')] = msg
         if self._loop is None:
             return
         data = json.dumps(msg)
         asyncio.run_coroutine_threadsafe(self._bcast(data), self._loop)
+
+    def add_chat(self, role: str, text: str):
+        entry = {'role': role, 'text': text, 't': time.time()}
+        self.chat.append(entry)
+        del self.chat[:-60]
+        self.broadcast({'type': 'chat', **entry}, remember=False)
 
     async def _bcast(self, data: str):
         dead = []
@@ -147,25 +206,61 @@ class DashboardNode(Node):
         self._state     = state
         self._locations = locations
         self._scan_seq  = 0
+        self._arm_seq   = 0
 
         latch = QoSProfile(depth=1,
                            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
                            reliability=QoSReliabilityPolicy.RELIABLE)
 
+        # ── Navigation / map ────────────────────────────────────────────────
         self.create_subscription(OccupancyGrid, '/map', self._cb_map, latch)
         self.create_subscription(PoseWithCovarianceStamped, '/amcl_pose', self._cb_pose, 10)
         self.create_subscription(LaserScan, '/scan', self._cb_scan, 5)
-        self.create_subscription(Image,
-            '/camera/camera/color/image_raw', self._cb_camera, 5)
+        self.create_subscription(Path, '/plan', self._cb_plan, 5)
+        self.create_subscription(Odometry, '/odom', self._cb_odom, 5)
         # room_markers publishes this latched (TRANSIENT_LOCAL) precisely so a
         # late subscriber gets the current room; asking for volatile threw that
         # away, so the badge stayed '—' until the robot next changed room.
         self.create_subscription(String, '/current_room', self._cb_room, latch)
 
+        # ── Camera / perception ─────────────────────────────────────────────
+        self.create_subscription(Image,
+            '/camera/camera/color/image_raw', self._cb_camera, 5)
+        self.create_subscription(String, '/detected_objects', self._cb_objects, 5)
+
+        # ── Arm ─────────────────────────────────────────────────────────────
+        self.create_subscription(JointState, '/arm/joint_states', self._cb_arm, 10)
+
+        # ── Vacuum base ─────────────────────────────────────────────────────
+        self.create_subscription(String, '/roomba/status', self._cb_roomba, latch)
+        self.create_subscription(String, '/dock_status', self._cb_dock, latch)
+        self.create_subscription(Bool, '/emergency_stop', self._cb_estop, latch)
+
+        # ── Voice / LLM ─────────────────────────────────────────────────────
+        self.create_subscription(String, '/speech_text', self._cb_heard, 10)
+        self.create_subscription(String, '/speech_response', self._cb_said, 10)
+        self.create_subscription(String, '/wake_word', self._cb_wake, 10)
+        self.create_subscription(Bool, '/tts/speaking', self._cb_speaking, 10)
+        self.create_subscription(String, '/situation_context', self._cb_situation, 10)
+
+        # ── Publishers ──────────────────────────────────────────────────────
         self._vel_pub  = self.create_publisher(Twist, '/cmd_vel', 10)
         self._goal_pub = self.create_publisher(PoseStamped, '/goal_pose', 10)
+        self._speech_pub = self.create_publisher(String, '/speech_text', 10)
+        self._say_pub  = self.create_publisher(String, '/speech_response', 10)
+        self._dock_pub = self.create_publisher(Bool, '/dock', 10)
+        self._arm_cmd_pub = self.create_publisher(JointState, '/arm/joint_cmd', 10)
+        self._gripper_pub = self.create_publisher(Float32, '/arm/gripper_cmd', 10)
+        self._arm_raw_pub = self.create_publisher(String, '/arm/raw_cmd', 10)
+        # The e-stop is latched on the driver's side, so ours must be too or a
+        # driver that restarts comes up not knowing the stop is engaged.
+        self._estop_pub = self.create_publisher(
+            Bool, '/emergency_stop',
+            QoSProfile(depth=1, durability=QoSDurabilityPolicy.TRANSIENT_LOCAL))
 
         self._loc_client = self.create_client(Empty, '/localize_globally')
+
+        self.create_timer(2.0, self._publish_system)
 
     # ── ROS callbacks ────────────────────────────────────────────────────────
 
@@ -191,7 +286,7 @@ class DashboardNode(Node):
             'type':  'map',
             **info,
             'image': base64.b64encode(self._state.map_png).decode(),
-        })
+        }, remember=False)   # replayed from map_png on connect, not from latest
 
     def _cb_pose(self, msg: PoseWithCovarianceStamped):
         p   = msg.pose.pose
@@ -216,6 +311,23 @@ class DashboardNode(Node):
             'angle_inc': round(msg.angle_increment * 3, 6),
         })
 
+    def _cb_plan(self, msg: Path):
+        # Nav2 republishes the global plan at controller rate; 40 points is
+        # plenty to draw a readable line and keeps the socket quiet.
+        pts = msg.poses[::max(1, len(msg.poses) // 40)] if msg.poses else []
+        self._state.broadcast({
+            'type': 'plan',
+            'points': [[round(p.pose.position.x, 2), round(p.pose.position.y, 2)]
+                       for p in pts],
+        })
+
+    def _cb_odom(self, msg: Odometry):
+        self._state.broadcast({
+            'type': 'odom',
+            'vx': round(msg.twist.twist.linear.x, 3),
+            'wz': round(msg.twist.twist.angular.z, 3),
+        })
+
     def _cb_camera(self, msg: Image):
         try:
             enc = msg.encoding.lower()
@@ -232,8 +344,77 @@ class DashboardNode(Node):
         except Exception:
             pass
 
+    def _cb_objects(self, msg: String):
+        self._state.broadcast({'type': 'objects', 'text': msg.data})
+
     def _cb_room(self, msg: String):
         self._state.broadcast({'type': 'room', 'name': msg.data})
+
+    def _cb_arm(self, msg: JointState):
+        # arm_driver publishes at 10 Hz; halve it for the browser.
+        self._arm_seq += 1
+        if self._arm_seq % 2:
+            return
+        self._state.broadcast({
+            'type': 'arm',
+            'names': list(msg.name),
+            'pos':   [round(p, 4) for p in msg.position],
+        })
+
+    def _cb_roomba(self, msg: String):
+        try:
+            self._state.broadcast({'type': 'roomba', **json.loads(msg.data)})
+        except (ValueError, TypeError):
+            pass
+
+    def _cb_dock(self, msg: String):
+        self._state.broadcast({'type': 'dock', 'status': msg.data})
+
+    def _cb_estop(self, msg: Bool):
+        self._state.broadcast({'type': 'estop', 'on': bool(msg.data)})
+
+    def _cb_heard(self, msg: String):
+        self._state.add_chat('user', msg.data)
+
+    def _cb_said(self, msg: String):
+        self._state.add_chat('robot', msg.data)
+
+    def _cb_wake(self, msg: String):
+        self._state.add_chat('wake', msg.data or 'wake')
+
+    def _cb_speaking(self, msg: Bool):
+        self._state.broadcast({'type': 'speaking', 'on': bool(msg.data)})
+
+    def _cb_situation(self, msg: String):
+        self._state.broadcast({'type': 'situation', 'text': msg.data})
+
+    # ── System panel ─────────────────────────────────────────────────────────
+
+    def _publish_system(self):
+        temp = None
+        try:
+            for name, entries in (psutil.sensors_temperatures() or {}).items():
+                if entries and name in ('k10temp', 'acpitz', 'coretemp'):
+                    temp = round(entries[0].current, 1)
+                    break
+        except Exception:
+            pass
+        vm = psutil.virtual_memory()
+        # get_node_names() reads the local graph cache — unlike `ros2 node
+        # list` it costs nothing and cannot hang when the daemon is stale.
+        try:
+            nodes = sorted({n for n, _ in self.get_node_names_and_namespaces()})
+        except Exception:
+            nodes = []
+        self._state.broadcast({
+            'type':  'sys',
+            'cpu':   psutil.cpu_percent(),
+            'mem':   round(vm.percent, 1),
+            'mem_gb': round(vm.used / 2**30, 1),
+            'temp':  temp,
+            'load':  round(os.getloadavg()[0], 2),
+            'nodes': nodes,
+        })
 
     # ── Handle frontend messages ─────────────────────────────────────────────
 
@@ -246,6 +427,10 @@ class DashboardNode(Node):
             self._vel_pub.publish(tw)
         elif t == 'stop':
             self._vel_pub.publish(Twist())
+        elif t == 'estop':
+            self._estop_pub.publish(Bool(data=bool(msg.get('on'))))
+            if msg.get('on'):
+                self._vel_pub.publish(Twist())
         elif t == 'nav_goal':
             g = PoseStamped()
             g.header.stamp    = self.get_clock().now().to_msg()
@@ -269,310 +454,25 @@ class DashboardNode(Node):
         elif t == 'localize':
             if self._loc_client.service_is_ready():
                 self._loc_client.call_async(Empty.Request())
-
-
-# ── HTML frontend ──────────────────────────────────────────────────────────────
-
-def _make_html(rooms: list, token: str = '') -> str:
-    rooms_json = json.dumps(rooms)
-    token_qs = json.dumps(f'?t={token}' if token else '')
-    return f"""<!DOCTYPE html>
-<html lang="el">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>Home Robot</title>
-<style>
-*{{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}}
-html,body{{height:100%;overflow:hidden;background:#1a1a1a;color:#e0e0e0;
-  font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display',sans-serif}}
-/* ── Header ── */
-#hdr{{display:flex;align-items:center;gap:10px;padding:8px 14px;
-  background:#252525;border-bottom:1px solid #333;flex-shrink:0;height:46px}}
-#dot{{width:9px;height:9px;border-radius:50%;background:#444;transition:.3s}}
-#dot.on{{background:#00ff88;box-shadow:0 0 7px #00ff88}}
-#title{{font-size:15px;font-weight:600;letter-spacing:.3px}}
-#room-badge{{margin-left:auto;background:#1e3a5f;color:#5bc0ff;
-  padding:3px 11px;border-radius:12px;font-size:12px;white-space:nowrap}}
-/* ── Layout ── */
-#app{{display:grid;height:calc(100vh - 46px);
-  grid-template-columns:1fr 300px;
-  grid-template-rows:1fr auto auto;
-  gap:7px;padding:7px}}
-/* ── Map ── */
-#map-wrap{{position:relative;background:#0d0d0d;border:1px solid #333;
-  border-radius:10px;overflow:hidden;cursor:crosshair;grid-row:1;grid-column:1}}
-#map-canvas{{width:100%;height:100%;display:block}}
-#map-lbl{{position:absolute;top:8px;left:10px;font-size:10px;color:#555;
-  background:rgba(0,0,0,.5);padding:2px 7px;border-radius:4px;pointer-events:none}}
-#nav-lbl{{position:absolute;bottom:8px;right:10px;font-size:11px;color:#ffa040;
-  background:rgba(0,0,0,.65);padding:3px 8px;border-radius:5px;display:none}}
-/* ── Right ── */
-#right{{grid-row:1;grid-column:2;display:flex;flex-direction:column;gap:7px}}
-#cam-wrap{{flex:1;position:relative;background:#0d0d0d;border:1px solid #333;
-  border-radius:10px;overflow:hidden}}
-#cam{{width:100%;height:100%;object-fit:cover;display:block}}
-#cam-lbl{{position:absolute;top:6px;left:9px;font-size:10px;color:#555;
-  background:rgba(0,0,0,.5);padding:2px 7px;border-radius:4px}}
-#info{{background:#222;border:1px solid #333;border-radius:10px;padding:11px 13px;
-  display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-size:12px}}
-.il{{color:#666}} .iv{{font-family:monospace;text-align:right;color:#ccc}}
-/* ── Rooms ── */
-#rooms{{grid-row:2;grid-column:1/-1;display:flex;gap:6px;flex-wrap:wrap}}
-.rbtn{{background:#1c3a5f;border:1px solid #2a5a9f;color:#8ec8ff;
-  padding:6px 15px;border-radius:18px;cursor:pointer;font-size:13px;
-  user-select:none;transition:.12s}}
-.rbtn:active{{background:#0e2540;transform:scale(.96)}}
-/* ── Controls ── */
-#ctrl{{grid-row:3;grid-column:1/-1;display:flex;align-items:center;
-  justify-content:center;gap:22px;padding:2px 0}}
-#dpad{{display:grid;grid-template-columns:repeat(3,48px);
-  grid-template-rows:repeat(3,48px);gap:5px}}
-.dbtn{{background:#2a2a2a;border:1px solid #444;color:#ccc;border-radius:9px;
-  display:flex;align-items:center;justify-content:center;cursor:pointer;
-  font-size:20px;user-select:none;-webkit-user-select:none;touch-action:none}}
-.dbtn:active{{background:#3a3a3a}}
-.dbtn.ghost{{background:transparent;border:none;pointer-events:none}}
-#btn-stop{{background:#5c1c1c;border-color:#8c2c2c;font-size:13px;font-weight:700}}
-#btn-stop:active{{background:#7c2c2c}}
-#actions{{display:flex;flex-direction:column;gap:7px}}
-.abtn{{background:#2a2a2a;border:1px solid #444;color:#ccc;padding:9px 16px;
-  border-radius:9px;cursor:pointer;font-size:13px;text-align:center;
-  user-select:none;white-space:nowrap}}
-.abtn:active{{background:#3a3a3a}}
-#btn-loc{{border-color:#0088cc;color:#44aaff}}
-/* ── Mobile ── */
-@media(max-width:700px){{
-  #app{{grid-template-columns:1fr;grid-template-rows:180px 1fr auto auto}}
-  #right{{grid-row:1;grid-column:1;flex-direction:row}}
-  #info{{display:none}}
-  #map-wrap{{grid-row:2;grid-column:1}}
-}}
-</style>
-</head>
-<body>
-<div id="hdr">
-  <div id="dot"></div>
-  <span id="title">🤖 Home Robot</span>
-  <span id="room-badge">—</span>
-</div>
-<div id="app">
-  <div id="map-wrap">
-    <canvas id="map-canvas"></canvas>
-    <div id="map-lbl">MAP · click to navigate</div>
-    <div id="nav-lbl">Navigating…</div>
-  </div>
-  <div id="right">
-    <div id="cam-wrap">
-      <img id="cam" alt="">
-      <div id="cam-lbl">📷 D435</div>
-    </div>
-    <div id="info">
-      <span class="il">X</span><span class="iv" id="ix">—</span>
-      <span class="il">Y</span><span class="iv" id="iy">—</span>
-      <span class="il">Yaw</span><span class="iv" id="iyaw">—</span>
-      <span class="il">Δωμάτιο</span><span class="iv" id="iroom">—</span>
-    </div>
-  </div>
-  <div id="rooms"></div>
-  <div id="ctrl">
-    <div id="dpad">
-      <div class="dbtn ghost"></div>
-      <div class="dbtn" id="bf">▲</div>
-      <div class="dbtn ghost"></div>
-      <div class="dbtn" id="bl">◄</div>
-      <div class="dbtn" id="btn-stop">STOP</div>
-      <div class="dbtn" id="br">►</div>
-      <div class="dbtn ghost"></div>
-      <div class="dbtn" id="bb">▼</div>
-      <div class="dbtn ghost"></div>
-    </div>
-    <div id="actions">
-      <div class="abtn" id="btn-loc">🔍 Localize</div>
-      <div class="abtn" id="btn-xnav">✕ Ακύρωση</div>
-    </div>
-  </div>
-</div>
-<script>
-// ── constants ──────────────────────────────────────────────────────────────
-const ROOMS = {rooms_json};
-const TOKEN_QS = {token_qs};   // '' when auth is disabled
-const LIN = 0.10, ANG = 0.10;
-// ‼️ Must match bringup.launch.py's tf_base_laser: x=0, yaw=pi. This said 0.0
-// and drew every scan point mirrored through the robot, so the dots never
-// landed on the walls and the dashboard looked like a localization failure
-// when localization was fine.
-const LASER_X = 0.00, LASER_YAW_OFFSET = Math.PI; // laser TF (base_link->laser)
-
-// ── state ──────────────────────────────────────────────────────────────────
-let ws=null, mapInfo=null, mapImg=null, pose=null, scan=null, goal=null;
-let driveTimer=null, vx=0, wz=0;
-
-// ── canvas ─────────────────────────────────────────────────────────────────
-const canvas = document.getElementById('map-canvas');
-const ctx    = canvas.getContext('2d');
-const wrap   = document.getElementById('map-wrap');
-
-function scale(){{ return mapInfo ? Math.min(canvas.width/mapInfo.width, canvas.height/mapInfo.height) : 1; }}
-function offX(){{  return mapInfo ? (canvas.width  - mapInfo.width  * scale()) / 2 : 0; }}
-function offY(){{  return mapInfo ? (canvas.height - mapInfo.height * scale()) / 2 : 0; }}
-
-function w2c(wx, wy){{
-  if(!mapInfo) return {{x:0,y:0}};
-  const s=scale();
-  return {{
-    x: offX() + (wx - mapInfo.origin[0]) / mapInfo.resolution * s,
-    y: offY() + (mapInfo.height - (wy - mapInfo.origin[1]) / mapInfo.resolution) * s,
-  }};
-}}
-function c2w(cx, cy){{
-  if(!mapInfo) return null;
-  const s=scale();
-  return {{
-    x: mapInfo.origin[0] + (cx - offX()) / s * mapInfo.resolution,
-    y: mapInfo.origin[1] + (mapInfo.height - (cy - offY()) / s) * mapInfo.resolution,
-  }};
-}}
-
-function draw(){{
-  ctx.clearRect(0,0,canvas.width,canvas.height);
-  ctx.fillStyle='#0d0d0d';
-  ctx.fillRect(0,0,canvas.width,canvas.height);
-  if(!mapImg||!mapInfo) return;
-  const s=scale(), ox=offX(), oy=offY();
-  ctx.drawImage(mapImg, ox, oy, mapInfo.width*s, mapInfo.height*s);
-
-  // LiDAR scan
-  if(scan && pose){{
-    ctx.fillStyle='rgba(0,200,255,0.75)';
-    const laserYaw = pose.yaw + LASER_YAW_OFFSET;
-    const lx = pose.x + LASER_X * Math.cos(pose.yaw);
-    const ly = pose.y + LASER_X * Math.sin(pose.yaw);
-    for(let i=0;i<scan.ranges.length;i++){{
-      const r=scan.ranges[i];
-      if(!r||r<0.1||r>8) continue;
-      const a = laserYaw + scan.angle_min + i*scan.angle_inc;
-      const p = w2c(lx + r*Math.cos(a), ly + r*Math.sin(a));
-      ctx.fillRect(p.x-1.5, p.y-1.5, 3, 3);
-    }}
-  }}
-
-  // Nav goal
-  if(goal){{
-    const g=w2c(goal.x,goal.y);
-    ctx.strokeStyle='#ffa040'; ctx.lineWidth=2;
-    ctx.beginPath(); ctx.arc(g.x,g.y,10,0,Math.PI*2); ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(g.x,g.y-15); ctx.lineTo(g.x,g.y+15);
-    ctx.moveTo(g.x-15,g.y); ctx.lineTo(g.x+15,g.y);
-    ctx.stroke();
-  }}
-
-  // Robot arrow
-  if(pose){{
-    const rp=w2c(pose.x,pose.y);
-    ctx.save();
-    ctx.translate(rp.x,rp.y);
-    ctx.rotate(-pose.yaw);
-    ctx.fillStyle='#00ff88'; ctx.strokeStyle='#003';  ctx.lineWidth=1;
-    ctx.beginPath();
-    ctx.moveTo(17,0); ctx.lineTo(-9,10); ctx.lineTo(-5,0); ctx.lineTo(-9,-10);
-    ctx.closePath(); ctx.fill(); ctx.stroke();
-    ctx.restore();
-  }}
-}}
-
-function resize(){{
-  canvas.width=wrap.clientWidth; canvas.height=wrap.clientHeight; draw();
-}}
-window.addEventListener('resize',resize);
-new ResizeObserver(resize).observe(wrap);
-
-// ── websocket ──────────────────────────────────────────────────────────────
-function connect(){{
-  ws = new WebSocket(`ws://${{location.host}}/ws${{TOKEN_QS}}`);
-  ws.onopen  = ()=> document.getElementById('dot').classList.add('on');
-  ws.onclose = ()=>{{ document.getElementById('dot').classList.remove('on'); setTimeout(connect,2000); }};
-  ws.onmessage = e=>{{
-    const m=JSON.parse(e.data);
-    if(m.type==='map'){{
-      mapInfo={{width:m.width,height:m.height,resolution:m.resolution,origin:m.origin}};
-      const i=new Image(); i.onload=()=>{{mapImg=i;draw();}}; i.src='data:image/png;base64,'+m.image;
-    }} else if(m.type==='pose'){{
-      pose=m;
-      document.getElementById('ix').textContent   = m.x.toFixed(2)+'m';
-      document.getElementById('iy').textContent   = m.y.toFixed(2)+'m';
-      document.getElementById('iyaw').textContent = (m.yaw*180/Math.PI).toFixed(0)+'°';
-      draw();
-    }} else if(m.type==='scan'){{
-      scan=m; draw();
-    }} else if(m.type==='room'){{
-      document.getElementById('room-badge').textContent = m.name||'—';
-      document.getElementById('iroom').textContent      = m.name||'—';
-    }}
-  }};
-}}
-function send(o){{ if(ws&&ws.readyState===1) ws.send(JSON.stringify(o)); }}
-
-// ── map click ──────────────────────────────────────────────────────────────
-canvas.addEventListener('click',e=>{{
-  const r=canvas.getBoundingClientRect();
-  const cx=(e.clientX-r.left)*canvas.width/r.width;
-  const cy=(e.clientY-r.top)*canvas.height/r.height;
-  const wp=c2w(cx,cy); if(!wp) return;
-  goal=wp; send({{type:'nav_goal',x:wp.x,y:wp.y}});
-  document.getElementById('nav-lbl').style.display='block';
-  draw();
-}});
-
-// ── room buttons ───────────────────────────────────────────────────────────
-const rdiv=document.getElementById('rooms');
-ROOMS.forEach(name=>{{
-  const b=document.createElement('button');
-  b.className='rbtn'; b.textContent=name;
-  b.onclick=()=>{{ send({{type:'goto_room',room:name}}); goal=null; draw(); }};
-  rdiv.appendChild(b);
-}});
-
-// ── drive controls ─────────────────────────────────────────────────────────
-function startDrive(v,w){{
-  vx=v; wz=w;
-  if(!driveTimer) driveTimer=setInterval(()=>send({{type:'cmd_vel',vx,wz}}),100);
-  send({{type:'cmd_vel',vx:v,wz:w}});
-}}
-function stopDrive(){{
-  clearInterval(driveTimer); driveTimer=null; vx=0; wz=0;
-  send({{type:'cmd_vel',vx:0,wz:0}});
-}}
-function bindDrive(id,v,w){{
-  const el=document.getElementById(id);
-  const go=()=>startDrive(v,w), stop=()=>stopDrive();
-  el.addEventListener('mousedown',go);
-  el.addEventListener('touchstart',e=>{{e.preventDefault();go();}},{{passive:false}});
-  ['mouseup','mouseleave'].forEach(ev=>el.addEventListener(ev,stop));
-  ['touchend','touchcancel'].forEach(ev=>el.addEventListener(ev,stop));
-}}
-bindDrive('bf', LIN, 0); bindDrive('bb',-LIN, 0);
-bindDrive('bl', 0, ANG); bindDrive('br', 0,-ANG);
-
-document.getElementById('btn-stop').addEventListener('click',()=>{{
-  stopDrive(); send({{type:'stop'}});
-}});
-document.getElementById('btn-loc').addEventListener('click',()=>send({{type:'localize'}}));
-document.getElementById('btn-xnav').addEventListener('click',()=>{{
-  goal=null; send({{type:'stop'}}); draw();
-  document.getElementById('nav-lbl').style.display='none';
-}});
-
-// ── start ──────────────────────────────────────────────────────────────────
-// Set in JS so the stream carries the same token as the page.
-document.getElementById('cam').src = '/camera.mjpeg' + TOKEN_QS;
-resize(); connect();
-</script>
-</body>
-</html>"""
+        elif t == 'dock':
+            self._dock_pub.publish(Bool(data=bool(msg.get('on', True))))
+        elif t == 'arm_joint':
+            js = JointState()
+            js.name     = [str(msg['joint'])]
+            js.position = [float(msg['pos'])]
+            self._arm_cmd_pub.publish(js)
+        elif t == 'gripper':
+            self._gripper_pub.publish(Float32(data=float(msg['pos'])))
+        elif t == 'arm_raw':
+            # T:210 cmd:0 cuts torque so the arm can be walked by hand; T:100
+            # re-inits. Free-form so the panel does not need a topic per command.
+            self._arm_raw_pub.publish(String(data=str(msg.get('cmd', ''))))
+        elif t == 'ask':
+            # Straight onto the STT's own topic, so a typed question takes
+            # exactly the path a spoken one does — same gates, same tools.
+            self._speech_pub.publish(String(data=str(msg.get('text', ''))))
+        elif t == 'say':
+            self._say_pub.publish(String(data=str(msg.get('text', ''))))
 
 
 # ── FastAPI app ────────────────────────────────────────────────────────────────
@@ -589,11 +489,18 @@ async def _lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=_lifespan)
 
+# noVNC's own HTML/JS, served from the distro package. Nothing secret lives
+# here — the RFB stream it opens is what carries the token.
+if os.path.isdir(NOVNC_DIR):
+    app.mount('/novnc', StaticFiles(directory=NOVNC_DIR), name='novnc')
+
+
 @app.get('/', response_class=HTMLResponse)
 async def index(t: str = ''):
     if not _authorised(t):
         return HTMLResponse('Unauthorized', status_code=401)
     return HTMLResponse(_make_html(list(locations.keys()), t))
+
 
 @app.get('/camera.mjpeg')
 async def camera(t: str = ''):
@@ -609,6 +516,88 @@ async def camera(t: str = ''):
     return StreamingResponse(stream(),
                              media_type='multipart/x-mixed-replace; boundary=frame')
 
+
+# ── GUI sessions (RViz / MoveIt / Gazebo) ─────────────────────────────────────
+
+def _gui_session(action: str, app_name: str) -> str:
+    if not os.path.exists(GUI_SESSION_SH):
+        return f'missing {GUI_SESSION_SH}'
+    try:
+        # Gazebo takes ~75 s to come up on this machine (software rendering),
+        # so the timeout is generous; the UI polls status rather than blocking.
+        r = subprocess.run(['bash', GUI_SESSION_SH, action, app_name],
+                           capture_output=True, text=True, timeout=120)
+        return (r.stdout or r.stderr).strip() or 'ok'
+    except subprocess.TimeoutExpired:
+        return 'timeout'
+    except Exception as e:
+        return f'error: {e!r}'
+
+
+@app.get('/gui/{app_name}/{action}')
+async def gui(app_name: str, action: str, t: str = ''):
+    if not _authorised(t):
+        return JSONResponse({'error': 'unauthorized'}, status_code=401)
+    if app_name not in VNC_PORTS or action not in ('start', 'stop', 'status'):
+        return JSONResponse({'error': 'bad request'}, status_code=400)
+    out = await asyncio.to_thread(_gui_session, action, app_name)
+    return {'app': app_name, 'action': action, 'result': out,
+            'running': out.startswith('running')}
+
+
+@app.websocket('/vnc/{app_name}')
+async def vnc_bridge(ws: WebSocket, app_name: str, t: str = ''):
+    """noVNC <-> Xvnc. This is websockify, minus the extra daemon.
+
+    noVNC opens the socket with the 'binary' subprotocol and then speaks raw
+    RFB over it, so all we do is copy bytes both ways until either end hangs up.
+    """
+    if not _authorised(t) or app_name not in VNC_PORTS:
+        await ws.close(code=1008)      # policy violation
+        return
+    await ws.accept(subprotocol='binary')
+    try:
+        reader, writer = await asyncio.open_connection('127.0.0.1',
+                                                       VNC_PORTS[app_name])
+    except OSError:
+        # The session is not up — tell the tab so it can offer a Start button
+        # instead of noVNC's opaque "Failed to connect".
+        await ws.close(code=1011)
+        return
+
+    async def vnc_to_browser():
+        while True:
+            data = await reader.read(65536)
+            if not data:
+                break
+            await ws.send_bytes(data)
+
+    async def browser_to_vnc():
+        while True:
+            data = await ws.receive_bytes()
+            writer.write(data)
+            await writer.drain()
+
+    tasks = [asyncio.create_task(vnc_to_browser()),
+             asyncio.create_task(browser_to_vnc())]
+    try:
+        # Whichever side closes first ends the session; cancel the other pump
+        # so a half-open socket cannot leak a task per reconnect.
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    except Exception:
+        pass
+    finally:
+        for task in tasks:
+            task.cancel()
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+
+
+# ── Telemetry socket ──────────────────────────────────────────────────────────
+
 @app.websocket('/ws')
 async def ws_endpoint(ws: WebSocket, t: str = ''):
     if not _authorised(t):
@@ -617,13 +606,22 @@ async def ws_endpoint(ws: WebSocket, t: str = ''):
     await ws.accept()
     state.add_client(ws)
 
-    # Send current map to new client immediately
-    if state.map_png and state.map_info:
-        await ws.send_text(json.dumps({
-            'type':  'map',
-            **state.map_info,
-            'image': base64.b64encode(state.map_png).decode(),
-        }))
+    # Paint the whole UI immediately: the map, then the last value seen on every
+    # other topic, then the transcript so far.
+    try:
+        if state.map_png and state.map_info:
+            await ws.send_text(json.dumps({
+                'type':  'map',
+                **state.map_info,
+                'image': base64.b64encode(state.map_png).decode(),
+            }))
+        for msg in list(state.latest.values()):
+            await ws.send_text(json.dumps(msg))
+        for entry in list(state.chat)[-25:]:
+            await ws.send_text(json.dumps({'type': 'chat', **entry}))
+    except Exception:
+        state.remove_client(ws)
+        return
 
     try:
         while True:
@@ -633,8 +631,770 @@ async def ws_endpoint(ws: WebSocket, t: str = ''):
                 ros_node.dispatch(msg)
     except WebSocketDisconnect:
         pass
+    except Exception:
+        pass
     finally:
         state.remove_client(ws)
+
+
+# ── HTML frontend ──────────────────────────────────────────────────────────────
+
+def _make_html(rooms: list, token: str = '') -> str:
+    """Build the page.
+
+    Written as a plain template with __PLACEHOLDER__ substitution rather than an
+    f-string: the page is mostly CSS and JS, and every brace in it would
+    otherwise have to be doubled.
+    """
+    token_qs = f'?t={token}' if token else ''
+    return (HTML_TEMPLATE
+            .replace('__ROOMS__', json.dumps(rooms))
+            .replace('__TOKEN_QS__', json.dumps(token_qs))
+            .replace('__VNC_QS__', json.dumps(quote(token_qs, safe='')))
+            .replace('__VNC_PASS__', json.dumps(VNC_PASSWORD))
+            .replace('__ARM_LIMITS__', json.dumps(ARM_LIMITS))
+            .replace('__ARM_JOINTS__', json.dumps(ARM_JOINTS))
+            .replace('__HAS_NOVNC__', json.dumps(os.path.isdir(NOVNC_DIR))))
+
+
+HTML_TEMPLATE = r"""<!DOCTYPE html>
+<html lang="el">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Home Robot</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;overflow:hidden;background:#141416;color:#e4e4e7;
+  font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display',Inter,sans-serif;font-size:14px}
+button{font:inherit;color:inherit}
+/* ── Header ── */
+#hdr{display:flex;align-items:center;gap:10px;padding:0 14px;background:#1c1c20;
+  border-bottom:1px solid #2c2c32;height:48px;flex-shrink:0}
+#dot{width:9px;height:9px;border-radius:50%;background:#444;transition:.3s;flex-shrink:0}
+#dot.on{background:#00e08a;box-shadow:0 0 8px #00e08a}
+#title{font-size:15px;font-weight:600;letter-spacing:.2px;white-space:nowrap}
+.badge{background:#1e3a5f;color:#67c4ff;padding:3px 11px;border-radius:11px;
+  font-size:12px;white-space:nowrap}
+#hdr-spacer{margin-left:auto}
+#estop{background:#7f1d1d;border:1px solid #b91c1c;color:#fecaca;padding:7px 16px;
+  border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap}
+#estop.engaged{background:#dc2626;color:#fff;animation:pulse 1s infinite}
+@keyframes pulse{50%{opacity:.55}}
+/* ── Shell ── */
+#shell{display:flex;height:calc(100vh - 48px)}
+#tabs{width:150px;background:#1a1a1e;border-right:1px solid #2c2c32;
+  padding:8px 0;flex-shrink:0;overflow-y:auto}
+.tab{display:flex;align-items:center;gap:9px;padding:10px 14px;cursor:pointer;
+  font-size:13px;color:#9b9ba3;border-left:3px solid transparent;user-select:none}
+.tab:hover{background:#212127;color:#d4d4d8}
+.tab.active{background:#212127;color:#fff;border-left-color:#3b82f6}
+.tab .ic{font-size:16px;width:20px;text-align:center}
+#panes{flex:1;position:relative;overflow:hidden}
+.pane{position:absolute;inset:0;display:none;padding:10px;overflow:auto}
+.pane.active{display:flex;flex-direction:column;gap:10px}
+.card{background:#1c1c20;border:1px solid #2c2c32;border-radius:12px;padding:12px 14px}
+.card h3{font-size:12px;font-weight:600;color:#8b8b93;text-transform:uppercase;
+  letter-spacing:.6px;margin-bottom:9px}
+.row{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
+.btn{background:#2a2a31;border:1px solid #3a3a44;color:#d4d4d8;padding:8px 15px;
+  border-radius:9px;cursor:pointer;font-size:13px;user-select:none;white-space:nowrap}
+.btn:hover{background:#33333c}
+.btn:active{background:#3d3d47}
+.btn.pri{background:#1d4ed8;border-color:#2563eb;color:#fff}
+.btn.warn{background:#7c2d12;border-color:#9a3412;color:#fed7aa}
+.grid2{display:grid;grid-template-columns:auto 1fr;gap:5px 14px;font-size:13px}
+.k{color:#71717a}.v{font-family:ui-monospace,Menlo,monospace;text-align:right;color:#d4d4d8}
+.pill{display:inline-block;padding:2px 9px;border-radius:9px;font-size:11px;
+  background:#27272e;color:#a1a1aa}
+.pill.ok{background:#052e1a;color:#4ade80}
+.pill.bad{background:#450a0a;color:#f87171}
+.pill.warn{background:#422006;color:#fbbf24}
+/* ── Map ── */
+#map-wrap{position:relative;background:#0c0c0e;border:1px solid #2c2c32;
+  border-radius:12px;overflow:hidden;cursor:crosshair;flex:1;min-height:200px}
+#map-canvas{width:100%;height:100%;display:block}
+.ovl{position:absolute;top:8px;left:10px;font-size:10px;color:#6b6b73;
+  background:rgba(0,0,0,.55);padding:3px 8px;border-radius:5px;pointer-events:none}
+/* ── Camera ── */
+#cam{width:100%;height:100%;object-fit:contain;display:block;background:#0c0c0e}
+#cam-wrap{position:relative;flex:1;min-height:200px;background:#0c0c0e;
+  border:1px solid #2c2c32;border-radius:12px;overflow:hidden}
+/* ── VNC ── */
+.vnc-host{flex:1;position:relative;background:#0c0c0e;border:1px solid #2c2c32;
+  border-radius:12px;overflow:hidden;min-height:240px}
+.vnc-host iframe{width:100%;height:100%;border:0;display:block}
+.vnc-msg{position:absolute;inset:0;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:14px;text-align:center;padding:20px;
+  color:#a1a1aa;font-size:13px;line-height:1.6}
+/* ── Drive pad ── */
+#dpad{display:grid;grid-template-columns:repeat(3,50px);grid-template-rows:repeat(3,50px);gap:5px}
+.dbtn{background:#2a2a31;border:1px solid #3a3a44;border-radius:9px;display:flex;
+  align-items:center;justify-content:center;cursor:pointer;font-size:19px;
+  user-select:none;-webkit-user-select:none;touch-action:none}
+.dbtn:active{background:#3d3d47}
+.dbtn.ghost{background:transparent;border:none;pointer-events:none}
+#bstop{background:#7f1d1d;border-color:#b91c1c;font-size:12px;font-weight:700;color:#fecaca}
+/* ── Arm ── */
+.joint{display:grid;grid-template-columns:74px 1fr 62px;gap:11px;align-items:center;
+  margin-bottom:9px}
+.joint label{font-size:13px;color:#a1a1aa}
+.joint input[type=range]{width:100%;accent-color:#3b82f6}
+.joint .val{font-family:ui-monospace,Menlo,monospace;font-size:12px;text-align:right;color:#d4d4d8}
+/* ── Chat ── */
+#chat{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:8px;min-height:150px}
+.msg{max-width:78%;padding:8px 12px;border-radius:13px;font-size:13.5px;line-height:1.45;
+  white-space:pre-wrap;word-break:break-word}
+.msg.user{align-self:flex-end;background:#1d4ed8;color:#fff;border-bottom-right-radius:4px}
+.msg.robot{align-self:flex-start;background:#27272e;border-bottom-left-radius:4px}
+.msg.wake{align-self:center;background:transparent;color:#6b6b73;font-size:11px;padding:2px}
+#chat-in{display:flex;gap:8px}
+#chat-in input{flex:1;background:#27272e;border:1px solid #3a3a44;color:#e4e4e7;
+  padding:10px 13px;border-radius:9px;font-size:14px;outline:none}
+#chat-in input:focus{border-color:#3b82f6}
+/* ── Mobile ── */
+@media(max-width:760px){
+  #shell{flex-direction:column-reverse}
+  #tabs{width:100%;height:56px;display:flex;overflow-x:auto;padding:0;
+    border-right:none;border-top:1px solid #2c2c32}
+  .tab{flex-direction:column;gap:2px;padding:7px 13px;font-size:10px;
+    border-left:none;border-top:3px solid transparent;justify-content:center}
+  .tab.active{border-left-color:transparent;border-top-color:#3b82f6}
+  #title{display:none}
+  .pane{padding:8px}
+}
+</style>
+</head>
+<body>
+<div id="hdr">
+  <div id="dot"></div>
+  <span id="title">🤖 Home Robot</span>
+  <span class="badge" id="room-badge">—</span>
+  <span id="hdr-spacer"></span>
+  <button id="estop">■ STOP</button>
+</div>
+<div id="shell">
+  <nav id="tabs"></nav>
+  <div id="panes">
+
+    <!-- ── Map ─────────────────────────────────────────────────── -->
+    <section class="pane active" id="p-map">
+      <div id="map-wrap">
+        <canvas id="map-canvas"></canvas>
+        <div class="ovl">ΧΑΡΤΗΣ · κλικ για πλοήγηση</div>
+      </div>
+      <div class="card">
+        <h3>Δωμάτια</h3>
+        <div class="row" id="rooms"></div>
+      </div>
+      <div class="card">
+        <div class="row" style="justify-content:space-between">
+          <div id="dpad">
+            <div class="dbtn ghost"></div><div class="dbtn" id="bf">▲</div><div class="dbtn ghost"></div>
+            <div class="dbtn" id="bl">◄</div><div class="dbtn" id="bstop">STOP</div><div class="dbtn" id="br">►</div>
+            <div class="dbtn ghost"></div><div class="dbtn" id="bb">▼</div><div class="dbtn ghost"></div>
+          </div>
+          <div class="grid2" style="flex:1;min-width:150px">
+            <span class="k">X</span><span class="v" id="ix">—</span>
+            <span class="k">Y</span><span class="v" id="iy">—</span>
+            <span class="k">Γωνία</span><span class="v" id="iyaw">—</span>
+            <span class="k">Ταχύτητα</span><span class="v" id="ivel">—</span>
+          </div>
+          <div class="row" style="flex-direction:column;align-items:stretch">
+            <button class="btn pri" id="b-loc">🔍 Εντοπισμός</button>
+            <button class="btn" id="b-xnav">✕ Ακύρωση στόχου</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Camera ──────────────────────────────────────────────── -->
+    <section class="pane" id="p-cam">
+      <div id="cam-wrap">
+        <img id="cam" alt="">
+        <div class="ovl">📷 RealSense D435 · color</div>
+      </div>
+      <div class="card">
+        <h3>Τι βλέπει</h3>
+        <div id="objects" style="font-size:13px;color:#a1a1aa;line-height:1.6">—</div>
+      </div>
+      <div class="card">
+        <h3>Κατάσταση περιβάλλοντος</h3>
+        <div id="situation" style="font-size:12.5px;color:#a1a1aa;line-height:1.6">—</div>
+      </div>
+    </section>
+
+    <!-- ── RViz / MoveIt / Gazebo ──────────────────────────────── -->
+    <section class="pane" id="p-rviz"></section>
+    <section class="pane" id="p-moveit"></section>
+    <section class="pane" id="p-gazebo"></section>
+
+    <!-- ── Arm ─────────────────────────────────────────────────── -->
+    <section class="pane" id="p-arm">
+      <div class="card">
+        <h3>Αρθρώσεις</h3>
+        <div id="joints"></div>
+      </div>
+      <div class="card">
+        <h3>Δαγκάνα</h3>
+        <div class="joint">
+          <label>άνοιγμα</label>
+          <input type="range" id="grip" min="1.08" max="3.14" step="0.01" value="3.14">
+          <span class="val" id="grip-v">—</span>
+        </div>
+        <div class="row">
+          <button class="btn" id="b-grip-open">✋ Άνοιγμα</button>
+          <button class="btn" id="b-grip-close">🤏 Κλείσιμο</button>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Εντολές</h3>
+        <div class="row">
+          <button class="btn" id="b-arm-home">🏠 Θέση ανάπαυσης</button>
+          <button class="btn warn" id="b-arm-limp">💤 Χαλάρωση (T:210)</button>
+          <button class="btn" id="b-arm-init">⚡ Επαναφορά ροπής</button>
+          <button class="btn pri" id="b-arm-moveit">🎯 Άνοιγμα MoveIt</button>
+        </div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          ‼️ Στον ώμο το «πάνω» είναι η ΑΡΝΗΤΙΚΗ φορά. Τα όρια είναι τα μετρημένα
+          στο χέρι (31/07), όχι του κατασκευαστή. Η χαλάρωση κόβει τη ροπή —
+          κράτα τον βραχίονα πριν την πατήσεις.
+        </p>
+      </div>
+    </section>
+
+    <!-- ── Vacuum ──────────────────────────────────────────────── -->
+    <section class="pane" id="p-base">
+      <div class="card">
+        <h3>Βάση Roomba 879</h3>
+        <div class="grid2">
+          <span class="k">Σύνδεση</span><span class="v" id="r-link">—</span>
+          <span class="k">OI mode</span><span class="v" id="r-mode">—</span>
+          <span class="k">Προφυλακτήρας</span><span class="v" id="r-bump">—</span>
+          <span class="k">Γκρεμός</span><span class="v" id="r-cliff">—</span>
+          <span class="k">Τροχοί</span><span class="v" id="r-wheel">—</span>
+          <span class="k">Κινητήρες</span><span class="v" id="r-motors">—</span>
+          <span class="k">Docking</span><span class="v" id="r-dock">—</span>
+          <span class="k">Έκβαση</span><span class="v" id="r-dockst">—</span>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Ενέργειες</h3>
+        <div class="row">
+          <button class="btn pri" id="b-dock">🔌 Στη βάση</button>
+          <button class="btn" id="b-undock">✕ Άκυρο docking</button>
+        </div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          ‼️ Δεν εμφανίζεται μπαταρία: το σασί τρέφεται από powerbank και τα πεδία
+          φόρτισης του OI δίνουν σκουπίδια. Αν το «Σύνδεση» ξεπεράσει τα ~3s, η
+          βάση κοιμάται — τότε κάθε πρόβλημα πλοήγησης είναι ψεύτικο.
+        </p>
+      </div>
+    </section>
+
+    <!-- ── Voice / LLM ─────────────────────────────────────────── -->
+    <section class="pane" id="p-llm">
+      <div id="chat"></div>
+      <div id="chat-in">
+        <input id="chat-text" placeholder="Γράψε στο ρομπότ…" autocomplete="off">
+        <button class="btn pri" id="b-send">Στείλε</button>
+        <button class="btn" id="b-say" title="Να το πει δυνατά χωρίς να το σκεφτεί">🔊</button>
+      </div>
+    </section>
+
+    <!-- ── System ──────────────────────────────────────────────── -->
+    <section class="pane" id="p-sys">
+      <div class="card">
+        <h3>Υπολογιστής</h3>
+        <div class="grid2">
+          <span class="k">CPU</span><span class="v" id="s-cpu">—</span>
+          <span class="k">Μνήμη</span><span class="v" id="s-mem">—</span>
+          <span class="k">Θερμοκρασία</span><span class="v" id="s-temp">—</span>
+          <span class="k">Load</span><span class="v" id="s-load">—</span>
+        </div>
+      </div>
+      <div class="card" style="flex:1;overflow:auto">
+        <h3>Κόμβοι ROS (<span id="s-nodecount">0</span>)</h3>
+        <div id="s-nodes" style="font-family:ui-monospace,Menlo,monospace;font-size:11.5px;
+          color:#a1a1aa;line-height:1.75;columns:2;column-gap:20px">—</div>
+      </div>
+    </section>
+
+  </div>
+</div>
+<script>
+// ── constants ──────────────────────────────────────────────────────────────
+const ROOMS      = __ROOMS__;
+const TOKEN_QS   = __TOKEN_QS__;    // '' when auth is disabled
+const VNC_QS     = __VNC_QS__;      // same, url-encoded for noVNC's ?path=
+const VNC_PASS   = __VNC_PASS__;
+const ARM_LIMITS = __ARM_LIMITS__;
+const ARM_JOINTS = __ARM_JOINTS__;
+const HAS_NOVNC  = __HAS_NOVNC__;
+const LIN = 0.10, ANG = 0.10;
+// ‼️ Must match bringup.launch.py's tf_base_laser: x=0, yaw=pi. This said 0.0
+// and drew every scan point mirrored through the robot, so the dots never
+// landed on the walls and the dashboard looked like a localization failure
+// when localization was fine.
+const LASER_X = 0.00, LASER_YAW_OFFSET = Math.PI;
+
+// ── state ──────────────────────────────────────────────────────────────────
+let ws=null, mapInfo=null, mapImg=null, pose=null, scan=null, goal=null, plan=null;
+let driveTimer=null, vx=0, wz=0, estop=false, armPos={};
+const $ = id => document.getElementById(id);
+
+// ── tabs ───────────────────────────────────────────────────────────────────
+const TABS = [
+  ['map',    '🗺️', 'Χάρτης'],
+  ['cam',    '📷', 'Κάμερα'],
+  ['rviz',   '🧊', 'RViz'],
+  ['moveit', '🎯', 'MoveIt'],
+  ['arm',    '🦾', 'Βραχίονας'],
+  ['base',   '🧹', 'Σκούπα'],
+  ['llm',    '💬', 'Φωνή/LLM'],
+  ['gazebo', '🌍', 'Gazebo'],
+  ['sys',    '📊', 'Σύστημα'],
+];
+const tabNav = $('tabs');
+TABS.forEach(([id, icon, label]) => {
+  const b = document.createElement('div');
+  b.className = 'tab'; b.dataset.pane = id;
+  b.innerHTML = `<span class="ic">${icon}</span><span>${label}</span>`;
+  b.onclick = () => showTab(id);
+  tabNav.appendChild(b);
+});
+function showTab(id){
+  document.querySelectorAll('.tab').forEach(t =>
+    t.classList.toggle('active', t.dataset.pane === id));
+  document.querySelectorAll('.pane').forEach(p =>
+    p.classList.toggle('active', p.id === 'p-' + id));
+  if (id === 'map') resize();
+  if (VNC_APPS[id]) ensureVnc(id);
+}
+// NB: the initial showTab() call lives at the bottom of the script — calling it
+// here would touch VNC_APPS before its `const` is initialised (temporal dead
+// zone), which throws and leaves the whole page unwired.
+
+// ── VNC panes (RViz / MoveIt / Gazebo) ─────────────────────────────────────
+// Each pane is built lazily: an iframe is only created once the tab is opened
+// and its session is confirmed up, so a page load does not open three RFB
+// streams the user may never look at.
+const VNC_APPS = {
+  rviz:   {title:'RViz',   note:'Η ίδια συνεδρία :2 που ανοίγει το <code>robot max</code> — και αυτή που βλέπεις από το RealVNC στο κινητό.'},
+  moveit: {title:'MoveIt', note:'Ξεκινά <code>arm_moveit.launch.py</code>: move_group + RViz με το Motion Planning panel. Τράβα τη δαγκάνα, Plan, Execute.'},
+  gazebo: {title:'Gazebo', note:'‼️ ΠΡΟΣΟΜΟΙΩΣΗ. Δημοσιεύει δικά της /clock, /scan, /odom — μην την ανοίγεις ενώ οδηγείς το πραγματικό ρομπότ.'},
+};
+const vncState = {};
+Object.keys(VNC_APPS).forEach(k => vncState[k] = {frame:null, busy:false});
+
+function vncPane(app){ return $('p-' + app); }
+
+function renderVnc(app, mode, detail){
+  const pane = vncPane(app), meta = VNC_APPS[app], st = vncState[app];
+  pane.innerHTML = '';
+  const host = document.createElement('div');
+  host.className = 'vnc-host';
+  pane.appendChild(host);
+
+  if (mode === 'live'){
+    const f = document.createElement('iframe');
+    // noVNC reads these from its query string: connect straight away, scale to
+    // the iframe, and answer the VncAuth challenge without prompting (the page
+    // itself is already behind the dashboard token).
+    f.src = '/novnc/vnc.html?autoconnect=1&reconnect=1&resize=scale'
+          + '&path=' + encodeURIComponent('vnc/' + app) + VNC_QS
+          + '&password=' + encodeURIComponent(VNC_PASS);
+    host.appendChild(f);
+    st.frame = f;
+  } else {
+    const box = document.createElement('div');
+    box.className = 'vnc-msg';
+    box.innerHTML =
+      `<div style="font-size:34px">${mode === 'starting' ? '⏳' : '🖥️'}</div>` +
+      `<div><b>${meta.title}</b><br>${detail || ''}</div>` +
+      `<div style="max-width:440px;font-size:12px;color:#71717a">${meta.note}</div>`;
+    if (mode !== 'starting'){
+      const b = document.createElement('button');
+      b.className = 'btn pri';
+      b.textContent = 'Εκκίνηση ' + meta.title;
+      b.onclick = () => startVnc(app);
+      box.appendChild(b);
+    }
+    host.appendChild(box);
+  }
+
+  // Controls strip under the viewport.
+  const card = document.createElement('div');
+  card.className = 'card';
+  const row = document.createElement('div');
+  row.className = 'row';
+  const mk = (label, cls, fn) => {
+    const b = document.createElement('button');
+    b.className = 'btn ' + (cls||''); b.textContent = label; b.onclick = fn;
+    row.appendChild(b);
+  };
+  mk('↻ Επανασύνδεση', '', () => refreshVnc(app));
+  if (app !== 'rviz') mk('■ Τερματισμός', 'warn', () => stopVnc(app));
+  const s = document.createElement('span');
+  s.className = 'pill ' + (mode === 'live' ? 'ok' : '');
+  s.textContent = mode === 'live' ? 'ενεργό' : mode === 'starting' ? 'ξεκινά…' : 'σταματημένο';
+  row.appendChild(s);
+  card.appendChild(row);
+  pane.appendChild(card);
+}
+
+async function guiCall(app, action){
+  const r = await fetch(`/gui/${app}/${action}` + TOKEN_QS);
+  if (!r.ok) throw new Error('gui ' + r.status);
+  return r.json();
+}
+
+async function ensureVnc(app){
+  const st = vncState[app];
+  if (st.frame || st.busy) return;      // already live or mid-flight
+  if (!HAS_NOVNC){
+    renderVnc(app, 'off', 'Λείπει το noVNC — <code>sudo apt install novnc</code>');
+    return;
+  }
+  st.busy = true;
+  try {
+    const j = await guiCall(app, 'status');
+    renderVnc(app, j.running ? 'live' : 'off',
+              j.running ? '' : 'Η συνεδρία δεν τρέχει.');
+  } catch(e){
+    renderVnc(app, 'off', 'Δεν απαντά ο server.');
+  } finally { st.busy = false; }
+}
+
+async function startVnc(app){
+  const st = vncState[app];
+  if (st.busy) return;
+  st.busy = true;
+  renderVnc(app, 'starting',
+    app === 'gazebo' ? 'Το Gazebo θέλει ~75 δευτερόλεπτα σε software rendering…'
+                     : 'Ξεκινά η γραφική συνεδρία…');
+  try {
+    const j = await guiCall(app, 'start');
+    renderVnc(app, j.running ? 'live' : 'off', j.running ? '' : j.result);
+  } catch(e){
+    renderVnc(app, 'off', 'Απέτυχε η εκκίνηση.');
+  } finally { st.busy = false; }
+}
+
+async function stopVnc(app){
+  vncState[app].frame = null;
+  renderVnc(app, 'off', 'Σταμάτησε.');
+  try { await guiCall(app, 'stop'); } catch(e){}
+  ensureVnc(app);
+}
+
+function refreshVnc(app){ vncState[app].frame = null; ensureVnc(app); }
+
+// ── map canvas ─────────────────────────────────────────────────────────────
+const canvas = $('map-canvas'), ctx = canvas.getContext('2d'), wrap = $('map-wrap');
+
+function scale(){ return mapInfo ? Math.min(canvas.width/mapInfo.width, canvas.height/mapInfo.height) : 1; }
+function offX(){  return mapInfo ? (canvas.width  - mapInfo.width  * scale()) / 2 : 0; }
+function offY(){  return mapInfo ? (canvas.height - mapInfo.height * scale()) / 2 : 0; }
+
+function w2c(wx, wy){
+  if(!mapInfo) return {x:0,y:0};
+  const s=scale();
+  return {
+    x: offX() + (wx - mapInfo.origin[0]) / mapInfo.resolution * s,
+    y: offY() + (mapInfo.height - (wy - mapInfo.origin[1]) / mapInfo.resolution) * s,
+  };
+}
+function c2w(cx, cy){
+  if(!mapInfo) return null;
+  const s=scale();
+  return {
+    x: mapInfo.origin[0] + (cx - offX()) / s * mapInfo.resolution,
+    y: mapInfo.origin[1] + (mapInfo.height - (cy - offY()) / s) * mapInfo.resolution,
+  };
+}
+
+function draw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle='#0c0c0e';
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  if(!mapImg||!mapInfo) return;
+  const s=scale(), ox=offX(), oy=offY();
+  ctx.drawImage(mapImg, ox, oy, mapInfo.width*s, mapInfo.height*s);
+
+  // Global plan
+  if(plan && plan.length>1){
+    ctx.strokeStyle='rgba(96,165,250,.9)'; ctx.lineWidth=2.5;
+    ctx.beginPath();
+    plan.forEach((p,i)=>{ const c=w2c(p[0],p[1]); i?ctx.lineTo(c.x,c.y):ctx.moveTo(c.x,c.y); });
+    ctx.stroke();
+  }
+
+  // LiDAR scan
+  if(scan && pose){
+    ctx.fillStyle='rgba(0,200,255,0.75)';
+    const laserYaw = pose.yaw + LASER_YAW_OFFSET;
+    const lx = pose.x + LASER_X * Math.cos(pose.yaw);
+    const ly = pose.y + LASER_X * Math.sin(pose.yaw);
+    for(let i=0;i<scan.ranges.length;i++){
+      const r=scan.ranges[i];
+      if(!r||r<0.1||r>8) continue;
+      const a = laserYaw + scan.angle_min + i*scan.angle_inc;
+      const p = w2c(lx + r*Math.cos(a), ly + r*Math.sin(a));
+      ctx.fillRect(p.x-1.5, p.y-1.5, 3, 3);
+    }
+  }
+
+  // Nav goal
+  if(goal){
+    const g=w2c(goal.x,goal.y);
+    ctx.strokeStyle='#ffa040'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.arc(g.x,g.y,10,0,Math.PI*2); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(g.x,g.y-15); ctx.lineTo(g.x,g.y+15);
+    ctx.moveTo(g.x-15,g.y); ctx.lineTo(g.x+15,g.y);
+    ctx.stroke();
+  }
+
+  // Robot arrow
+  if(pose){
+    const rp=w2c(pose.x,pose.y);
+    ctx.save();
+    ctx.translate(rp.x,rp.y);
+    ctx.rotate(-pose.yaw);
+    ctx.fillStyle='#00e08a'; ctx.strokeStyle='#003'; ctx.lineWidth=1;
+    ctx.beginPath();
+    ctx.moveTo(17,0); ctx.lineTo(-9,10); ctx.lineTo(-5,0); ctx.lineTo(-9,-10);
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function resize(){
+  if(!wrap.clientWidth) return;
+  canvas.width=wrap.clientWidth; canvas.height=wrap.clientHeight; draw();
+}
+window.addEventListener('resize',resize);
+new ResizeObserver(resize).observe(wrap);
+
+// ── websocket ──────────────────────────────────────────────────────────────
+const HANDLERS = {
+  map(m){
+    mapInfo={width:m.width,height:m.height,resolution:m.resolution,origin:m.origin};
+    const i=new Image(); i.onload=()=>{mapImg=i;draw();}; i.src='data:image/png;base64,'+m.image;
+  },
+  pose(m){
+    pose=m;
+    $('ix').textContent   = m.x.toFixed(2)+' m';
+    $('iy').textContent   = m.y.toFixed(2)+' m';
+    $('iyaw').textContent = (m.yaw*180/Math.PI).toFixed(0)+'°';
+    draw();
+  },
+  scan(m){ scan=m; draw(); },
+  plan(m){ plan=m.points; draw(); },
+  odom(m){
+    $('ivel').textContent = m.vx.toFixed(2)+' m/s · '+m.wz.toFixed(2)+' r/s';
+  },
+  room(m){
+    $('room-badge').textContent = m.name||'—';
+  },
+  objects(m){ $('objects').textContent = m.text || '—'; },
+  situation(m){ $('situation').textContent = m.text || '—'; },
+  arm(m){
+    m.names.forEach((n,i)=>{
+      armPos[n]=m.pos[i];
+      const sl=$('j-'+n), v=$('jv-'+n);
+      if(sl && !sl.dataset.dragging) sl.value=m.pos[i];
+      if(v) v.textContent=(m.pos[i]*180/Math.PI).toFixed(0)+'°';
+    });
+    if('hand' in armPos){
+      const g=$('grip'), gv=$('grip-v');
+      if(g && !g.dataset.dragging) g.value=armPos.hand;
+      if(gv) gv.textContent=(armPos.hand*180/Math.PI).toFixed(0)+'°';
+    }
+  },
+  roomba(m){
+    const OI = {0:'off', 1:'passive', 2:'safe', 3:'full'};
+    const flag = (on, bad) => `<span class="pill ${on?(bad?'bad':'ok'):''}">${on?'ΝΑΙ':'όχι'}</span>`;
+    const age = m.link_age_s;
+    // > ~3 s of silence means the base has gone to sleep. Calling that out here
+    // is the whole point of the panel: a sleeping Roomba fakes nav bugs.
+    $('r-link').innerHTML = age === null || age === undefined
+      ? '<span class="pill">—</span>'
+      : `<span class="pill ${age<3?'ok':'bad'}">${age.toFixed(1)}s ${age<3?'':'· ΚΟΙΜΑΤΑΙ'}</span>`;
+    $('r-mode').innerHTML = `<span class="pill ${m.oi_mode===3||m.oi_mode===2?'ok':'warn'}">`
+      + (OI[m.oi_mode] || '—') + `</span> <span style="color:#52525b">ζητά ${m.oi_mode_want}</span>`;
+    $('r-bump').innerHTML  = flag(m.bump, true);
+    $('r-cliff').innerHTML = flag(m.cliff, true);
+    $('r-wheel').innerHTML = flag(m.wheel_drop, true);
+    $('r-motors').textContent = `${m.left_mm_s} / ${m.right_mm_s} mm/s`;
+    $('r-dock').innerHTML  = flag(m.docking, false);
+  },
+  dock(m){ $('r-dockst').textContent = m.status || '—'; },
+  estop(m){
+    estop = !!m.on;
+    $('estop').classList.toggle('engaged', estop);
+    $('estop').textContent = estop ? '▶ ΞΕΜΠΛΟΚΑΡΙΣΜΑ' : '■ STOP';
+  },
+  speaking(m){
+    $('title').style.opacity = m.on ? '.55' : '1';
+  },
+  chat(m){ addMsg(m.role, m.text); },
+  sys(m){
+    $('s-cpu').textContent  = m.cpu.toFixed(0)+'%';
+    $('s-mem').textContent  = m.mem+'% ('+m.mem_gb+' GB)';
+    $('s-temp').textContent = m.temp!==null && m.temp!==undefined ? m.temp+'°C' : '—';
+    $('s-load').textContent = m.load;
+    $('s-nodecount').textContent = m.nodes.length;
+    $('s-nodes').textContent = m.nodes.join('\n');
+  },
+};
+
+function connect(){
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws${TOKEN_QS}`);
+  ws.onopen  = ()=> $('dot').classList.add('on');
+  ws.onclose = ()=>{ $('dot').classList.remove('on'); setTimeout(connect,2000); };
+  ws.onmessage = e=>{
+    const m=JSON.parse(e.data);
+    const h=HANDLERS[m.type];
+    if(h) h(m);
+  };
+}
+function send(o){ if(ws&&ws.readyState===1) ws.send(JSON.stringify(o)); }
+
+// ── map click ──────────────────────────────────────────────────────────────
+canvas.addEventListener('click',e=>{
+  const r=canvas.getBoundingClientRect();
+  const cx=(e.clientX-r.left)*canvas.width/r.width;
+  const cy=(e.clientY-r.top)*canvas.height/r.height;
+  const wp=c2w(cx,cy); if(!wp) return;
+  goal=wp; send({type:'nav_goal',x:wp.x,y:wp.y});
+  draw();
+});
+
+// ── room buttons ───────────────────────────────────────────────────────────
+const rdiv=$('rooms');
+ROOMS.forEach(name=>{
+  const b=document.createElement('button');
+  b.className='btn'; b.textContent=name;
+  b.onclick=()=>{ send({type:'goto_room',room:name}); goal=null; draw(); };
+  rdiv.appendChild(b);
+});
+
+// ── drive controls ─────────────────────────────────────────────────────────
+function startDrive(v,w){
+  vx=v; wz=w;
+  if(!driveTimer) driveTimer=setInterval(()=>send({type:'cmd_vel',vx,wz}),100);
+  send({type:'cmd_vel',vx:v,wz:w});
+}
+function stopDrive(){
+  clearInterval(driveTimer); driveTimer=null; vx=0; wz=0;
+  send({type:'cmd_vel',vx:0,wz:0});
+}
+function bindDrive(id,v,w){
+  const el=$(id);
+  const go=()=>startDrive(v,w), stop=()=>stopDrive();
+  el.addEventListener('mousedown',go);
+  el.addEventListener('touchstart',e=>{e.preventDefault();go();},{passive:false});
+  ['mouseup','mouseleave'].forEach(ev=>el.addEventListener(ev,stop));
+  ['touchend','touchcancel'].forEach(ev=>el.addEventListener(ev,stop));
+}
+bindDrive('bf', LIN, 0); bindDrive('bb',-LIN, 0);
+bindDrive('bl', 0, ANG); bindDrive('br', 0,-ANG);
+
+$('bstop').addEventListener('click',()=>{ stopDrive(); send({type:'stop'}); });
+$('b-loc').addEventListener('click',()=>send({type:'localize'}));
+$('b-xnav').addEventListener('click',()=>{ goal=null; send({type:'stop'}); draw(); });
+
+// The header stop is a LATCHED e-stop, not a one-shot zero twist: it is the
+// only thing that overrides teleop, which bypasses obstacle_safety entirely.
+$('estop').addEventListener('click',()=>{
+  estop=!estop;
+  stopDrive();
+  send({type:'estop',on:estop});
+});
+
+// ── arm ────────────────────────────────────────────────────────────────────
+const jdiv=$('joints');
+ARM_JOINTS.forEach(name=>{
+  const [lo,hi]=ARM_LIMITS[name];
+  const row=document.createElement('div');
+  row.className='joint';
+  row.innerHTML=`<label>${name}</label>`
+    + `<input type="range" id="j-${name}" min="${lo}" max="${hi}" step="0.01" value="${(lo+hi)/2}">`
+    + `<span class="val" id="jv-${name}">—</span>`;
+  jdiv.appendChild(row);
+  const sl=row.querySelector('input');
+  // While a finger is on the slider, incoming joint_states must not yank it
+  // back — the arm lags the command by design, so echoing feedback into the
+  // control would fight the user.
+  const hold=()=>sl.dataset.dragging='1';
+  const release=()=>{ delete sl.dataset.dragging; };
+  ['mousedown','touchstart'].forEach(e=>sl.addEventListener(e,hold));
+  ['mouseup','touchend','touchcancel'].forEach(e=>sl.addEventListener(e,release));
+  sl.addEventListener('input',()=>{
+    $('jv-'+name).textContent=(sl.value*180/Math.PI).toFixed(0)+'°';
+    send({type:'arm_joint',joint:name,pos:parseFloat(sl.value)});
+  });
+});
+const grip=$('grip');
+['mousedown','touchstart'].forEach(e=>grip.addEventListener(e,()=>grip.dataset.dragging='1'));
+['mouseup','touchend','touchcancel'].forEach(e=>grip.addEventListener(e,()=>delete grip.dataset.dragging));
+grip.addEventListener('input',()=>{
+  $('grip-v').textContent=(grip.value*180/Math.PI).toFixed(0)+'°';
+  send({type:'gripper',pos:parseFloat(grip.value)});
+});
+$('b-grip-open').onclick  = ()=>send({type:'gripper',pos:ARM_LIMITS.hand[1]});
+$('b-grip-close').onclick = ()=>send({type:'gripper',pos:ARM_LIMITS.hand[0]});
+// Rest pose: elbow folded, shoulder down, base centred in its measured range.
+$('b-arm-home').onclick = ()=>{
+  send({type:'arm_joint',joint:'shoulder',pos:1.2});
+  send({type:'arm_joint',joint:'elbow',pos:2.8});
+  send({type:'arm_joint',joint:'wrist',pos:0.0});
+};
+$('b-arm-limp').onclick = ()=>{
+  if(confirm('Κόβεται η ροπή — ο βραχίονας θα πέσει. Τον κρατάς;'))
+    send({type:'arm_raw',cmd:'{"T":210,"cmd":0}'});
+};
+$('b-arm-init').onclick = ()=>send({type:'arm_raw',cmd:'{"T":210,"cmd":1}'});
+$('b-arm-moveit').onclick = ()=>showTab('moveit');
+
+// ── vacuum ─────────────────────────────────────────────────────────────────
+$('b-dock').onclick   = ()=>send({type:'dock',on:true});
+$('b-undock').onclick = ()=>send({type:'dock',on:false});
+
+// ── chat ───────────────────────────────────────────────────────────────────
+const chat=$('chat');
+function addMsg(role,text){
+  const d=document.createElement('div');
+  d.className='msg '+role;
+  d.textContent = role==='wake' ? '— ξύπνησε ('+text+') —' : text;
+  chat.appendChild(d);
+  while(chat.children.length>80) chat.removeChild(chat.firstChild);
+  chat.scrollTop=chat.scrollHeight;
+}
+function sendChat(kind){
+  const inp=$('chat-text'), text=inp.value.trim();
+  if(!text) return;
+  send({type:kind,text});
+  if(kind==='ask') addMsg('user',text);
+  inp.value='';
+}
+$('b-send').onclick = ()=>sendChat('ask');
+$('b-say').onclick  = ()=>sendChat('say');
+$('chat-text').addEventListener('keydown',e=>{ if(e.key==='Enter') sendChat('ask'); });
+
+// ── start ──────────────────────────────────────────────────────────────────
+// Set in JS so the stream carries the same token as the page.
+$('cam').src = '/camera.mjpeg' + TOKEN_QS;
+showTab('map');
+resize(); connect();
+</script>
+</body>
+</html>"""
 
 
 # ── main ───────────────────────────────────────────────────────────────────────
@@ -660,6 +1420,9 @@ def main():
               'this port can drive the robot.')
     else:
         print(f'    token stored in {TOKEN_FILE} (delete it to rotate)')
+    if not os.path.isdir(NOVNC_DIR):
+        print('    ⚠  noVNC missing — RViz/MoveIt/Gazebo tabs will be empty '
+              '(sudo apt install novnc)')
     print()
     uvicorn.run(app, host='0.0.0.0', port=PORT, log_level='warning')
 

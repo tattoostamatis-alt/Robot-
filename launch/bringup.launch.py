@@ -40,6 +40,7 @@ def generate_launch_description():
     doa_led_enabled     = LaunchConfiguration('doa_led_enabled',     default='true')
     use_person_follower = LaunchConfiguration('use_person_follower', default='true')
     use_llm       = LaunchConfiguration('use_llm',       default='false')
+    use_dashboard = LaunchConfiguration('use_dashboard', default='false')
     llm_backend   = LaunchConfiguration('llm_backend',   default='lemonade')
     # The `lemonade` backend is really "any OpenAI-compatible server". Exposed
     # because Lemonade 11.0.0 dropped every FLM/NPU model from its catalogue
@@ -874,6 +875,20 @@ def generate_launch_description():
         output='screen',
     )
 
+    # ── Web dashboard (http://<host>:8080) ────────────────────────────────
+    # The whole robot in a browser tab: map + click-to-navigate, camera,
+    # arm sliders, vacuum telemetry, an LLM chat wired to speech_text, and the
+    # real RViz/MoveIt/Gazebo streamed from headless VNC displays.
+    # Read-only towards the ROS graph except for the controls it exposes, so it
+    # is safe alongside everything else. `robot max` turns this on.
+    dashboard_node = Node(
+        package='home_robot',
+        executable='web_dashboard_node.py',
+        name='web_dashboard',
+        output='screen',
+        condition=IfCondition(use_dashboard),
+    )
+
     # ── Task planner (executes tidy/patrol via Nav2 + YOLO clutter check) ─
     # Consumes llm_bridge_node's tidy_command/patrol_command and narrates
     # progress on speech_response. Needs Nav2 (always on) + use_camera:=true
@@ -1038,6 +1053,7 @@ def generate_launch_description():
         DeclareLaunchArgument('doa_led_enabled',    default_value='true'),
         DeclareLaunchArgument('use_person_follower', default_value='false'),
         DeclareLaunchArgument('use_llm',       default_value='false'),
+        DeclareLaunchArgument('use_dashboard', default_value='false'),
         DeclareLaunchArgument('llm_backend',   default_value='lemonade'),
         DeclareLaunchArgument('llm_url',
             default_value='http://127.0.0.1:52625/v1'),
@@ -1119,6 +1135,7 @@ def generate_launch_description():
         llm_bridge_node,
         memory_node,
         explore_manager_node,
+        dashboard_node,
         planner_node,
         vision_node,
         tts_node,

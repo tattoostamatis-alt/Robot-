@@ -55,6 +55,32 @@ cd ~/robot_ws && colcon build --packages-select home_robot --symlink-install && 
 `use_obstacle_safety:=true` is required for the robot to move in localize mode
 (nothing relays `cmd_vel → cmd_vel_safe` otherwise).
 
+## Web dashboard
+
+`robot max` serves the whole robot at `http://<host>:8080/?t=<token>` — the URL
+is printed at startup, and the token persists in `~/.home_robot/dashboard_token`
+so a phone bookmark keeps working. `use_dashboard:=false` skips it.
+
+| Tab | What it shows |
+|---|---|
+| Χάρτης | map, LiDAR, global plan, click-to-navigate, room buttons, teleop |
+| Κάμερα | D435 colour stream, YOLO detections, situational context |
+| RViz / MoveIt / Gazebo | the **real** Qt applications, streamed from VNC |
+| Βραχίονας | live joint feedback + sliders inside the measured limits, gripper |
+| Σκούπα | OI mode, bumper/cliff/wheel-drop, serial link age, docking |
+| Φωνή/LLM | transcript of what was heard and said; type to ask the LLM |
+| Σύστημα | CPU/RAM/temp and the live ROS node list |
+
+The three GUI tabs are `scripts/gui_session.sh` sessions (RViz `:2`, Gazebo `:3`,
+MoveIt `:4`) bridged to the browser by the dashboard itself — there is no
+websockify daemon, and no port other than 8080 needs to be reachable.
+RViz deliberately *shares* `:2` with the phone's RealVNC session rather than
+starting a second `rviz2`: two of them made AMCL deactivate and every Nav2 goal
+fail with planner error 208.
+
+Gazebo is a **simulation** — it publishes its own `/clock`, `/scan` and `/odom`,
+so do not start that tab while driving the real robot.
+
 ## Recent features (2026-07-06)
 
 Four features added together — all **code-complete and unit-tested, not yet

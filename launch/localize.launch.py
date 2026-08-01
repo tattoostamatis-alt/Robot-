@@ -69,6 +69,7 @@ def _launch_setup(context, *args, **kwargs):
     # longer plan (start-in-collision) and Nav2 loops recoveries until ABORT.
     # HW-confirmed 2026-07-07 (kela3, goto domatio tou max).
     use_recovery = LaunchConfiguration('use_recovery').perform(context).lower() in ('true', '1')
+    use_dashboard = LaunchConfiguration('use_dashboard').perform(context).lower() in ('true', '1')
 
     pkg = FindPackageShare('home_robot')
     actions = []
@@ -110,6 +111,12 @@ def _launch_setup(context, *args, **kwargs):
             # planner only waits on topics; the clutter check it runs at each
             # stop needs use_perception, the driving does not.
             'use_planner':         'true',
+            # Forwarded EXPLICITLY, not left to inheritance. An unforwarded
+            # `use_*` only reaches bringup when the command line happens to set
+            # it, which is exactly how use_situational stayed off under every
+            # flag combination for weeks. `robot max` should always get the
+            # dashboard, so it is decided here.
+            'use_dashboard':       'true' if use_dashboard else 'false',
             'use_recovery':        'true' if use_recovery else 'false',
             'use_obstacle_safety': 'true' if use_obstacle_safety else 'false',
             # Forwarded, not hardcoded: `robot max` decides. It was pinned to
@@ -259,6 +266,11 @@ def generate_launch_description():
             'use_rviz', default_value='true',
             description='Open RViz on the local display (`robot max` sets this; '
                         'the VNC :2 session runs its own rviz2 for the phone)'),
+        DeclareLaunchArgument(
+            'use_dashboard', default_value='true',
+            description='Serve the web dashboard on :8080 — map, camera, arm, '
+                        'vacuum, LLM chat, and RViz/MoveIt/Gazebo streamed from '
+                        'VNC. Token printed at startup; set false to skip it.'),
         DeclareLaunchArgument(
             'use_perception', default_value='false',
             description='Bring up the YOLO detector + tracker, the dynamic-obstacle '

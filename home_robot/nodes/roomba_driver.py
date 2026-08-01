@@ -19,6 +19,7 @@ import pycreate2
 from home_robot import ir_homing
 from home_robot.ir_homing import IrHoming
 import fcntl
+import json
 import math
 import os
 import select
@@ -447,8 +448,20 @@ class RoombaDriver(Node):
                        history=QoSHistoryPolicy.KEEP_LAST,
                        durability=QoSDurabilityPolicy.TRANSIENT_LOCAL))
 
+        # Everything the web dashboard's vacuum panel needs, in one JSON topic.
+        # These are all fields we already track in memory (packet 7 bumper/cliff,
+        # packet 35 OI mode, the e-stop and docking flags), so publishing them
+        # costs no extra serial traffic. Latched: a browser that connects between
+        # ticks still paints a populated panel instead of dashes.
+        self.status_pub = self.create_publisher(
+            String, 'roomba/status',
+            QoSProfile(depth=1,
+                       history=QoSHistoryPolicy.KEEP_LAST,
+                       durability=QoSDurabilityPolicy.TRANSIENT_LOCAL))
+
         self.create_timer(0.05, self._publish_odom)     # 20 Hz
         self.create_timer(0.05, self._motor_control)     # 20 Hz ramped output + watchdog
+        self.create_timer(0.5,  self._publish_status)   # 2 Hz dashboard telemetry
         self.create_timer(2.0,  self._publish_battery)  # 0.5 Hz
         self.create_timer(5.0,  self._check_idle)       # idle watchdog
         self.create_timer(2.0,  self._keep_awake)        # auto-reconnect + BRC keep-alive
@@ -1237,6 +1250,33 @@ class RoombaDriver(Node):
             odom.twist.twist.linear.x = delta_d / dt
             odom.twist.twist.angular.z = delta_a / dt
         self.odom_pub.publish(odom)
+
+    def _publish_status(self):
+        """In-memory telemetry for the web dashboard — no serial I/O.
+
+        Deliberately excludes battery: this chassis runs off a powerbank and the
+        OI's charge fields are garbage, so surfacing them on a dashboard would
+        just be a lie in a nicer font.
+        """
+        now = time.monotonic()
+        self.status_pub.publish(String(data=json.dumps({
+            'oi_mode':      self._last_oi_mode,   # packet 35: 0 off,1 passive,2 safe,3 full
+            'oi_mode_want': self.oi_mode,
+            'bump':         self._bump,
+            'cliff':        self._cliff,
+            'wheel_drop':   self._wheel_drop,
+            'estop':        self._estop,
+            'docking':      self._docking,
+            'idle':         self._idle,
+            'stopped':      self._stopped,
+            # How stale the last good serial read is. > ~3 s means the base has
+            # gone to sleep — the single most useful number here, because a
+            # sleeping Roomba fakes navigation bugs (see the nav artifacts note).
+            'link_age_s':   round(now - self._last_ok_time, 1)
+                            if self._last_ok_time else None,
+            'left_mm_s':    round(self._cur_left, 1),
+            'right_mm_s':   round(self._cur_right, 1),
+        })))
 
     def _publish_battery(self):
         sensors = self._safe_get_sensors()
