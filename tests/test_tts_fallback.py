@@ -140,4 +140,39 @@ def test_fallback_is_configurable(node_src):
 
 def test_startup_warns_when_fallback_missing(node_src):
     """Finding out mid-outage is exactly too late."""
-    assert 'No local TTS fallback' in node_src
+    assert 'no local fallback' in node_src
+    assert 'SILENT' in node_src
+
+
+# ── single-voice mode (2026-08-01) ────────────────────────────────────
+# The user heard the fallback fire and reported it as "sometimes two women
+# with different voices answer me": piper's el_GR-rapunzelina-low is a
+# different Greek woman from edge-tts's Athina, so a fallen-back answer sounds
+# like someone else joining in. They chose one consistent voice over never
+# being mute. These tests pin that trade rather than the old default, so
+# nobody quietly restores two voices while "fixing" the silence.
+
+def test_fallback_is_off_by_default(node_src):
+    assert "declare_parameter('fallback_model', '')" in node_src, \
+        'the second voice is back on by default'
+
+
+def test_the_fallback_code_still_exists(node_src):
+    """Off, not deleted: one parameter has to bring it back, because a mute
+    robot is the failure this originally fixed."""
+    assert 'self._fallback.synthesize(text)' in node_src
+    assert 'tts_fallback.DEFAULT_MODEL' in node_src
+
+
+def test_attempts_are_raised_to_cover_the_missing_fallback(node_src):
+    """With no second voice, a failed synth is silence — so retry harder.
+    At a measured ~30% failure per attempt, 2 attempts leave ~9% of answers
+    mute and 4 leave under 1%."""
+    assert "declare_parameter('synth_attempts', 4)" in node_src
+    assert 'self.synth_attempts' in node_src
+
+
+def test_attempts_cannot_be_configured_to_zero(node_src):
+    """attempts=0 would skip the loop and raise without ever calling
+    edge-tts — a robot that never speaks at all."""
+    assert 'max(1, int(self.get_parameter(\'synth_attempts\').value))' in node_src

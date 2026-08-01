@@ -51,12 +51,31 @@ class TTSNode(Node):
         self.declare_parameter('speaking_tail', 0.3)
         # Local voice used only when edge-tts fails outright (see
         # home_robot/tts_fallback.py). Empty string disables it.
-        self.declare_parameter('fallback_model', tts_fallback.DEFAULT_MODEL)
+        #
+        # ‼️ DISABLED BY DEFAULT since 2026-08-01, at the user's request. The
+        # fallback worked, and that was the problem: piper's voice
+        # (el_GR-rapunzelina-low) is a different Greek woman from edge-tts's
+        # Athina, so an answer that fell back sounded like a second person
+        # joining the conversation. The user reported it as "sometimes two
+        # women with different voices answer me" and chose one consistent
+        # voice over never being mute.
+        #
+        # The cost is known and accepted: when edge-tts fails every attempt,
+        # the robot now says NOTHING. Set fallback_model back to
+        # tts_fallback.DEFAULT_MODEL to restore the old behaviour.
+        self.declare_parameter('fallback_model', '')
         # Give up on an edge-tts attempt after this long and let the retry (then
         # the local voice) take over. A healthy synth measures 0.3-1.1 s, so 3 s
         # is ~3x headroom and still an order of magnitude below the 36-46 s that
         # untimed hung attempts cost on 2026-07-30. See _synthesize().
         self.declare_parameter('synth_timeout', 3.0)
+        # Raised 2 -> 4 on 2026-08-01, when the local fallback was switched off.
+        # edge-tts fails server-side and independently — the SAME text that
+        # failed synthesises fine on the next call — so at a measured ~30% per
+        # attempt, 2 attempts leave ~9% of answers mute and 4 leave under 1%.
+        # The extra wait only happens in the runs that were already failing,
+        # and silence is now the alternative to waiting.
+        self.declare_parameter('synth_attempts', 4)
 
         self.voice = self.get_parameter('voice').value
         self.rate = self.get_parameter('rate').value
@@ -64,6 +83,7 @@ class TTSNode(Node):
         self.device_index = self.get_parameter('device_index').value
         self.speaking_tail = self.get_parameter('speaking_tail').value
         self.synth_timeout = self.get_parameter('synth_timeout').value
+        self.synth_attempts = max(1, int(self.get_parameter('synth_attempts').value))
 
         fallback_model = self.get_parameter('fallback_model').value
         self._fallback = (tts_fallback.PiperFallback(fallback_model,
@@ -75,7 +95,9 @@ class TTSNode(Node):
             self.get_logger().info(f'Local TTS fallback ready: {fallback_model}')
         else:
             self.get_logger().warn(
-                'No local TTS fallback — the robot goes mute if edge-tts fails')
+                'Single voice mode: no local fallback, so the robot stays '
+                'SILENT if edge-tts fails every attempt. Watch for '
+                '"TTS failed" in this log.')
 
         # State is re-published on every transition (and True again at the start
         # of each utterance); the listeners co-start at bringup so plain volatile
@@ -187,7 +209,8 @@ class TTSNode(Node):
         except Exception:
             pass
 
-    async def _synthesize(self, text, attempts=2):
+    async def _synthesize(self, text, attempts=None):
+        attempts = self.synth_attempts if attempts is None else attempts
         # edge-tts talks to a free, unauthenticated Microsoft endpoint that
         # throttles: it intermittently closes the stream having sent no audio
         # ("NoAudioReceived"), or returns an empty one. Measured 2026-07-26 —
