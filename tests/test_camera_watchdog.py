@@ -53,14 +53,29 @@ def _age(node, seconds):
 
 # ── it must not fire before the camera has ever worked ───────────────────────
 
-def test_a_camera_that_never_started_is_not_restarted(cam):
-    """Startup takes ~10 s. Restarting a camera that is still enumerating is
-    how a watchdog turns a slow boot into a restart loop."""
+def test_a_camera_still_starting_is_not_restarted(cam):
+    """A cold start plus USB enumeration is genuinely slow. Restarting a camera
+    that is still coming up is how a watchdog turns a slow boot into a loop."""
     mod, node, launched = cam
     assert node._last_frame is None
     for _ in range(30):
         node._check()
     assert launched == []
+
+
+def test_a_camera_that_never_streams_is_restarted(cam):
+    """‼️ THE BUG, caught on the very next bringup after shipping this node:
+    the driver segfaults DURING startup (exit -11), before publishing anything.
+    The first version refused to arm until it had seen a frame, so it sat there
+    doing nothing through exactly the failure it was written for."""
+    import time
+    mod, node, launched = cam
+    node._started_at = time.monotonic() - 300.0
+    assert node._last_frame is None
+
+    node._check()
+
+    assert len(launched) == 1, 'a camera that never started was left dead' 
 
 
 def test_a_streaming_camera_is_left_alone(cam):

@@ -47,6 +47,15 @@ class CameraWatchdog(Node):
         self.declare_parameter('restart_grace', 30.0)
         self.declare_parameter('max_restarts', 3)
         self.declare_parameter('enable_restart', True)
+        # ‼️ How long to wait for the FIRST frame before treating the camera as
+        # dead. The first version of this node refused to arm until it had seen
+        # a frame, so that a slow boot could not be mistaken for a death — and
+        # that made it useless for the exact failure it was written for: the
+        # driver segfaults DURING startup (exit -11), before it has ever
+        # published anything. Caught on 2026-08-01 within minutes of shipping
+        # it, on the very next bringup. Generous, because a cold start under
+        # load plus USB enumeration is genuinely slow.
+        self.declare_parameter('startup_timeout', 45.0)
         # Same arguments bringup uses with use_perception:=true. Kept here
         # rather than read from the launch because this has to work when the
         # launch that owned the camera is the thing that lost it.
@@ -62,7 +71,9 @@ class CameraWatchdog(Node):
         self.max_restarts = int(self.get_parameter('max_restarts').value)
         self.enable_restart = bool(self.get_parameter('enable_restart').value)
 
-        self._last_frame = None        # None = never saw one; do not arm yet
+        self.startup_timeout = float(self.get_parameter('startup_timeout').value)
+        self._last_frame = None        # None = never saw one
+        self._started_at = time.monotonic()
         self._restarts = 0
         self._blocked_until = 0.0
         self._reported_dead = False
@@ -87,20 +98,30 @@ class CameraWatchdog(Node):
         self._last_frame = time.monotonic()
 
     def _check(self):
-        if self._last_frame is None:
-            return                      # never started; not our problem to fix
         now = time.monotonic()
-        if now - self._last_frame < self.timeout:
-            return
+        if self._last_frame is None:
+            # Never streamed. Either still enumerating, or it segfaulted on the
+            # way up — which is the common one, so it cannot be ignored.
+            gap = now - self._started_at
+            if gap < self.startup_timeout:
+                return
+            never_started = True
+        else:
+            gap = now - self._last_frame
+            if gap < self.timeout:
+                return
+            never_started = False
+
         if now < self._blocked_until:
             return                      # a restart is still coming up
 
-        gap = now - self._last_frame
         if not self._reported_dead:
             self.get_logger().error(
-                f'No camera frames for {gap:.0f}s on {self.topic} — the robot '
-                'is BLIND. Object detection, the 3D view and distance answers '
-                'are all dead until this comes back.')
+                (f'Camera never streamed in {gap:.0f}s' if never_started
+                 else f'No camera frames for {gap:.0f}s')
+                + f' on {self.topic} — the robot is BLIND. Object detection, '
+                'the 3D view and distance answers are all dead until this '
+                'comes back.')
             self._reported_dead = True
 
         if not self.enable_restart:
