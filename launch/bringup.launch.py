@@ -624,6 +624,17 @@ def generate_launch_description():
         condition=IfCondition(use_camera),
     )
 
+    # The camera is the one part that goes missing without saying so: when the
+    # driver segfaults (~2.5% of bringups) everything downstream just reports
+    # "nothing there". This restarts it and says so on /rosout.
+    camera_watchdog_node = Node(
+        package='home_robot',
+        executable='camera_watchdog_node.py',
+        name='camera_watchdog',
+        output='screen',
+        condition=IfCondition(use_camera),
+    )
+
     # ── Pose estimation (YOLO11n-pose on NPU) ────────────────────
     pose_node = Node(
         package='home_robot',
@@ -1118,6 +1129,7 @@ def generate_launch_description():
         explore_node,
         realsense_node,
         detector_node,
+        camera_watchdog_node,
         pose_node,
         face_detection_node,
         tracker_node,

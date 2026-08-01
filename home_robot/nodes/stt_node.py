@@ -99,6 +99,31 @@ class STTNode(Node):
         self.declare_parameter('audio_timeout', 5.0)   # s of silence on mic/audio
         self._audio_timeout = self.get_parameter('audio_timeout').value
 
+        # ‼️ The watchdog above covers exactly one shape of stuck: mic/audio
+        # stopped WHILE a turn was in progress. It cannot cover the shape seen
+        # live on 2026-08-01 — 7 wake words in 25 s, all refused with "Already
+        # transcribing", zero transcriptions — because `_state` is set to
+        # 'idle' BEFORE the transcribe thread starts. So a Whisper call that
+        # hangs (or merely crawls: this happened at load 25 with perception on)
+        # leaves _busy held while the state machine believes the turn is over
+        # and audio keeps flowing. Both of that watchdog's guards then return
+        # early, forever, and the robot is deaf with nothing in the log but the
+        # refusals.
+        #
+        # So _busy gets its own wall-clock deadline, independent of state and
+        # of audio. Transcription measures 2.0-4.2 s; a minute is not a slow
+        # transcription, it is a hung one.
+        self.declare_parameter('busy_timeout', 60.0)
+        self._busy_timeout = self.get_parameter('busy_timeout').value
+        self._busy_since = 0.0
+        # Turn id, bumped on every acquire and every release. A thread may only
+        # release the turn it owns: threading.Lock has no owner check, so after
+        # the watchdog force-releases a hung turn, the hung thread finishing
+        # later would otherwise release a LATER turn's lock and hand the node a
+        # second stuck state that looks exactly like the first.
+        self._busy_gen = 0
+        self._busy_guard = threading.Lock()
+
         self.suppress_on_tts = self.get_parameter('suppress_on_tts').value
         self._gate = SpeakingGate(
             release_tail=self.get_parameter('tts_release_tail').value)
@@ -111,6 +136,7 @@ class STTNode(Node):
 
         self.add_on_set_parameters_callback(self._on_param_change)
         self.create_timer(1.0, self._audio_watchdog)
+        self.create_timer(2.0, self._busy_watchdog)
 
         self.text_pub = self.create_publisher(String, 'speech_text', 10)
         self.create_subscription(String,         'wake_word', self._on_wake_word, 10)
@@ -169,6 +195,50 @@ class STTNode(Node):
         else:
             self.get_logger().warn('Calibration got no audio from /mic/audio, keeping default')
 
+    def _begin_turn(self):
+        """Claim _busy for a new turn. Returns its id, or None if busy."""
+        if not self._busy.acquire(blocking=False):
+            return None
+        with self._busy_guard:
+            self._busy_gen += 1
+            self._busy_since = time.monotonic()
+            return self._busy_gen
+
+    def _end_turn(self, gen) -> bool:
+        """Release _busy, but only if `gen` still owns it.
+
+        Guarded by its own lock rather than self._lock, so callers already
+        holding the state lock cannot deadlock on it.
+        """
+        with self._busy_guard:
+            if gen != self._busy_gen or not self._busy.locked():
+                return False          # a stale owner, or already released
+            self._busy_gen += 1
+            try:
+                self._busy.release()
+            except RuntimeError:
+                pass
+            return True
+
+    def _busy_watchdog(self):
+        """Unstick a turn whose transcription never came back.
+
+        Deliberately checks neither _state nor _last_audio: this is the case
+        where both of those look perfectly healthy. See the note in __init__.
+        """
+        with self._busy_guard:
+            if not self._busy.locked() or not self._busy_since:
+                return
+            held = time.monotonic() - self._busy_since
+            gen = self._busy_gen
+        if held < self._busy_timeout:
+            return
+        if self._end_turn(gen):
+            self.get_logger().error(
+                f'Transcription has not returned after {held:.0f}s — releasing '
+                'the STT turn. Every wake word since was being refused with '
+                '"Already transcribing".')
+
     def _audio_watchdog(self):
         """Unstick a turn that stalled because mic/audio stopped arriving.
 
@@ -187,11 +257,7 @@ class STTNode(Node):
             self._record_buf = []
             self._wait_count = 0
             self._sil_count = 0
-        if self._busy.locked():
-            try:
-                self._busy.release()
-            except RuntimeError:
-                pass          # _transcribe got there first
+        self._end_turn(self._busy_gen)
 
     def _on_tts_speaking(self, msg: Bool):
         self._gate.set_speaking(msg.data)
@@ -200,7 +266,7 @@ class STTNode(Node):
         if self._whisper is None:
             self.get_logger().warn('Whisper not loaded yet, ignoring wake word')
             return
-        if not self._busy.acquire(blocking=False):
+        if self._begin_turn() is None:
             self.get_logger().warn('Already transcribing, ignoring wake word')
             return
         with self._lock:
@@ -242,7 +308,7 @@ class STTNode(Node):
                 elif self._wait_count >= self._start_timeout_chunks:
                     self.get_logger().info('No speech detected after wake word')
                     self._state = 'idle'
-                    self._busy.release()
+                    self._end_turn(self._busy_gen)
                 return
 
             if self._state == 'recording':
@@ -256,7 +322,9 @@ class STTNode(Node):
                         len(self._record_buf) >= self._max_chunks):
                     audio = np.concatenate(self._record_buf)
                     self._state = 'idle'
-                    threading.Thread(target=self._transcribe, args=(audio,), daemon=True).start()
+                    threading.Thread(target=self._transcribe,
+                                     args=(audio, self._busy_gen),
+                                     daemon=True).start()
 
     def _dump_audio(self, audio: np.ndarray) -> str | None:
         """Write the exact buffer handed to Whisper, for offline diagnosis.
@@ -281,7 +349,7 @@ class STTNode(Node):
             self.get_logger().warn(f'audio dump failed: {exc}')
             return None
 
-    def _transcribe(self, audio: np.ndarray):
+    def _transcribe(self, audio: np.ndarray, gen: int):
         try:
             self.get_logger().info(f'Transcribing {len(audio)/SAMPLE_RATE:.1f}s rms={float(np.sqrt(np.mean(audio**2))):.4f}')
             dumped = self._dump_audio(audio)
@@ -315,7 +383,7 @@ class STTNode(Node):
             else:
                 self.get_logger().info('Transcription empty')
         finally:
-            self._busy.release()
+            self._end_turn(gen)
 
 
 def main():

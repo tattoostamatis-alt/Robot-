@@ -10,6 +10,7 @@ ament_python_install_package(${PROJECT_NAME})
 install(PROGRAMS
   home_robot/nodes/roomba_driver.py
   home_robot/nodes/object_detector.py
+  home_robot/nodes/camera_watchdog_node.py
   home_robot/nodes/obstacle_safety_node.py
   home_robot/nodes/arm_driver.py
   home_robot/nodes/arm_moveit_bridge.py

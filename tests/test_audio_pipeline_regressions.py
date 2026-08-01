@@ -99,6 +99,108 @@ def test_watchdog_frees_a_stalled_recording(stt):
     assert not node._busy.locked()
 
 
+# ── the stuck shape the first watchdog cannot see (2026-08-01, live) ────────
+# Measured on the robot: 7 wake words in 25 s, every one refused with "Already
+# transcribing", zero transcriptions, and stt_node holding no microphone handle
+# at all. _state is set to 'idle' BEFORE the transcribe thread starts, so a
+# Whisper call that hangs leaves _busy held while the state machine believes
+# the turn is over and audio keeps flowing — both of _audio_watchdog's guards
+# return early, forever.
+
+def test_the_audio_watchdog_cannot_see_a_hung_transcription(stt):
+    """Pinning WHY a second watchdog was needed: this is not a regression, it
+    is the documented blind spot. If this ever starts failing, the two
+    watchdogs have merged and one of them is redundant."""
+    mod, node = stt
+    gen = node._begin_turn()
+    assert gen is not None
+    node._state = 'idle'          # exactly what _on_audio does before the thread
+    node._last_audio = __import__('time').monotonic()   # audio still flowing
+
+    node._audio_watchdog()
+
+    assert node._busy.locked(), 'the blind spot closed by accident'
+
+
+def test_the_busy_watchdog_releases_a_hung_transcription(stt):
+    mod, node = stt
+    node._begin_turn()
+    node._state = 'idle'
+    node._busy_since = __import__('time').monotonic() - 300.0
+
+    node._busy_watchdog()
+
+    assert not node._busy.locked(), 'STT stayed deaf'
+
+
+def test_the_busy_watchdog_ignores_audio_and_state(stt):
+    """It must not inherit the guards that made the first one blind."""
+    import inspect
+    src = inspect.getsource(type(stt[1])._busy_watchdog)
+    # Strip the docstring: it *describes* those two guards, deliberately.
+    body = src.split('"""')[2] if src.count('"""') >= 2 else src
+    assert '_last_audio' not in body, 'inherited the audio guard'
+    assert 'self._state' not in body, 'inherited the state guard'
+
+
+def test_a_transcription_still_running_is_left_alone(stt):
+    mod, node = stt
+    node._begin_turn()
+    node._busy_since = __import__('time').monotonic() - 3.0   # normal: 2.0-4.2 s
+
+    node._busy_watchdog()
+
+    assert node._busy.locked(), 'a healthy transcription was cut off'
+
+
+def test_an_idle_node_is_never_released(stt):
+    mod, node = stt
+    node._busy_since = __import__('time').monotonic() - 300.0
+
+    node._busy_watchdog()          # _busy was never acquired
+
+    assert not node._busy.locked()
+
+
+def test_a_freed_hung_thread_cannot_release_the_next_turn(stt):
+    """‼️ threading.Lock has no owner check. Without the turn id, the hung
+    Whisper call finishing later would release the NEXT turn's lock and hand
+    the node a second stuck state that looks exactly like the first."""
+    mod, node = stt
+    hung = node._begin_turn()
+    node._busy_since = __import__('time').monotonic() - 300.0
+    node._busy_watchdog()                      # watchdog frees the hung turn
+    assert not node._busy.locked()
+
+    fresh = node._begin_turn()                 # a new wake word arrives
+    assert fresh is not None and fresh != hung
+
+    node._end_turn(hung)                       # the hung thread finally returns
+
+    assert node._busy.locked(), 'the stale owner released a live turn'
+
+
+def test_the_owner_can_end_its_own_turn(stt):
+    mod, node = stt
+    gen = node._begin_turn()
+    assert node._end_turn(gen) is True
+    assert not node._busy.locked()
+    assert node._end_turn(gen) is False, 'double release must be a no-op'
+
+
+def test_a_second_wake_word_is_refused_while_busy(stt):
+    mod, node = stt
+    assert node._begin_turn() is not None
+    assert node._begin_turn() is None
+
+
+def test_both_watchdogs_are_actually_scheduled(stt):
+    mod, node = stt
+    names = {getattr(c, '__name__', '') for _, c in node.timers}
+    assert '_audio_watchdog' in names
+    assert '_busy_watchdog' in names, 'the hung-transcription watchdog never runs'
+
+
 def test_watchdog_leaves_an_idle_node_alone(stt):
     """No microphone while idle is quiet, not broken — and must not release a
     lock the node does not hold."""
