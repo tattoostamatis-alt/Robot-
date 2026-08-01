@@ -887,12 +887,43 @@ rfb.addEventListener('credentialsrequired', () => {
 // genuinely gone stops after a few tries instead of reloading forever.
 const MAX_RETRY = 5;
 let retry = parseInt((location.hash.match(/r=(\d+)/) || [])[1] || '0', 10);
+
+// RFB keeps its socket private and its 'disconnect' detail says nothing, so
+// every pre-handshake failure looks the same from here — and the three causes
+// need three different fixes. Reopen the identical URL once, purely to read
+// the close code off it.  Runs at most once, only on a failure.
+const CLOSE_MEANING = {
+  1008: 'το token απορρίφθηκε — άνοιξε το dashboard με ?t=<token>',
+  1011: 'ο server δεν βρήκε τίποτα στη θύρα __PORT__ — η συνεδρία :__DISP__ δεν τρέχει',
+  1006: 'το websocket κόπηκε χωρίς κλείσιμο — proxy, extension ή δίκτυο στη μέση',
+};
+let diagnosed = false;
+function diagnose(done){
+  if (diagnosed) { done(''); return; }
+  diagnosed = true;
+  let ws, settled = false;
+  const finish = why => { if (settled) return; settled = true;
+                          try { ws && ws.close(); } catch (e) {}
+                          done(why); };
+  try { ws = new WebSocket(url, 'binary'); }
+  catch (e) { finish('δεν άνοιξε καν websocket: ' + e); return; }
+  const giveUp = setTimeout(() => finish('το websocket δεν απάντησε σε 8s'), 8000);
+  ws.onopen = () => { clearTimeout(giveUp);
+                      finish('το websocket ανοίγει κανονικά — δοκίμασε ↻'); };
+  ws.onclose = e => { clearTimeout(giveUp);
+                      finish(CLOSE_MEANING[e.code] ||
+                             ('ws close ' + e.code + ' ' + (e.reason || ''))); };
+}
+
+function reportNoConnection(){
+  diagnose(why => __vncReport('error',
+    'Δεν συνδέθηκε στο :__DISP__ (θύρα __PORT__).' +
+    (why ? '\n' + why : '') +
+    '\nΈλεγχος: scripts/gui_session.sh status ' + APP));
+}
+
 rfb.addEventListener('disconnect', () => {
-  if (!connected){
-    __vncReport('error', 'Δεν συνδέθηκε στο :__DISP__ (θύρα __PORT__). ' +
-                'Τρέχει η συνεδρία; scripts/gui_session.sh status ' + APP);
-    return;
-  }
+  if (!connected){ reportNoConnection(); return; }
   if (retry >= MAX_RETRY){
     __vncReport('error', 'Χάθηκε η σύνδεση και μετά από ' + MAX_RETRY +
                 ' προσπάθειες — η γραφική συνεδρία μάλλον σταμάτησε.');
@@ -904,10 +935,10 @@ rfb.addEventListener('disconnect', () => {
     location.reload();
   }, 2000 * (retry + 1));
 });
-// Without this a refused websocket just leaves a black rectangle: RFB retries
-// internally and never fires anything the page can see.
-setTimeout(() => { if (!connected) __vncReport('error',
-  'Λήξη χρόνου σύνδεσης (15s) στο :__DISP__.'); }, 15000);
+// Without this a socket that opens and then goes quiet leaves a black
+// rectangle: RFB fires nothing at all while it waits. `diagnosed` keeps this
+// from repeating whatever the disconnect handler already said.
+setTimeout(() => { if (!connected && !diagnosed) reportNoConnection(); }, 15000);
 </script>
 </body>
 </html>

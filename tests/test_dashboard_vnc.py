@@ -118,10 +118,37 @@ def test_every_failure_mode_reports():
 
 
 def test_a_connection_that_never_opens_still_says_so():
-    """RFB retries internally and fires nothing the page can see, so a refused
-    websocket used to be indistinguishable from a slow one."""
-    assert re.search(r'setTimeout\(\(\) => \{ if \(!connected\)', VIEW), \
+    """RFB fires nothing at all while a socket sits open and quiet, so that
+    case used to be indistinguishable from a slow one."""
+    assert re.search(r'setTimeout\(\(\) => \{ if \(!connected', VIEW), \
         'no watchdog for a connection that never opens'
+
+
+def test_the_watchdog_does_not_talk_over_the_disconnect_report():
+    m = re.search(r'setTimeout\(\(\) => \{ if \(!connected.*?\}, 15000\);', VIEW, re.S)
+    assert m and 'diagnosed' in m.group(0), 'both paths would report'
+
+
+def test_a_failed_connection_reads_the_websocket_close_code():
+    """1008 (token), 1011 (session down) and 1006 (something in the path ate
+    the socket) need three different fixes, and RFB reports none of them."""
+    assert 'function diagnose(' in VIEW
+    for code in ('1008', '1011', '1006'):
+        assert code in VIEW, f'close code {code} is not explained'
+
+
+def test_the_diagnostic_socket_opens_at_most_once():
+    """It runs on the failure path, which can fire repeatedly."""
+    assert 'if (diagnosed)' in VIEW and 'diagnosed = true' in VIEW
+
+
+def test_the_diagnostic_socket_cannot_hang():
+    """A socket that neither opens nor closes would leave the pane silent —
+    which is the symptom this whole page exists to remove."""
+    m = re.search(r'function diagnose\(.*?\n\}', VIEW, re.S)
+    assert m and re.search(r'setTimeout\(\(\) => finish\(', m.group(0)), \
+        'the probe has no timeout'
+    assert 'settled' in m.group(0), 'open/close/timeout could all report'
 
 
 def test_the_report_names_the_display_and_port():
