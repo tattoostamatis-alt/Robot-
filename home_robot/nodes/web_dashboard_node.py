@@ -44,6 +44,7 @@ import rclpy
 from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
+from rcl_interfaces.msg import Log as RosoutLog
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from sensor_msgs.msg import Image, JointState, LaserScan
@@ -51,7 +52,7 @@ from std_msgs.msg import Bool, Float32, String
 from std_srvs.srv import Empty
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -118,10 +119,30 @@ def _load_or_create_token() -> str:
 TOKEN = '' if NO_AUTH else _load_or_create_token()
 
 
-def _authorised(supplied: Optional[str]) -> bool:
+# Once the token has been presented in the query string, it is echoed back as a
+# cookie so a bare `http://<host>:8080/` works from then on. Typing the URL by
+# hand or copying it out of a wrapped terminal line drops the `?t=...` and the
+# reply is a blank 401, which reads as "the dashboard is down" rather than
+# "you are missing a query parameter" — that is what it looked like on
+# 2026-08-01. SameSite=strict is what keeps the cookie from turning into a
+# cross-site hole: without it any page on the LAN could open a websocket to
+# /ws (websockets are not subject to CORS) and drive the robot with the
+# browser's own cookie. Strict still sends it for a bookmark or a typed
+# address, because those have no initiating site.
+COOKIE_NAME = 'hr_dash'
+COOKIE_MAX_AGE = 365 * 24 * 3600
+
+
+def _authorised(supplied: Optional[str], cookies: Optional[dict] = None) -> bool:
     if NO_AUTH:
         return True
-    return bool(supplied) and secrets.compare_digest(supplied, TOKEN)
+    if supplied and secrets.compare_digest(supplied, TOKEN):
+        return True
+    if cookies:
+        jar = cookies.get(COOKIE_NAME)
+        if jar and secrets.compare_digest(jar, TOKEN):
+            return True
+    return False
 
 
 def _lan_ip() -> str:
@@ -160,6 +181,12 @@ class State:
         # message on each topic. Keyed by message type.
         self.latest: dict = {}
         self.chat: list = []            # rolling voice/LLM transcript
+        # Rolling /rosout tail. Until this existed, reading a warning meant
+        # finding the terminal that owns the launch — impossible from the phone,
+        # and impossible at all once the launch is detached. Only WARN and above
+        # are kept: INFO on this graph runs into the thousands per minute (Nav2
+        # costmaps alone) and would push everything useful out of the buffer.
+        self.logs: list = []
 
     def set_loop(self, loop: asyncio.AbstractEventLoop):
         self._loop = loop
@@ -177,6 +204,12 @@ class State:
             return
         data = json.dumps(msg)
         asyncio.run_coroutine_threadsafe(self._bcast(data), self._loop)
+
+    def add_log(self, level: int, name: str, text: str):
+        entry = {'level': level, 'name': name, 'text': text, 't': time.time()}
+        self.logs.append(entry)
+        del self.logs[:-300]
+        self.broadcast({'type': 'log', **entry}, remember=False)
 
     def add_chat(self, role: str, text: str):
         entry = {'role': role, 'text': text, 't': time.time()}
@@ -230,6 +263,18 @@ class DashboardNode(Node):
 
         # ── Arm ─────────────────────────────────────────────────────────────
         self.create_subscription(JointState, '/arm/joint_states', self._cb_arm, 10)
+
+        # ── Log tail ────────────────────────────────────────────────────────
+        # Every node publishes /rosout RELIABLE + TRANSIENT_LOCAL with a 10 s
+        # lifespan (checked with `ros2 topic info -v /rosout`, 66 publishers).
+        # Subscribe RELIABLE so nothing is dropped, but VOLATILE: transient
+        # local here would replay one stale line per publisher at connect,
+        # dating the log tail with warnings from before the tab was open.
+        self.create_subscription(
+            RosoutLog, '/rosout', self._cb_rosout,
+            QoSProfile(depth=100,
+                       reliability=QoSReliabilityPolicy.RELIABLE,
+                       durability=QoSDurabilityPolicy.VOLATILE))
 
         # ── Vacuum base ─────────────────────────────────────────────────────
         self.create_subscription(String, '/roomba/status', self._cb_roomba, latch)
@@ -349,6 +394,13 @@ class DashboardNode(Node):
 
     def _cb_room(self, msg: String):
         self._state.broadcast({'type': 'room', 'name': msg.data})
+
+    def _cb_rosout(self, msg: RosoutLog):
+        # WARN(30) and up only — see State.logs. Nav2's costmaps alone publish
+        # INFO faster than a browser can render it.
+        if msg.level < RosoutLog.WARN:
+            return
+        self._state.add_log(int(msg.level), msg.name, msg.msg)
 
     def _cb_arm(self, msg: JointState):
         # arm_driver publishes at 10 Hz; halve it for the browser.
@@ -496,15 +548,25 @@ if os.path.isdir(NOVNC_DIR):
 
 
 @app.get('/', response_class=HTMLResponse)
-async def index(t: str = ''):
-    if not _authorised(t):
-        return HTMLResponse('Unauthorized', status_code=401)
-    return HTMLResponse(_make_html(list(locations.keys()), t))
+async def index(request: Request, t: str = ''):
+    if not _authorised(t, request.cookies):
+        return HTMLResponse(
+            'Unauthorized — άνοιξε το link με το token: '
+            'http://&lt;host&gt;:8080/?t=&lt;token&gt; '
+            '(είναι στο ~/.home_robot/dashboard_token)',
+            status_code=401)
+    # The page keeps carrying the token in its own sub-requests, so nothing
+    # depends on the cookie surviving; it only saves the *next* visit.
+    resp = HTMLResponse(_make_html(list(locations.keys()), t or TOKEN))
+    if not NO_AUTH:
+        resp.set_cookie(COOKIE_NAME, TOKEN, max_age=COOKIE_MAX_AGE,
+                        httponly=True, samesite='strict')
+    return resp
 
 
 @app.get('/camera.mjpeg')
-async def camera(t: str = ''):
-    if not _authorised(t):
+async def camera(request: Request, t: str = ''):
+    if not _authorised(t, request.cookies):
         return Response('Unauthorized', status_code=401)
     async def stream():
         while True:
@@ -535,8 +597,8 @@ def _gui_session(action: str, app_name: str) -> str:
 
 
 @app.get('/gui/{app_name}/{action}')
-async def gui(app_name: str, action: str, t: str = ''):
-    if not _authorised(t):
+async def gui(request: Request, app_name: str, action: str, t: str = ''):
+    if not _authorised(t, request.cookies):
         return JSONResponse({'error': 'unauthorized'}, status_code=401)
     if app_name not in VNC_PORTS or action not in ('start', 'stop', 'status'):
         return JSONResponse({'error': 'bad request'}, status_code=400)
@@ -552,7 +614,7 @@ async def vnc_bridge(ws: WebSocket, app_name: str, t: str = ''):
     noVNC opens the socket with the 'binary' subprotocol and then speaks raw
     RFB over it, so all we do is copy bytes both ways until either end hangs up.
     """
-    if not _authorised(t) or app_name not in VNC_PORTS:
+    if not _authorised(t, ws.cookies) or app_name not in VNC_PORTS:
         await ws.close(code=1008)      # policy violation
         return
     await ws.accept(subprotocol='binary')
@@ -600,7 +662,7 @@ async def vnc_bridge(ws: WebSocket, app_name: str, t: str = ''):
 
 @app.websocket('/ws')
 async def ws_endpoint(ws: WebSocket, t: str = ''):
-    if not _authorised(t):
+    if not _authorised(t, ws.cookies):
         await ws.close(code=1008)      # policy violation
         return
     await ws.accept()
@@ -619,6 +681,8 @@ async def ws_endpoint(ws: WebSocket, t: str = ''):
             await ws.send_text(json.dumps(msg))
         for entry in list(state.chat)[-25:]:
             await ws.send_text(json.dumps({'type': 'chat', **entry}))
+        for entry in list(state.logs)[-150:]:
+            await ws.send_text(json.dumps({'type': 'log', **entry}))
     except Exception:
         state.remove_client(ws)
         return
@@ -922,6 +986,17 @@ button{font:inherit;color:inherit}
       </div>
     </section>
 
+    <section class="pane" id="p-log">
+      <div class="card" style="flex:1;display:flex;flex-direction:column;min-height:0">
+        <h3>Προειδοποιήσεις &amp; σφάλματα (/rosout)
+          <span class="badge" id="log-count">0</span>
+          <button class="btn" id="b-log-clear" style="float:right">Καθάρισε</button>
+        </h3>
+        <div id="log-list" style="flex:1;overflow:auto;font-family:ui-monospace,Menlo,monospace;
+          font-size:11.5px;line-height:1.6"></div>
+      </div>
+    </section>
+
   </div>
 </div>
 <script>
@@ -956,6 +1031,7 @@ const TABS = [
   ['llm',    '💬', 'Φωνή/LLM'],
   ['gazebo', '🌍', 'Gazebo'],
   ['sys',    '📊', 'Σύστημα'],
+  ['log',    '📜', 'Log'],
 ];
 const tabNav = $('tabs');
 TABS.forEach(([id, icon, label]) => {
@@ -1242,6 +1318,7 @@ const HANDLERS = {
     $('title').style.opacity = m.on ? '.55' : '1';
   },
   chat(m){ addMsg(m.role, m.text); },
+  log(m){ addLog(m); },
   sys(m){
     $('s-cpu').textContent  = m.cpu.toFixed(0)+'%';
     $('s-mem').textContent  = m.mem+'% ('+m.mem_gb+' GB)';
@@ -1361,6 +1438,7 @@ $('b-arm-limp').onclick = ()=>{
 };
 $('b-arm-init').onclick = ()=>send({type:'arm_raw',cmd:'{"T":210,"cmd":1}'});
 $('b-arm-moveit').onclick = ()=>showTab('moveit');
+$('b-log-clear').onclick  = ()=>{ $('log-list').innerHTML=''; logSeen=0; $('log-count').textContent='0'; };
 
 // ── vacuum ─────────────────────────────────────────────────────────────────
 $('b-dock').onclick   = ()=>send({type:'dock',on:true});
@@ -1375,6 +1453,25 @@ function addMsg(role,text){
   chat.appendChild(d);
   while(chat.children.length>80) chat.removeChild(chat.firstChild);
   chat.scrollTop=chat.scrollHeight;
+}
+// ── log tail ───────────────────────────────────────────────────────────────
+// Levels are rcl_interfaces/Log: 30 WARN, 40 ERROR, 50 FATAL. Auto-scroll is
+// suppressed when the user has scrolled up to read something — otherwise the
+// next warning yanks the line they were reading off the screen.
+const LOG_LEVELS = {30:['WARN','#facc15'], 40:['ERROR','#f87171'], 50:['FATAL','#f87171']};
+let logSeen = 0;
+function addLog(m){
+  const list = $('log-list');
+  const stick = list.scrollHeight - list.scrollTop - list.clientHeight < 40;
+  const [name, colour] = LOG_LEVELS[m.level] || ['LOG', '#a1a1aa'];
+  const d = document.createElement('div');
+  const ts = new Date(m.t * 1000).toLocaleTimeString('el-GR');
+  d.style.color = colour;
+  d.textContent = `${ts}  ${name}  [${m.name}]  ${m.text}`;
+  list.appendChild(d);
+  while(list.children.length > 300) list.removeChild(list.firstChild);
+  $('log-count').textContent = ++logSeen;
+  if(stick) list.scrollTop = list.scrollHeight;
 }
 function sendChat(kind){
   const inp=$('chat-text'), text=inp.value.trim();

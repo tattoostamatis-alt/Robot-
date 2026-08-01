@@ -61,6 +61,12 @@ def names(text):
     ('Φέρε μου το μπουκάλι', 'fetch'),
     ('Πιάσε την κούπα', 'pick'),
     ('Θυμήσου ότι τα κλειδιά είναι στο συρτάρι', 'remember'),
+    # Added 2026-08-01 with the tools themselves.
+    ('Κλείσε όλα', 'close_app'),
+    ('κλείσε το firefox', 'close_app'),
+    ('Πόσο μακριά είναι ο άνθρωπος;', 'distance_to'),
+    ('Πόση απόσταση έχει;', 'distance_to'),
+    ('πόσα μέτρα απέχει η καρέκλα;', 'distance_to'),
 ])
 def test_command_reaches_its_tool(text, expected):
     assert expected in names(text), f'{text!r} would lose {expected}'
@@ -121,6 +127,7 @@ def test_every_tool_is_reachable():
         ('τι είναι ανοιχτό στην οθόνη', 0), ('πόση μπαταρία', 0),
         ('σκόρπια αντικείμενα', 0), ('πιάσε την κούπα', 0),
         ('φέρε μου το βιβλίο', 0), ('θυμήσου ότι', 0),
+        ('κλείσε όλα', 0), ('πόσο μακριά είναι ο άνθρωπος', 0),
     ]:
         covered |= names(text)
     # `stop` is gated by stop_command.py before the model, never routed here.

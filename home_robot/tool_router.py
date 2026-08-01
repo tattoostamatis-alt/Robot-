@@ -59,7 +59,7 @@ _GROUPS = [
     (['follow', 'stop_follow'],
      r'ακολουθ\w*'),
 
-    (['open_app', 'list_windows'],
+    (['open_app', 'close_app', 'list_windows'],
      r'ανοιξ\w*|ανοιγ\w*|κλεισ\w*|οθον\w*|εφαρμογ\w*|παραθυρ\w*|'
      r'υπολογιστ\w*|firefox|φαιρφοξ|τερματικ\w*|κειμενογραφ\w*|'
      r'αριθμομηχαν\w*|κομπιουτεραρ\w*|βιντεο|pdf|vscode|browser|'
@@ -76,6 +76,11 @@ _GROUPS = [
 
     (['remember'],
      r'θυμ\w*|σημειωσ\w*|κρατα|μαθε'),
+
+    # "πόσο μακριά είναι;" / "πόση απόσταση έχει ο άνθρωπος;". 'κοντα' is left
+    # out on purpose: "έλα κοντά μου" is a movement command, not a measurement.
+    (['distance_to'],
+     r'αποστασ\w*|μακρι\w*|ποσα\s+μετρα|ποσο\s+ψηλ\w*'),
 ]
 
 _COMPILED = [(names, re.compile(pat)) for names, pat in _GROUPS]

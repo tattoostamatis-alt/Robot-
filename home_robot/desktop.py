@@ -19,6 +19,7 @@ back.
 """
 import glob
 import os
+import signal
 import subprocess
 import time
 
@@ -127,6 +128,116 @@ def list_windows():
 
     return {'status': 'ok', 'windows': windows, 'count': len(windows),
             'partial': partial}
+
+
+def _ancestors():
+    """PIDs between this process and init.
+
+    ‼️ 'terminal' is a closable app, and the robot's own launch may well be a
+    child of one. SIGTERM to that terminal takes the whole stack down with it —
+    the assistant would answer "έκλεισα το τερματικό" over a voice pipeline that
+    no longer exists. Ancestors are therefore never signalled.
+    """
+    pids, pid = set(), os.getpid()
+    while pid > 1:
+        try:
+            with open(f'/proc/{pid}/stat') as f:
+                # comm can contain spaces and parens, so split after the last ')'
+                pid = int(f.read().rsplit(')', 1)[1].split()[1])
+        except (OSError, IndexError, ValueError):
+            break
+        pids.add(pid)
+    return pids
+
+
+def _app_pids(app, skip):
+    """Live PIDs of the user's processes belonging to one KNOWN_APPS name."""
+    comms = {c for c, a in _COMM.items() if a == app}
+    if not comms:
+        return []
+    try:
+        r = subprocess.run(['ps', '-u', str(os.getuid()), '-o', 'pid=,comm='],
+                           capture_output=True, text=True, timeout=5)
+    except Exception:
+        return []
+    out = []
+    for line in r.stdout.splitlines():
+        bits = line.split(None, 1)
+        if len(bits) != 2:
+            continue
+        pid_s, comm = bits
+        if comm.strip()[:15] in {c[:15] for c in comms}:
+            try:
+                pid = int(pid_s)
+            except ValueError:
+                continue
+            if pid not in skip and pid != os.getpid():
+                out.append(pid)
+    return out
+
+
+def close_app(name, grace=5.0):
+    """Ask an app (or 'all') to quit. SIGTERM only — never SIGKILL.
+
+    The user asked for this by voice ("κλείσε όλα"). SIGTERM is what the window
+    manager's close button sends, so an editor with unsaved work puts up its
+    "save before quitting?" dialog and stays open; SIGKILL would throw that work
+    away silently. An app still running after the grace period is therefore
+    reported as still open, NOT escalated to -9 — that is a decision for the
+    person sitting in front of the screen.
+    """
+    apps = sorted(_GUI_PROCS.values()) if name == 'all' else [name]
+    if name != 'all' and name not in KNOWN_APPS:
+        return {'status': 'error', 'reason': f'unknown app: {name}',
+                'available': installed_apps()}
+
+    skip = _ancestors()
+    targets = {app: pids for app in apps if (pids := _app_pids(app, skip))}
+    if not targets:
+        return {'status': 'ok', 'action': 'close_app', 'app': name,
+                'closed': [], 'still_open': [], 'note': 'δεν ήταν ανοιχτό'}
+
+    for pids in targets.values():
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+
+    deadline = time.time() + grace
+    while time.time() < deadline:
+        if not any(_alive(p) for pids in targets.values() for p in pids):
+            break
+        time.sleep(0.25)
+
+    closed, still = [], []
+    for app, pids in targets.items():
+        (still if any(_alive(p) for p in pids) else closed).append(app)
+    return {'status': 'ok', 'action': 'close_app', 'app': name,
+            'closed': closed, 'still_open': still}
+
+
+def _alive(pid):
+    """Is `pid` still a running process?
+
+    ‼️ Not just `os.kill(pid, 0)`. open_app() starts apps with Popen, so an app
+    the robot opened is our own child: after SIGTERM it becomes a ZOMBIE until
+    someone reaps it, and signal 0 to a zombie SUCCEEDS. close_app would then
+    report "still open" for an app whose window had already vanished. Reap what
+    is ours, and read the process state for everything else.
+    """
+    try:
+        reaped, _ = os.waitpid(pid, os.WNOHANG)
+        if reaped == pid:
+            return False
+    except (ChildProcessError, OSError):
+        pass          # not our child — fall through to /proc
+    try:
+        with open(f'/proc/{pid}/stat') as f:
+            state = f.read().rsplit(')', 1)[1].split()[0]
+        return state != 'Z'
+    except (OSError, IndexError):
+        return False
 
 
 def exec_command(path):

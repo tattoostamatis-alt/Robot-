@@ -128,6 +128,13 @@ TOOLS = [
         }, 'required': ['app']},
     }},
     {'type': 'function', 'function': {
+        'name': 'close_app',
+        'description': 'Κλείσε εφαρμογή στην οθόνη ("κλείσε όλα" → all)',
+        'parameters': {'type': 'object', 'properties': {
+            'app': {'type': 'string', 'enum': _APPS + ['all']},
+        }, 'required': ['app']},
+    }},
+    {'type': 'function', 'function': {
         'name': 'list_windows',
         'description': 'Τι είναι ανοιχτό στην οθόνη του υπολογιστή',
         'parameters': {'type': 'object', 'properties': {}},
@@ -203,6 +210,13 @@ TOOLS = [
         'parameters': {'type': 'object', 'properties': {
             'object': {'type': 'string', 'description': 'αγγλικό COCO label, π.χ. cup, bottle, book'},
         }, 'required': ['object']},
+    }},
+    {'type': 'function', 'function': {
+        'name': 'distance_to',
+        'description': 'Πόσο μακριά είναι ένα ορατό αντικείμενο/άνθρωπος (μέτρα)',
+        'parameters': {'type': 'object', 'properties': {
+            'object': {'type': 'string', 'description': 'COCO label, default person'},
+        }},
     }},
     {'type': 'function', 'function': {
         'name': 'follow',
@@ -316,6 +330,7 @@ class LLMBridgeNode(Node):
         # cancel the goal from the speech callback thread.
         self._nav_goal_handle = None
         self._latest_objects = None
+        self._objects_stamp = None      # when they arrived; see _distance_to
         self._latest_battery = None
         self._memory_event = threading.Event()
         self._memory_answer = None
@@ -423,6 +438,7 @@ class LLMBridgeNode(Node):
     def _on_detected_objects(self, msg: String):
         try:
             self._latest_objects = json.loads(msg.data)
+            self._objects_stamp = time.time()
         except json.JSONDecodeError:
             pass
 
@@ -978,8 +994,14 @@ class LLMBridgeNode(Node):
         elif name == 'open_app':
             return desktop.open_app(args.get('app'))
 
+        elif name == 'close_app':
+            return desktop.close_app(args.get('app'))
+
         elif name == 'list_windows':
             return desktop.list_windows()
+
+        elif name == 'distance_to':
+            return self._distance_to(args.get('object') or 'person')
 
         elif name == 'stop':
             self.cmd_vel_pub.publish(Twist())
@@ -1090,6 +1112,49 @@ class LLMBridgeNode(Node):
             return status
 
         return {'status': 'error', 'reason': f'unknown tool: {name}'}
+
+    # Detections carry no timestamp of their own, so note when they landed.
+    # object_detector runs at ~2 Hz; anything older than this means it stopped
+    # publishing (node down, camera segfaulted — that happens on ~2.5% of
+    # boots). Answering "1.5 μέτρα" off a frozen frame would invent a person
+    # who has already left the room, which is worse than saying "δεν βλέπω".
+    DETECTION_MAX_AGE = 4.0
+
+    def _distance_to(self, label: str) -> dict:
+        """How far away is the nearest `label`, from the depth camera."""
+        label = (label or '').strip().lower()
+        if not self._latest_objects or self._objects_stamp is None:
+            return {'status': 'error', 'object': label,
+                    'reason': 'δεν φτάνουν ανιχνεύσεις — τρέχει ο object_detector;'}
+
+        age = time.time() - self._objects_stamp
+        if age > self.DETECTION_MAX_AGE:
+            return {'status': 'error', 'object': label,
+                    'reason': f'παλιές ανιχνεύσεις ({age:.0f}s) — η κάμερα σταμάτησε'}
+
+        def distance_of(o):
+            # box_distance is a median over the whole box and survives a single
+            # bad depth pixel; z is the centre pixel and is the fallback.
+            d = o.get('box_distance')
+            return d if d is not None else o.get('z')
+
+        matches = [o for o in self._latest_objects
+                   if str(o.get('label', '')).lower() == label
+                   and distance_of(o) is not None]
+        if not matches:
+            return {'status': 'ok', 'object': label, 'seen': False}
+
+        best = min(matches, key=distance_of)
+        dist = float(distance_of(best))
+        # Camera optical frame: +x right, +z forward. Positive bearing = left,
+        # matching how the answer gets spoken ("στα αριστερά σου").
+        bearing = math.degrees(math.atan2(-float(best.get('x') or 0.0),
+                                          max(float(best.get('z') or dist), 1e-3)))
+        side = 'μπροστά' if abs(bearing) < 12 else (
+            'αριστερά' if bearing > 0 else 'δεξιά')
+        return {'status': 'ok', 'object': label, 'seen': True,
+                'distance_m': round(dist, 2), 'bearing_deg': round(bearing),
+                'side': side, 'count': len(matches)}
 
     def destroy_node(self):
         super().destroy_node()
