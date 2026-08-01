@@ -145,8 +145,15 @@ class PoseSaverNode(Node):
             'yaw': _quat_to_yaw(p.orientation.z, p.orientation.w),
         }
         try:
-            with open(self._pose_file, "w") as f:
+            # Atomic — see the note in record_location._save_locations. A
+            # half-written pose file after a power cut would restore the robot
+            # to nowhere on the next boot.
+            tmp = self._pose_file + '.tmp'
+            with open(tmp, 'w') as f:
                 yaml.dump(data, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self._pose_file)
         except Exception as e:
             self.get_logger().warn(f'Failed to save pose: {e}')
 

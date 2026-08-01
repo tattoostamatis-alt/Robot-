@@ -5,7 +5,7 @@ Subscribes:
   /follow_command              (std_msgs/Bool)     — True = start following, False = stop
   /doa/wake                    (std_msgs/Float32)  — wake angle [0-359°]; only updates the
                                                      target direction, does NOT activate
-  /camera/depth/image_rect_raw (sensor_msgs/Image, 16UC1) — depth in mm
+  /camera/camera/depth/image_rect_raw (sensor_msgs/Image, 16UC1) — depth in mm
 
 Publishes:
   /cmd_vel                     (geometry_msgs/Twist) — velocity commands
@@ -16,12 +16,14 @@ Following logic:
   - Uses the latest DoA wake angle to aim at the speaker (projected onto the depth
     image column, D435 87° HFOV) — a fresh wake fired just before the command.
   - Reads median depth in a vertical strip around that column.
-  - Moves forward when person is too far, stops when too close, holds in range.
+  - Turns to bring that bearing to the image centre, and moves forward when the
+    person is too far, stops when too close, holds in range.
   - Deactivates on follow_command=False or timeout; publishes a zero-velocity stop.
 
 Note: chmod +x this file after creation.
 """
 
+import math
 import threading
 import time
 
@@ -50,6 +52,19 @@ class PersonFollowerNode(Node):
         self.declare_parameter('follow_timeout',      30.0)
         self.declare_parameter('depth_strip_width',   60)
         self.declare_parameter('camera_hfov_deg',     87.0)
+        # ‼️ Turning. The docstring has always claimed this node "aims at the
+        # speaker", but _control only ever set linear.x — the DoA column picked
+        # which depth strip to MEASURE and nothing more, so the robot drove
+        # dead ahead on a distance read from 40° off to one side. Without a turn
+        # the forward motion is not just unhelpful, it is aimed at something the
+        # node never looked at.
+        self.declare_parameter('turn_gain',        0.0025)  # rad/s per pixel of error
+        self.declare_parameter('turn_deadband_px',   40)    # ignore small errors
+        # This chassis cannot rotate below ~0.31 rad/s — commanding less just
+        # stalls the wheels (see the rotation-floor measurements in project
+        # memory). So a turn is either a real one or none at all.
+        self.declare_parameter('min_turn_speed',     0.35)  # rad/s
+        self.declare_parameter('max_turn_speed',     0.60)  # rad/s
 
         self._dist_min    = self.get_parameter('follow_distance_min').value
         self._dist_max    = self.get_parameter('follow_distance_max').value
@@ -57,6 +72,10 @@ class PersonFollowerNode(Node):
         self._timeout     = self.get_parameter('follow_timeout').value
         self._strip_width = self.get_parameter('depth_strip_width').value
         self._hfov        = self.get_parameter('camera_hfov_deg').value
+        self._turn_gain   = self.get_parameter('turn_gain').value
+        self._turn_dead   = self.get_parameter('turn_deadband_px').value
+        self._turn_min    = self.get_parameter('min_turn_speed').value
+        self._turn_max    = self.get_parameter('max_turn_speed').value
 
         # --- Internal state (all access via _lock) ------------------------
         self._lock         = threading.Lock()
@@ -74,7 +93,15 @@ class PersonFollowerNode(Node):
                                  self._follow_cmd_cb, 10)
         self.create_subscription(Float32, '/doa/wake',
                                  self._doa_cb, 10)
-        self.create_subscription(Image, '/camera/depth/image_rect_raw',
+        # ‼️ /camera/CAMERA/... — the realsense2_camera launch nests the camera
+        # name under the camera namespace, so every other node in this package
+        # uses the doubled prefix (object_detector, global_localizer,
+        # web_dashboard). This one was missing a level and subscribed to a topic
+        # NOBODY PUBLISHES, with no remapping in bringup.launch.py to save it:
+        # "ακολούθησέ με" logged "Following activated", never received a single
+        # frame, never published a single Twist, and silently timed out 30 s
+        # later. The whole feature was dead, on by default, since it was written.
+        self.create_subscription(Image, '/camera/camera/depth/image_rect_raw',
                                  self._depth_cb, 10)
 
         self.get_logger().info(
@@ -170,14 +197,29 @@ class PersonFollowerNode(Node):
             f'median={median_m:.3f}m'
         )
 
-        self._control(median_m)
+        self._control(median_m, col)
 
     # ------------------------------------------------------------------
     # Control logic
     # ------------------------------------------------------------------
-    def _control(self, depth_m: float):
-        """Publish Twist based on measured distance to person."""
+    def _turn_for(self, col: int) -> float:
+        """Angular velocity that brings `col` toward the image centre.
+
+        Quantized to the chassis' real capability: below min_turn_speed the
+        wheels do not move at all, so anything smaller is commanded as zero
+        rather than as a stall.
+        """
+        err = col - _CENTER_COL            # +ve: target is right of centre
+        if abs(err) <= self._turn_dead:
+            return 0.0
+        wz = -self._turn_gain * err        # +z is left (CCW) in REP-103
+        mag = min(max(abs(wz), self._turn_min), self._turn_max)
+        return math.copysign(mag, wz)
+
+    def _control(self, depth_m: float, col: int):
+        """Publish Twist based on measured distance to, and bearing of, person."""
         twist = Twist()
+        twist.angular.z = self._turn_for(col)
 
         if depth_m > self._dist_max:
             # Person is too far away — drive toward them

@@ -19,6 +19,7 @@ so Max always knows his environment without needing explicit tool calls.
 import json
 import math
 import os
+import time
 
 import numpy as np
 import psutil
@@ -125,6 +126,7 @@ class SituationalAwarenessNode(Node):
         self._odom_x     = 0.
         self._odom_y     = 0.
         self._objects    = []
+        self._tracked_rx = 0.0    # last tracked_objects arrival (see _on_detected)
         self._battery    = None   # BatteryState
 
         self._tf_buffer   = tf2_ros.Buffer()
@@ -137,8 +139,8 @@ class SituationalAwarenessNode(Node):
         self.create_subscription(Odometry,     '/odom',           self._on_odom,    10)
         self.create_subscription(BatteryState, 'battery/state',   self._on_battery, 10)
         # Prefer tracked_objects (stable IDs) but fall back to detected_objects
-        self.create_subscription(String, 'tracked_objects',  self._on_objects, 10)
-        self.create_subscription(String, 'detected_objects', self._on_objects, 10)
+        self.create_subscription(String, 'tracked_objects',  self._on_tracked, 10)
+        self.create_subscription(String, 'detected_objects', self._on_detected, 10)
 
         self._pub = self.create_publisher(String, 'situation_context', 10)
         self.create_timer(1.0 / hz, self._publish)
@@ -172,6 +174,22 @@ class SituationalAwarenessNode(Node):
             return t.transform.translation.x, t.transform.translation.y
         except Exception:
             return self._odom_x, self._odom_y
+
+    # ‼️ tracked_objects is the PREFERRED source; detected_objects is a fallback
+    # for when the tracker is not running. Both used to be wired to the same
+    # callback with no preference at all despite the comment claiming one, so
+    # with perception up every detection cycle was processed TWICE — once
+    # tracked, once raw — alternating between the two views of the same scene.
+    _TRACKED_TTL = 2.0        # s: consider the tracker live for this long
+
+    def _on_tracked(self, msg):
+        self._tracked_rx = time.monotonic()
+        self._on_objects(msg)
+
+    def _on_detected(self, msg):
+        if time.monotonic() - self._tracked_rx < self._TRACKED_TTL:
+            return            # the tracker is live; ignore the raw duplicate
+        self._on_objects(msg)
 
     def _on_battery(self, msg: BatteryState):
         self._battery = msg

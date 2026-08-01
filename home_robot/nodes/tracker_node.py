@@ -191,9 +191,18 @@ class TrackerNode(Node):
         self._tracks = [t for t in self._tracks if t.lost <= self._max_lost]
 
         # ── Publish confirmed tracks ─────────────────────────────────
+        # ‼️ `t.lost == 0` — only tracks CONFIRMED by a detection in THIS frame.
+        # Tracks are deliberately kept alive across max_lost_frames of occlusion,
+        # but publishing them meanwhile reported objects that are no longer
+        # visible, at their last-seen 3D position (obj is built from t.det, the
+        # stale detection). Everything downstream treats this topic as "what the
+        # robot can see right now": semantic_costmap marks obstacles from it,
+        # object_memory records where things are, situational_awareness lists
+        # "nearby objects" for the LLM, and fetch picks its grasp target from it.
+        # Canonical SORT publishes only updated tracks for exactly this reason.
         output = []
         for t in self._tracks:
-            if t.hits >= self._min_hits:
+            if t.lost == 0 and t.hits >= self._min_hits:
                 obj = dict(t.det)
                 obj['track_id']   = t.id
                 obj['track_age']  = t.age

@@ -260,8 +260,14 @@ class AprilTagRelocalizer(Node):
             'qw': float(t.transform.rotation.w),
         }
         os.makedirs(os.path.dirname(self.calib_file), exist_ok=True)
-        with open(self.calib_file, 'w') as f:
+        # Atomic — losing this to a power cut means re-calibrating the tag
+        # by hand against the map. See record_location._save_locations.
+        tmp = self.calib_file + '.tmp'
+        with open(tmp, 'w') as f:
             yaml.safe_dump(d, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, self.calib_file)
         self.map_tag = tf_to_mat(t)
         self.get_logger().info(f"Calibrated: saved map->{self.tag_frame} to {self.calib_file}")
         return resp

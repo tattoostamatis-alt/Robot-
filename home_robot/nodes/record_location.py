@@ -51,10 +51,19 @@ def _load_locations(path: str) -> dict:
 
 
 def _save_locations(path: str, locations: dict):
-    with open(path, 'w') as f:
+    # ‼️ Atomic: write a temp file, fsync it, then rename over the target.
+    # This machine loses power abruptly (8 unclean shutdowns in 3 days as of
+    # 2026-08-01), and a truncate-then-write leaves a half-file on disk if the
+    # cut lands in the middle. object_memory_node has done it this way all
+    # along; these had not.
+    tmp = path + '.tmp'
+    with open(tmp, 'w') as f:
         f.write('# Named navigation goals (map frame).\n')
         yaml.safe_dump(locations, f, allow_unicode=True, sort_keys=True,
                        default_flow_style=False)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 class RecordLocation(Node):

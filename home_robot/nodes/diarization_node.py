@@ -152,8 +152,20 @@ class DiarizationNode(Node):
             self.get_logger().info(f'Loaded {len(self._profiles)} speaker profile(s)')
 
     def _save_profiles(self):
+        # Atomic — this is rewritten on every auto-enrolment, so it is the file
+        # most likely to be mid-write when the power goes. np.savez appends the
+        # .npz suffix itself, hence the explicit tmp name below.
         with self._profiles_lock:
-            np.savez(PROFILES_FILE, **self._profiles)
+            snapshot = dict(self._profiles)
+        tmp = PROFILES_FILE + '.tmp.npz'
+        try:
+            with open(tmp, 'wb') as f:
+                np.savez(f, **snapshot)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, PROFILES_FILE)
+        except OSError as e:
+            self.get_logger().warn(f'Could not save speaker profiles: {e}')
 
     # ── ROS callbacks ────────────────────────────────────────────────
 

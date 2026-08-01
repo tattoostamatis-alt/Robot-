@@ -135,6 +135,7 @@ class MissionExecutorNode(Node):
         self._cancel_flag = threading.Event()
         self._lock       = threading.Lock()
         self._latest_objects: list = []
+        self._tracked_rx = 0.0    # last tracked_objects arrival (see _on_detected)
 
         self._nav_ac = ActionClient(self, NavigateToPose, 'navigate_to_pose')
         self._tf_buffer   = tf2_ros.Buffer()
@@ -156,8 +157,8 @@ class MissionExecutorNode(Node):
         # Subscribers
         self.create_subscription(String, 'mission/start',     self._on_mission_start,   10)
         self.create_subscription(String, 'speech_text',       self._on_speech_text,     10)
-        self.create_subscription(String, 'detected_objects',  self._on_objects,         10)
-        self.create_subscription(String, 'tracked_objects',   self._on_objects,         10)
+        self.create_subscription(String, 'tracked_objects',   self._on_tracked,         10)
+        self.create_subscription(String, 'detected_objects',  self._on_detected,        10)
         self.create_subscription(String, 'object_memory/answer', self._on_mem_answer,   10)
         self.create_subscription(String, 'pick_result',       self._on_pick_result,     10)
         self.create_subscription(String, 'place_result',      self._on_place_result,    10)
@@ -193,6 +194,22 @@ class MissionExecutorNode(Node):
             self._latest_objects = json.loads(msg.data) or []
         except json.JSONDecodeError:
             pass
+
+    # ‼️ tracked_objects is the PREFERRED source; detected_objects is a fallback
+    # for when the tracker is not running. Both used to be wired to the same
+    # callback with no preference at all despite the comment claiming one, so
+    # with perception up every detection cycle was processed TWICE — once
+    # tracked, once raw — alternating between the two views of the same scene.
+    _TRACKED_TTL = 2.0        # s: consider the tracker live for this long
+
+    def _on_tracked(self, msg):
+        self._tracked_rx = time.monotonic()
+        self._on_objects(msg)
+
+    def _on_detected(self, msg):
+        if time.monotonic() - self._tracked_rx < self._TRACKED_TTL:
+            return            # the tracker is live; ignore the raw duplicate
+        self._on_objects(msg)
 
     def _on_dock_status(self, msg: String):
         self._dock_value = msg.data
