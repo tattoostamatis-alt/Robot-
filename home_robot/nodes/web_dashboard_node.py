@@ -1032,6 +1032,11 @@ button{font:inherit;color:inherit}
 .vnc-host{flex:1;position:relative;background:#0c0c0e;border:1px solid #2c2c32;
   border-radius:12px;overflow:hidden;min-height:240px}
 .vnc-host iframe{width:100%;height:100%;border:0;display:block}
+/* Mirrors noVNC's own error text out of the iframe so it can be read/copied */
+.vnc-err{position:absolute;top:0;left:0;right:0;z-index:5;padding:8px 12px;
+  background:#7f1d1d;color:#fecaca;font-size:12px;line-height:1.5;
+  font-family:ui-monospace,monospace;white-space:pre-wrap;word-break:break-word;
+  max-height:45%;overflow:auto}
 .vnc-msg{position:absolute;inset:0;display:flex;flex-direction:column;
   align-items:center;justify-content:center;gap:14px;text-align:center;padding:20px;
   color:#a1a1aa;font-size:13px;line-height:1.6}
@@ -1357,8 +1362,48 @@ Object.keys(VNC_APPS).forEach(k => vncState[k] = {frame:null, busy:false});
 
 function vncPane(app){ return $('p-' + app); }
 
+// noVNC reports trouble in two places, both buried in the iframe: a red
+// fallback banner for uncaught script errors, and its status bar for a refused
+// or dropped connection. Surface whichever fires, with the real text.
+function vncPeekError(app, f){
+  const st = vncState[app];
+  clearInterval(st.peek);
+  let tries = 0;
+  st.peek = setInterval(() => {
+    let text = '';
+    try {
+      const d = f.contentDocument;
+      if (!d) return;
+      const box = d.getElementById('noVNC_fallback_error');
+      if (box && box.classList.contains('noVNC_open'))
+        text = (d.getElementById('noVNC_fallback_errormsg') || {}).textContent || '';
+      if (!text){
+        const bar = d.getElementById('noVNC_status');
+        if (bar && bar.classList.contains('noVNC_open') &&
+            bar.classList.contains('noVNC_status_error'))
+          text = bar.textContent || '';
+      }
+    } catch(e){
+      // Cross-origin should be impossible here; stop rather than spin.
+      clearInterval(st.peek); return;
+    }
+    if (text){ clearInterval(st.peek); showVncError(app, text.trim()); }
+    else if (++tries > 40) clearInterval(st.peek);   // ~20s, then give up
+  }, 500);
+}
+
+function showVncError(app, text){
+  const host = vncPane(app).querySelector('.vnc-host');
+  if (!host || host.querySelector('.vnc-err')) return;
+  const b = document.createElement('div');
+  b.className = 'vnc-err';
+  b.textContent = '⚠ noVNC: ' + text;
+  host.insertBefore(b, host.firstChild);
+}
+
 function renderVnc(app, mode, detail){
   const pane = vncPane(app), meta = VNC_APPS[app], st = vncState[app];
+  clearInterval(st.peek);          // the old frame is about to be thrown away
   pane.innerHTML = '';
   const host = document.createElement('div');
   host.className = 'vnc-host';
@@ -1372,6 +1417,11 @@ function renderVnc(app, mode, detail){
     f.src = '/novnc/vnc.html?autoconnect=1&reconnect=1&resize=scale'
           + '&path=' + encodeURIComponent('vnc/' + app) + VNC_QS
           + '&password=' + encodeURIComponent(VNC_PASS);
+    // noVNC swallows its own failures into a banner *inside* the iframe, which
+    // is easy to miss on a scaled-down view and impossible to copy out of. The
+    // frame is same-origin, so mirror that text into our own pane instead of
+    // leaving the user with "the VNC has an error".
+    f.addEventListener('load', () => vncPeekError(app, f));
     host.appendChild(f);
     st.frame = f;
   } else {
