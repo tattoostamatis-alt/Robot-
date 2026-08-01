@@ -11,8 +11,8 @@ in this project) decodes it to PCM via a subprocess pipe before playback
 with sounddevice.
 
 edge-tts is a free, unauthenticated endpoint that fails ~20% of the time, so
-there are two layers of protection: _synthesize retries 3x, and if that still
-comes back empty a local piper voice speaks instead
+there are two layers of protection: _synthesize makes `attempts` tries (2 by
+default), and if that still comes back empty a local piper voice speaks instead
 (home_robot/tts_fallback.py). Sample rate is therefore per-utterance, not a
 constant — the local voice runs at 16 kHz against edge-tts's 24 kHz.
 """
@@ -235,13 +235,18 @@ class TTSNode(Node):
         return b''.join(chunks)
 
     def _decode_mp3(self, mp3_bytes):
+        # ‼️ Bounded, for exactly the reason _synthesize is. A pipe-fed ffmpeg
+        # that wedges would block the single playback thread forever: the robot
+        # goes mute AND never republishes tts/speaking=False, which also holds
+        # the STT gate shut, so it stops hearing commands too — the same
+        # double symptom the sd.wait() hang produced on 2026-07-23. A decode of
+        # a few seconds of speech takes tens of milliseconds; 10 s is not a
+        # budget, it is a "this will never finish" line. Timing out raises, and
+        # the caller falls back to the local piper voice.
         proc = subprocess.run(
             ['ffmpeg', '-i', 'pipe:0', '-f', 's16le', '-ar', str(SAMPLE_RATE), '-ac', '1', 'pipe:1'],
-            input=mp3_bytes, capture_output=True, check=True)
+            input=mp3_bytes, capture_output=True, check=True, timeout=10.0)
         return proc.stdout
-
-    def destroy_node(self):
-        super().destroy_node()
 
 
 def main():

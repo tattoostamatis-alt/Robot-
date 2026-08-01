@@ -100,6 +100,10 @@ from openwakeword.model import Model
 
 SAMPLE_RATE = 16000
 CHUNK_SIZE = 1280  # 80ms @ 16kHz — openWakeWord's expected frame size
+# ~2.4 s of audio. Deep enough to ride out a scheduling hiccup, shallow enough
+# that a detector which has fallen behind is noticed rather than silently
+# accumulating a minutes-long backlog. See _enqueue().
+AUDIO_QUEUE_MAX = 30
 
 
 # "I'm listening" chime, in the spirit of Hey Siri's two-note acknowledgement.
@@ -232,7 +236,17 @@ class WakeWordNode(Node):
         self.audio_pub = self.create_publisher(Int16MultiArray, 'mic/audio', 200)
         self.create_subscription(Bool, SPEAKING_TOPIC, self._on_tts_speaking, 10)
 
-        self._audio_q = queue.Queue()
+        # ‼️ BOUNDED. This was an unbounded Queue fed from the realtime audio
+        # callback and drained by the model. Whenever prediction fell behind
+        # realtime — which on this box happens whenever flm/Whisper/YOLO are
+        # loaded, see the swap-thrashing history — the backlog grew without
+        # limit: memory climbed AND every detection was scored against audio
+        # that got progressively older, so the wake word "stopped working" while
+        # actually firing many seconds late. Dropping the OLDEST chunk is the
+        # right trade: stale audio is worthless for wake detection.
+        # diarization_node has used a bounded queue all along; this matches it.
+        self._audio_q = queue.Queue(maxsize=AUDIO_QUEUE_MAX)
+        self._dropped_chunks = 0
         self._last_trigger = {}
 
         threading.Thread(target=self._listen_loop, args=(device_index,), daemon=True).start()
@@ -243,12 +257,35 @@ class WakeWordNode(Node):
             f'threshold={self.threshold}')
 
     def _listen_loop(self, device_index):
+        """Own the mic, and KEEP owning it.
+
+        ‼️ This used to be a bare `with sd.InputStream(...)`. If the device went
+        away — the USB hub these peripherals hang off glitches, and the array
+        has dropped out before — the stream raised, the `with` unwound, this
+        thread ended, and nothing was ever published on mic/audio again. Wake
+        word AND STT went permanently deaf with no error line anywhere, node
+        still alive and apparently healthy. Reopen instead, and say so.
+        """
         device = None if device_index < 0 else device_index
-        with sd.InputStream(samplerate=SAMPLE_RATE, channels=self.mic_channels, dtype='int16',
-                            blocksize=CHUNK_SIZE, device=device,
-                            callback=self._audio_callback):
-            while rclpy.ok():
-                time.sleep(0.1)
+        backoff = 1.0
+        while rclpy.ok():
+            try:
+                with sd.InputStream(samplerate=SAMPLE_RATE,
+                                    channels=self.mic_channels, dtype='int16',
+                                    blocksize=CHUNK_SIZE, device=device,
+                                    callback=self._audio_callback):
+                    self.get_logger().info('Microphone stream open')
+                    backoff = 1.0
+                    self._hp_zi = None       # re-seed the IIR on the new stream
+                    while rclpy.ok():
+                        time.sleep(0.1)
+            except Exception as exc:                      # noqa: BLE001
+                if not rclpy.ok():
+                    return
+                self.get_logger().error(
+                    f'Microphone stream lost ({exc}) — reopening in {backoff:.0f}s')
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 30.0)
 
     def _audio_callback(self, indata, frames, time_info, status):
         chunk = indata[:, self.mic_channel].copy()
@@ -280,15 +317,38 @@ class WakeWordNode(Node):
                 self._hp_zi = self._hp_zi_template * fchunk[0]
             filt, self._hp_zi = lfilter(self._hp_b, self._hp_a,
                                         fchunk, zi=self._hp_zi)
-            self._audio_q.put(np.clip(filt, -32768, 32767).astype(np.int16))
+            self._enqueue(np.clip(filt, -32768, 32767).astype(np.int16))
         else:
-            self._audio_q.put(chunk)
+            self._enqueue(chunk)
         # STT gets the full band (Whisper needs it) off the transcription channel.
         stt_chunk = (chunk if self.stt_channel == self.mic_channel
                      else indata[:, self.stt_channel].copy())
         msg = Int16MultiArray()
         msg.data = stt_chunk.tolist()
         self.audio_pub.publish(msg)
+
+    def _enqueue(self, chunk):
+        """Hand a chunk to the detector, dropping the OLDEST if it is behind.
+
+        Never blocks: this runs on the realtime audio callback, where waiting
+        for the model would stall capture and cost us the next chunk too.
+        """
+        try:
+            self._audio_q.put_nowait(chunk)
+        except queue.Full:
+            try:
+                self._audio_q.get_nowait()      # discard the stalest chunk
+            except queue.Empty:
+                pass
+            self._dropped_chunks += 1
+            if self._dropped_chunks % 100 == 1:
+                self.get_logger().warn(
+                    f'Wake detection behind realtime — dropped '
+                    f'{self._dropped_chunks} chunk(s). CPU contention?')
+            try:
+                self._audio_q.put_nowait(chunk)
+            except queue.Full:
+                pass
 
     def _on_tts_speaking(self, msg: Bool):
         self._gate.set_speaking(msg.data)
@@ -325,9 +385,6 @@ class WakeWordNode(Node):
                 if self.beep_on_wake:
                     threading.Thread(target=_play_beep, daemon=True).start()
                 self.wake_pub.publish(String(data=name))
-
-    def destroy_node(self):
-        super().destroy_node()
 
 
 def main():

@@ -86,6 +86,18 @@ class STTNode(Node):
         self._flush_rem  = 0
         self._lock       = threading.Lock()
         self._busy       = threading.Lock()
+        # ‼️ This whole state machine is driven by INCOMING AUDIO and nothing
+        # else — every timeout it has (start_timeout, silence_limit,
+        # max_record_seconds) is counted in chunks, so it only advances while
+        # chunks arrive. If mic/audio goes quiet mid-turn (the array drops off
+        # the USB hub, wake_word_node's stream dies, the publisher is
+        # restarted), the node stays in 'flushing'/'waiting_speech'/'recording'
+        # holding _busy, and every later wake word is refused with "Already
+        # transcribing" — permanently, with no error. The wall-clock watchdog
+        # below is the only thing that can unstick it.
+        self._last_audio = time.monotonic()
+        self.declare_parameter('audio_timeout', 5.0)   # s of silence on mic/audio
+        self._audio_timeout = self.get_parameter('audio_timeout').value
 
         self.suppress_on_tts = self.get_parameter('suppress_on_tts').value
         self._gate = SpeakingGate(
@@ -98,6 +110,7 @@ class STTNode(Node):
                          daemon=True).start()
 
         self.add_on_set_parameters_callback(self._on_param_change)
+        self.create_timer(1.0, self._audio_watchdog)
 
         self.text_pub = self.create_publisher(String, 'speech_text', 10)
         self.create_subscription(String,         'wake_word', self._on_wake_word, 10)
@@ -156,6 +169,30 @@ class STTNode(Node):
         else:
             self.get_logger().warn('Calibration got no audio from /mic/audio, keeping default')
 
+    def _audio_watchdog(self):
+        """Unstick a turn that stalled because mic/audio stopped arriving.
+
+        Only acts on a turn that is actually in progress: an idle node with no
+        microphone is merely quiet, which is not a fault this can fix.
+        """
+        if time.monotonic() - self._last_audio < self._audio_timeout:
+            return
+        with self._lock:
+            if self._state == 'idle':
+                return
+            self.get_logger().error(
+                f'No mic/audio for {self._audio_timeout:.0f}s mid-turn — '
+                'resetting STT (was stuck in "%s")' % self._state)
+            self._state = 'idle'
+            self._record_buf = []
+            self._wait_count = 0
+            self._sil_count = 0
+        if self._busy.locked():
+            try:
+                self._busy.release()
+            except RuntimeError:
+                pass          # _transcribe got there first
+
     def _on_tts_speaking(self, msg: Bool):
         self._gate.set_speaking(msg.data)
 
@@ -177,6 +214,7 @@ class STTNode(Node):
 
     def _on_audio(self, msg: Int16MultiArray):
         chunk = np.array(msg.data, dtype=np.int16).astype(np.float32) / 32768.0
+        self._last_audio = time.monotonic()
 
         with self._lock:
             if self._state == 'idle':

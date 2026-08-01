@@ -157,7 +157,10 @@ class DashboardNode(Node):
         self.create_subscription(LaserScan, '/scan', self._cb_scan, 5)
         self.create_subscription(Image,
             '/camera/camera/color/image_raw', self._cb_camera, 5)
-        self.create_subscription(String, '/current_room', self._cb_room, 10)
+        # room_markers publishes this latched (TRANSIENT_LOCAL) precisely so a
+        # late subscriber gets the current room; asking for volatile threw that
+        # away, so the badge stayed '—' until the robot next changed room.
+        self.create_subscription(String, '/current_room', self._cb_room, latch)
 
         self._vel_pub  = self.create_publisher(Twist, '/cmd_vel', 10)
         self._goal_pub = self.create_publisher(PoseStamped, '/goal_pose', 10)

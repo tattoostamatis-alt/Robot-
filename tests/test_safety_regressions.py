@@ -92,6 +92,12 @@ class _BaseNode:
     def create_service(self, *a, **k):
         return None
 
+    def destroy_subscription(self, *a, **k):
+        return None
+
+    def add_on_set_parameters_callback(self, *a, **k):
+        return None
+
     def get_clock(self):
         return _ns(now=lambda: _ns(nanoseconds=self._clock_ns(),
                                    to_msg=lambda: None))
