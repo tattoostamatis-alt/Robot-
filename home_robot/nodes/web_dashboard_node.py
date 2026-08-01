@@ -2046,7 +2046,15 @@ def main():
         print('    ⚠  noVNC missing — RViz/MoveIt/Gazebo tabs will be empty '
               '(sudo apt install novnc)')
     print()
-    uvicorn.run(app, host='0.0.0.0', port=PORT, log_level='warning')
+    # Quiet by default — at 25 fps the camera stream alone would drown the log.
+    # HOME_ROBOT_DASHBOARD_ACCESS_LOG=1 turns the request log back on, which is
+    # the only way to tell "the browser got a 401" from "the page loaded but the
+    # websocket died". Both look identical from outside: a few connections that
+    # open and close. Cost a round of guessing on 2026-08-01.
+    access = os.environ.get('HOME_ROBOT_DASHBOARD_ACCESS_LOG') == '1'
+    uvicorn.run(app, host='0.0.0.0', port=PORT,
+                log_level='info' if access else 'warning',
+                access_log=access)
 
 
 if __name__ == '__main__':
