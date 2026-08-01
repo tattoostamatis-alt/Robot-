@@ -186,3 +186,40 @@ console.log(JSON.stringify({{xyz: Array.from(cloudPts), rgb: Array.from(cloudRGB
         assert got['xyz'][i*3 + 2] == pytest.approx(z, abs=1e-3)
     for i, (b, g, r) in enumerate(bgr):
         assert (got['rgb'][i*3], got['rgb'][i*3+1], got['rgb'][i*3+2]) == (r, g, b)
+
+
+# ── a map switch must not silently undo the runtime configuration ────────────
+# ‼️ 2026-08-01, for real: a click on "Ενεργοποίηση" restarted the stack via
+# `robot max map:=malou2 use_perception:=true` — with no llm_backend. The LLM
+# fell back to the NPU default, FastFlowLM started again, and 4.7 GB that had
+# just been freed came straight back. Nothing errored; the only visible symptom
+# was the dashboard briefly 500ing while two of them fought over port 8080.
+
+_DASH_SRC = _SRC
+
+
+def test_map_switch_carries_perception_and_backend():
+    """Both settings, or a restart reverts to `robot max` defaults."""
+    body = _DASH_SRC.split('async def maps_action')[1].split('\n@app')[0]
+    assert 'use_perception:=true' in body, 'perception is dropped on switch'
+    assert 'llm_backend:=' in body, 'LLM backend is dropped on switch'
+
+
+def test_the_backend_is_read_not_assumed():
+    """Hardcoding a backend would pin every future switch to today's choice."""
+    body = _DASH_SRC.split('async def maps_action')[1].split('\n@app')[0]
+    assert 'ros_node.llm_backend' in body
+    assert "llm_backend:=gemini'" not in body, 'backend is hardcoded'
+
+
+def test_lemonade_is_not_passed_explicitly():
+    """It is the launch default; passing it would also start FastFlowLM even
+    when `robot max` was told to skip it."""
+    body = _DASH_SRC.split('async def maps_action')[1].split('\n@app')[0]
+    assert "!= 'lemonade'" in body
+
+
+def test_reading_the_backend_does_not_block_the_event_loop():
+    """It shells out to `ros2 param get`, which takes a second or two."""
+    body = _DASH_SRC.split('async def maps_action')[1].split('\n@app')[0]
+    assert 'await asyncio.to_thread(ros_node.llm_backend)' in body

@@ -287,6 +287,7 @@ class DashboardNode(Node):
         self._cloud_ws: Set[object] = set()
         self._cloud_last = 0.0
         self._map_cache = None          # (fetched_at, name); see active_map()
+        self._backend_cache = None      # (fetched_at, backend); see llm_backend()
         self.create_subscription(
             PointCloud2, '/camera/camera/depth/color/points', self._cb_cloud,
             QoSProfile(depth=1,
@@ -562,6 +563,31 @@ class DashboardNode(Node):
     def perception_on(self) -> bool:
         return self._node_running('object_detector')
 
+    def llm_backend(self):
+        """Which LLM backend llm_bridge is running, or None if it is not up.
+
+        ‼️ Carried across a map switch for the same reason use_perception is:
+        the switch restarts the whole stack, and `robot max` without the flag
+        falls back to 'lemonade' — which starts FastFlowLM and takes 4.7 GB
+        back. That happened for real on 2026-08-01: a click on "Ενεργοποίηση"
+        silently undid the move to Gemini, with no error anywhere.
+        """
+        now = time.time()
+        if self._backend_cache and now - self._backend_cache[0] < self.MAP_CACHE_TTL:
+            return self._backend_cache[1]
+        value = None
+        try:
+            r = subprocess.run(['ros2', 'param', 'get', '/llm_bridge_node',
+                                'backend'],
+                               capture_output=True, text=True, timeout=10)
+            hit = re.search(r'String value is:\s*(\S+)', r.stdout or '')
+            if hit:
+                value = hit.group(1)
+        except Exception:
+            pass
+        self._backend_cache = (now, value)
+        return value
+
     def active_map(self):
         if self.is_mapping():
             return None
@@ -791,10 +817,16 @@ async def maps_action(request: Request, action: str, name: str, t: str = ''):
     args = ['bash', MAP_SESSION_SH, action]
     if action != 'new':
         args.append(name)
-    # Carry the current perception setting across the restart, or switching a
-    # map would silently turn the 3D tab and the object detector off.
-    if action in ('switch', 'new') and ros_node and ros_node.perception_on():
-        args.append('use_perception:=true')
+    # Carry the current runtime settings across the restart. Without these the
+    # relaunch silently reverts to `robot max` defaults: the 3D tab and object
+    # detector switch off, and the LLM falls back to the NPU — which is 4.7 GB
+    # of RAM reappearing with nothing to show for it.
+    if action in ('switch', 'new') and ros_node:
+        if ros_node.perception_on():
+            args.append('use_perception:=true')
+        backend = await asyncio.to_thread(ros_node.llm_backend)
+        if backend and backend != 'lemonade':
+            args.append(f'llm_backend:={backend}')
     try:
         # switch/new outlive this process, so they are detached; save is quick
         # and its result is worth waiting for.
