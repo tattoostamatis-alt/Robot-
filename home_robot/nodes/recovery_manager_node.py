@@ -230,14 +230,26 @@ class RecoveryManagerNode(Node):
     # ── Recovery sequence ────────────────────────────────────────────
 
     def _run_recovery(self, attempts_left: int):
-        self._status = STATUS_RECOVERING
-        self._speak('Κόλλησα, προσπαθώ να ξεκολλήσω.')
-
+        # ‼️ Announce and give up BEFORE claiming to be recovering. This used to
+        # say "Κόλλησα, προσπαθώ να ξεκολλήσω" on entry — including on the
+        # recursive call that has no attempts left, so a full failure spoke the
+        # line once per attempt and then contradicted itself in the same breath.
         if attempts_left <= 0:
-            self._status = STATUS_FAILED
             self._publish_status(STATUS_FAILED)
             self._speak('Δεν μπορώ να ξεκολλήσω. Χρειάζομαι βοήθεια.')
+            # ‼️ Back to IDLE, otherwise this node is finished for the session:
+            # both entry points (_check_stuck and _on_trigger) require IDLE, so
+            # leaving _status at FAILED meant the FIRST exhausted recovery
+            # silently disabled stuck detection until the next restart — no
+            # log, no symptom, the robot simply never tries to free itself
+            # again. The status is still published as FAILED above so whoever
+            # is listening hears the outcome; only the internal gate reopens.
+            self._status = STATUS_IDLE
+            self._reset_cmd_tracking()
             return
+
+        self._status = STATUS_RECOVERING
+        self._speak('Κόλλησα, προσπαθώ να ξεκολλήσω.')
 
         # Cancel any active navigation goal
         self._cancel_navigation()
@@ -275,8 +287,19 @@ class RecoveryManagerNode(Node):
         time.sleep(2.0)
         self._maybe_reissue_goal()
         self._status = STATUS_IDLE
-        self._cmd_active = False
-        self._cmd_active_since = None
+        self._reset_cmd_tracking()
+
+    def _reset_cmd_tracking(self):
+        """Forget the command window that triggered this recovery.
+
+        Under the lock: _on_cmd_vel writes these two fields from the executor
+        thread while recovery runs on its own, so clearing them unlocked could
+        drop a fresh 'active since' that arrived in between and re-fire STUCK
+        immediately on a robot that had just started moving again.
+        """
+        with self._lock:
+            self._cmd_active = False
+            self._cmd_active_since = None
 
     def _maybe_reissue_goal(self):
         """Re-send the cancelled navigation goal (learned from /plan) so a

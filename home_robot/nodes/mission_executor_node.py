@@ -110,6 +110,10 @@ class MissionExecutorNode(Node):
                                                              # so its terminal status always wins
         self.declare_parameter('dock_settle', 1.5)           # s — let AMCL settle after the tag fix
         self.declare_parameter('aim_timeout', 8.0)           # s — give up squaring up, IR will sweep
+        # Backstop for a NavigateToPose that never returns a result (server
+        # died mid-goal). Deliberately far longer than any real room-to-room
+        # drive: this is about not hanging forever, not about pacing Nav2.
+        self.declare_parameter('nav_timeout', 300.0)         # s
         self._fetch_approach_dist = self.get_parameter('fetch_approach_dist').value
         self._fetch_grasp_range   = self.get_parameter('fetch_grasp_range').value
         self._memory_max_age      = self.get_parameter('memory_max_age').value
@@ -124,6 +128,7 @@ class MissionExecutorNode(Node):
         self._dock_timeout        = self.get_parameter('dock_timeout').value
         self._dock_settle         = self.get_parameter('dock_settle').value
         self._aim_timeout         = self.get_parameter('aim_timeout').value
+        self._nav_timeout         = self.get_parameter('nav_timeout').value
 
         self._locations  = _load_locations()
         self._state      = State.IDLE
@@ -219,8 +224,22 @@ class MissionExecutorNode(Node):
         self._vision_event.set()
 
     def _on_speech_text(self, msg: String):
+        """Cancel on a spoken stop.
+
+        A bare "σταμάτα" used to be ignored here — it had to contain "αποστολ"
+        as well — on the grounds that llm_bridge's stop gate relays a cancel to
+        us anyway. It does, but only while llm_bridge is running: with the LLM
+        off (or busy failing) the spoken stop reached nobody and the mission
+        drove on. So while a mission is actually running, any stop phrase
+        cancels it; when idle, keep requiring "αποστολ" so unrelated chatter
+        does not arm the flag for the next mission.
+        """
         text = msg.data.lower().strip()
-        if any(p in text for p in CANCEL_PHRASES) and 'αποστολ' in text:
+        if not any(p in text for p in CANCEL_PHRASES):
+            return
+        with self._lock:
+            running = self._state != State.IDLE
+        if running or 'αποστολ' in text:
             self._cancel_flag.set()
 
     def _on_mission_start(self, msg: String):
@@ -229,13 +248,38 @@ class MissionExecutorNode(Node):
             self._cancel_flag.set()
             return
 
+        # ‼️ Claim the slot INSIDE the lock. The check used to be under the lock
+        # but the state only became non-IDLE later, inside the worker thread, so
+        # two mission/start messages arriving back to back both passed the gate
+        # and two threads drove the same robot with competing Nav2 goals. The
+        # claim and the test have to be one atomic step.
         with self._lock:
             if self._state != State.IDLE:
                 self.get_logger().warn(f'Mission already running ({self._state}), ignoring "{cmd}"')
                 return
+            self._state = State.NAVIGATING
 
         self._cancel_flag.clear()
-        threading.Thread(target=self._dispatch, args=(cmd,), daemon=True).start()
+        threading.Thread(target=self._run_mission, args=(cmd,), daemon=True).start()
+
+    def _run_mission(self, cmd: str):
+        """Run `cmd`, and release the mission slot no matter how it ends.
+
+        Several missions bail out early without calling _finish (no rooms
+        recorded, unknown dock, unrecognised command). Now that the slot is
+        claimed up front, those paths would strand the state at NAVIGATING and
+        every later mission would be refused with "already running" — so the
+        release is guaranteed here rather than trusted to each mission body.
+        """
+        try:
+            self._dispatch(cmd)
+        except Exception:                                   # noqa: BLE001
+            self.get_logger().exception(f'Mission "{cmd}" crashed')
+        finally:
+            with self._lock:
+                if self._state != State.IDLE:
+                    self._state = State.IDLE
+                    self._status_pub.publish(String(data='idle'))
 
     def _dispatch(self, cmd: str):
         if cmd == 'patrol':
@@ -759,8 +803,21 @@ class MissionExecutorNode(Node):
         # complete result_future; spinning from this worker thread would
         # attach the node to a second executor and stall the future.
         result_future = gh.get_result_async()
+        # ‼️ Bounded. This wait used to have no deadline at all: if the Nav2
+        # server died after accepting the goal, the future never completed, the
+        # mission thread parked here forever and the state never returned to
+        # IDLE — so every later mission was refused until a restart. The cap is
+        # a backstop against a dead server, not a navigation budget, hence the
+        # generous default.
+        deadline = time.monotonic() + self._nav_timeout
         while not result_future.done():
             if self._cancel_flag.is_set():
+                gh.cancel_goal_async()
+                return False
+            if time.monotonic() > deadline:
+                self.get_logger().warn(
+                    f'navigate_to_pose produced no result in {self._nav_timeout:.0f}s '
+                    '— giving up on this goal (server dead?)')
                 gh.cancel_goal_async()
                 return False
             time.sleep(0.1)

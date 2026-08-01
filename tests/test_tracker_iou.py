@@ -14,7 +14,6 @@ run with anything in front of the camera.
 """
 import os
 import re
-import sys
 
 import numpy as np
 import pytest

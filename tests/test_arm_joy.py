@@ -379,7 +379,6 @@ def test_stale_joy_stops_the_arm(node):
 
 
 def test_estop_freezes_the_arm(node):
-    mod = node._mod
     node._estop_cb(types.SimpleNamespace(data=True))
     _push(node, base=1.0)
     _run(node, 20)

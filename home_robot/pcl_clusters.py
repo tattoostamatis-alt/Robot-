@@ -24,7 +24,7 @@ from geometry_msgs.msg import PointStamped
 from interbotix_perception_msgs.srv import FilterParams
 from rclpy.node import Node
 import tf2_ros
-from tf2_geometry_msgs import do_transform_point
+import tf2_geometry_msgs  # noqa: F401 — registers PointStamped transform
 
 
 def filter_params_request(params: dict) -> FilterParams.Request:

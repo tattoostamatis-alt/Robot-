@@ -26,7 +26,7 @@ class GotoRoom(Node):
         self._pose = pose
 
     def send_goal(self):
-        self.get_logger().info(f'Αναμονή για Nav2...')
+        self.get_logger().info('Αναμονή για Nav2...')
         self._client.wait_for_server()
 
         goal = NavigateToPose.Goal()

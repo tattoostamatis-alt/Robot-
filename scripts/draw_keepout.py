@@ -10,9 +10,7 @@ After running, restart nav2 (or full bringup) for the new mask to take effect.
 No ROS or build step needed — the config files are symlinked.
 """
 
-import math
 import os
-import struct
 import sys
 
 import yaml
@@ -112,7 +110,6 @@ def main():
 
     # Start with all-free mask (254 = passable)
     FREE    = 254
-    BLOCKED = 0
     pixels = [[FREE] * map_w for _ in range(map_h)]
 
     drawn = []

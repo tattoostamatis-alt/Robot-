@@ -63,7 +63,6 @@ def _decode_yunet(outputs, img_w, img_h, score_thr, nms_thr):
         x1 = bboxes[:,0]; y1 = bboxes[:,1]
         x2 = x1+bboxes[:,2]; y2 = y1+bboxes[:,3]
 
-        boxes_xyxy = np.stack([x1,y1,x2,y2], axis=1)
         indices = cv2.dnn.NMSBoxes(
             bboxes[:,:4].tolist(), scores.tolist(), score_thr, nms_thr)
         if len(indices) == 0:

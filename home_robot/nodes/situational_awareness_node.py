@@ -103,7 +103,18 @@ class SituationalAwarenessNode(Node):
         self.declare_parameter('update_hz',      1.0)
         self.declare_parameter('max_obj_range',  3.5)   # meters — ignore farther objects
         self.declare_parameter('max_obj_count',  5)     # cap objects listed in context
+        # ‼️ OFF, and it must stay off while this robot has no battery pack.
+        # The pack was removed 2026-07-26 (it runs off a power bank) and the OI
+        # still publishes a figure that is nonsense — 41% at 14.44 V, when
+        # 14.44 V is a full pack. status_query.format_status already refuses to
+        # quote it, but this context line fed the same junk straight into every
+        # LLM prompt, so any battery question phrased outside that module's
+        # keyword gate got the fabricated number back with full confidence —
+        # the exact failure status_query exists to prevent, entering by the
+        # back door. Set true only if a real pack is refitted.
+        self.declare_parameter('report_battery', False)
 
+        self._report_battery = self.get_parameter('report_battery').value
         self._max_range  = self.get_parameter('max_obj_range').value
         self._max_obj    = self.get_parameter('max_obj_count').value
         hz               = self.get_parameter('update_hz').value
@@ -192,9 +203,11 @@ class SituationalAwarenessNode(Node):
         else:
             objects_str = 'κανένα αντικείμενο κοντά'
 
-        # Battery
+        # Battery — suppressed entirely unless report_battery says a real pack
+        # is fitted. The NaN/range filter below is not enough on its own:
+        # garbage from the OI lands inside [0, 1] just as easily as outside it.
         batt_pct = None
-        if self._battery is not None:
+        if self._report_battery and self._battery is not None:
             pct = self._battery.percentage
             if not math.isnan(pct) and 0. <= pct <= 1.:
                 batt_pct = round(pct * 100., 1)

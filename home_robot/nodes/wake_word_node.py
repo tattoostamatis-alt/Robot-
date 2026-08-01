@@ -84,7 +84,7 @@ from ament_index_python.packages import get_package_share_directory
 
 from home_robot.voice_gate import (
     SpeakingGate, TOPIC as SPEAKING_TOPIC, STOP_TOPIC,
-    wake_decision, IGNORE, SUPPRESS, BARGE_IN, WAKE,
+    wake_decision, IGNORE, SUPPRESS, BARGE_IN,
 )
 
 
@@ -126,7 +126,7 @@ def _play_beep(sample_rate=44100):
         # Use pulse (index 7) — works with any PulseAudio output device
         sd.play(tone, samplerate=sample_rate, device=7)
         sd.wait()
-    except Exception as e:
+    except Exception:
         try:
             import subprocess
             subprocess.Popen(['paplay', '/usr/share/sounds/freedesktop/stereo/bell.oga'],

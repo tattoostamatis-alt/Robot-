@@ -128,7 +128,6 @@ class STTNode(Node):
         import time
         chunks = []
         deadline = time.monotonic() + 2.5
-        orig_state = self._state
 
         def _collect(msg):
             if time.monotonic() < deadline:

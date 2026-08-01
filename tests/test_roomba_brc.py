@@ -18,7 +18,6 @@ import os
 import re
 import types
 
-import pytest
 
 PKG = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DRIVER = f'{PKG}/home_robot/nodes/roomba_driver.py'

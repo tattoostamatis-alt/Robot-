@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Roomba 692 → ROS2 driver via Create 2 Open Interface."""
+"""Roomba 879 → ROS2 driver via Create 2 Open Interface.
+
+Chassis swapped 692 → 879 on 2026-07-21; the OI protocol is identical, but the
+calibration below (wheel_base, mm_per_tick, right_trim) is the 879's and does
+NOT carry back to a 692. The header said 692 until 2026-08-01, which is a
+trap worth not re-setting: every measured constant in this file was taken on
+the 879.
+"""
 
 import rclpy
 from rclpy.node import Node
@@ -932,7 +939,6 @@ class RoombaDriver(Node):
         if (now - self._dock_still_since) < self.dock_settle_s:
             return False
         try:
-            ir = [self.bot.SCI.ser, ]  # keep the port reference alive
             vals = []
             for pkt in (17, 52, 53):
                 self.bot.SCI.ser.reset_input_buffer()

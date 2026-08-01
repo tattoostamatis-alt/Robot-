@@ -26,7 +26,6 @@ import json
 import struct
 import threading
 
-import numpy as np
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo, PointCloud2, PointField
@@ -116,7 +115,7 @@ class ObstaclePredictionNode(Node):
             return
 
         with self._cam_lock:
-            fx, fy, cx, cy = self._fx, self._fy, self._cx, self._cy
+            fx, fy = self._fx, self._fy
 
         if fx is None:
             return  # haven't received camera_info yet

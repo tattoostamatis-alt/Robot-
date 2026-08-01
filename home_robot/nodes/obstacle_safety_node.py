@@ -51,7 +51,14 @@ class ObstacleSafetyNode(Node):
 
         self.obstacle_blocking = False
         self.obstacle_info = ''
-        self._last_detection_time = None
+        # ‼️ Seeded to "now", NOT None. The fail-safe below only ever fired for
+        # a detector that published and then stopped; a detector that never
+        # published at all (RealSense died at bringup — ~2.5% of starts — or
+        # use_camera:=false, or YOLO still loading) left this at None and the
+        # staleness check returned early, so forward motion ran UNGUARDED on
+        # exactly the boots where the robot is blind. Starting the clock here
+        # means "never started" ages out like "stopped" does.
+        self._last_detection_time = time.monotonic()
 
         self.create_subscription(String, 'detected_objects', self._detections_cb, 10)
         self.create_subscription(Twist, 'cmd_vel', self._cmd_vel_cb, 10)
@@ -100,8 +107,6 @@ class ObstacleSafetyNode(Node):
             self.distance_pub.publish(Float32(data=min_distance))
 
     def _check_staleness(self):
-        if self._last_detection_time is None:
-            return
         age = time.monotonic() - self._last_detection_time
         if age > self.detection_timeout and not self.obstacle_blocking:
             self.obstacle_blocking = True

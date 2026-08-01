@@ -7,7 +7,7 @@ from launch.conditions import IfCondition
 from launch.events import matches_action
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import AndSubstitution, LaunchConfiguration, PathJoinSubstitution
-from launch_ros.actions import Node, PushRosNamespace, LifecycleNode, SetParameter
+from launch_ros.actions import Node, LifecycleNode, SetParameter
 from launch_ros.event_handlers import OnStateTransition
 from launch_ros.events.lifecycle import ChangeState
 from launch_ros.substitutions import FindPackageShare
