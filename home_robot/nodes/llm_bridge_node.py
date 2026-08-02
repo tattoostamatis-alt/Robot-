@@ -213,6 +213,17 @@ TOOLS = [
         }, 'required': ['object']},
     }},
     {'type': 'function', 'function': {
+        # Distinct from `goto`, which only takes taught rooms. This one goes to
+        # a THING, using the map position object memory recorded when the robot
+        # last saw it. Kept terse: the whole TOOLS block is the prefill cost
+        # (see project_robot_llm_latency_prefill).
+        'name': 'goto_object',
+        'description': 'Πήγαινε δίπλα σε ένα αντικείμενο, χωρίς να το πιάσεις',
+        'parameters': {'type': 'object', 'properties': {
+            'object': {'type': 'string', 'description': 'αγγλικό COCO label, π.χ. chair, tv, sofa'},
+        }, 'required': ['object']},
+    }},
+    {'type': 'function', 'function': {
         'name': 'distance_to',
         'description': 'Πόσο μακριά είναι ένα ορατό αντικείμενο/άνθρωπος (μέτρα)',
         'parameters': {'type': 'object', 'properties': {
@@ -1090,6 +1101,13 @@ class LLMBridgeNode(Node):
                 return {'status': 'error', 'reason': 'no object specified'}
             self.mission_pub.publish(String(data=f'fetch:{obj}'))
             return {'status': 'started', 'action': 'fetch', 'object': obj}
+
+        elif name == 'goto_object':
+            obj = (args.get('object') or '').strip().lower()
+            if not obj:
+                return {'status': 'error', 'reason': 'no object specified'}
+            self.mission_pub.publish(String(data=f'goto_object:{obj}'))
+            return {'status': 'started', 'action': 'goto_object', 'object': obj}
 
         elif name == 'follow':
             self.follow_pub.publish(Bool(data=True))

@@ -307,6 +307,9 @@ class MissionExecutorNode(Node):
         elif cmd.startswith('fetch:'):
             label = cmd[6:].strip()
             self._mission_fetch(label)
+        elif cmd.startswith('goto_object:'):
+            label = cmd[12:].strip()
+            self._mission_goto_object(label)
         elif cmd == 'dock':
             self._mission_dock()
         elif cmd == 'check_rooms':
@@ -393,6 +396,56 @@ class MissionExecutorNode(Node):
             self._finish(State.CANCELLED, 'Αναζήτηση ακυρώθηκε.')
         else:
             self._finish(State.FAILED, f'Δεν βρήκα {label} πουθενά.')
+
+    # ── Mission: goto_object ("πήγαινε στην καρέκλα") ────────────────
+
+    def _mission_goto_object(self, label: str):
+        """Drive to a thing rather than to a taught place.
+
+        `goto` only accepts the rooms and waypoints someone taught by hand, and
+        `find` walks every room in turn looking with the camera — so until now
+        the robot could not use the one thing that already knew the answer.
+        object_memory_node has been recording where each detected object sits in
+        the MAP frame all along; asking it first turns "πήγαινε στην καρέκλα"
+        into a single navigation instead of a tour of the flat.
+
+        The room-by-room search stays as the fallback, because remembered
+        positions go stale: a cup is somewhere else by tomorrow. memory_target
+        applies that age limit, and anything it rejects falls through to looking
+        for real.
+        """
+        self.get_logger().info(f'Mission: goto_object "{label}"')
+        self._set_state(State.NAVIGATING)
+
+        # _resolve_location asks object memory first and only then walks the
+        # rooms — the same order fetch uses, so both take the fast path when the
+        # robot already knows and neither trusts a stale position.
+        target = self._resolve_location(label)
+        if target is None:
+            self._finish(State.CANCELLED if self._cancel_flag.is_set() else State.FAILED,
+                         'Ακυρώθηκε.' if self._cancel_flag.is_set()
+                         else f'Δεν ξέρω πού είναι {label}.')
+            return
+
+        # Falling back to a metre behind the object keeps approach_pose defined
+        # when TF is briefly unavailable; the same fallback fetch uses.
+        rob = self._lookup_base_pose() or (target['x'] - 1.0, target['y'], 0.0)
+
+        # Park short of it and face it, exactly as fetch does — driving at the
+        # remembered point itself would end with the object under the bumper.
+        ax, ay, yaw = approach_pose((rob[0], rob[1]), (target['x'], target['y']),
+                                    dist=self._fetch_approach_dist)
+        room = target.get('room')
+        where = f' στο {LOCATION_NAMES_EL.get(room, room)}' if room else ''
+        self._speak(f'Πάω στο {label}{where}.')
+
+        if self._cancel_flag.is_set():
+            self._finish(State.CANCELLED, 'Ακυρώθηκε.')
+            return
+        if self._navigate_to_xy(ax, ay, yaw):
+            self._finish(State.DONE, f'Έφτασα στο {label}.')
+        else:
+            self._finish(State.FAILED, f'Δεν μπόρεσα να φτάσω στο {label}.')
 
     # ── Mission: fetch ("φέρε μου το X") ─────────────────────────────
 

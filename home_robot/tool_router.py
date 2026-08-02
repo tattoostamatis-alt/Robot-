@@ -39,7 +39,10 @@ _GROUPS = [
     # Navigation is split into four narrow groups rather than one broad one:
     # as a single group "Πήγαινε στο σαλόνι" dragged along explore/patrol/
     # follow/move and saved only 1.2 s. Split, it sends 3 tools instead of 9.
-    (['goto', 'dock', 'tidy'],
+    # goto_object rides with goto: both answer "πήγαινε στο …", and only the
+    # model can tell whether what follows is a taught room or a thing it has
+    # seen. Splitting them by keyword would need a list of every object name.
+    (['goto', 'goto_object', 'dock', 'tidy'],
      # 'πηγαι\w*' not 'πηγαιν\w*': the STT writes "Πήγαισε" for "πήγαινε"
      # often enough that the narrower stem loses real commands.
      # Deliberately NOT here: 'παω'/'παμε' — first person is the *user*
