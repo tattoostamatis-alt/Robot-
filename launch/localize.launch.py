@@ -63,6 +63,12 @@ def _launch_setup(context, *args, **kwargs):
     # lean depth-only stream we'd otherwise start below.
     use_perception = LaunchConfiguration('use_perception').perform(context).lower() in ('true', '1')
     perc = 'true' if use_perception else 'false'
+    # Defaults to whatever use_perception is, so `use_perception:=true` brings
+    # the skeleton with it; pass use_pose:=false explicitly to keep the iGPU for
+    # the detector alone.
+    _pose_arg = LaunchConfiguration('use_pose').perform(context).strip().lower()
+    use_pose = perc if _pose_arg in ('', 'auto') else (
+        'true' if _pose_arg in ('true', '1') else 'false')
     # Physical stuck detection + escape (BackUp/creep) before Nav2's raw
     # Spin/BackUp recovery loop. Default ON: without it, a near-wall room goal
     # drives the footprint into high inflation (cost ~99), the planner can no
@@ -89,6 +95,14 @@ def _launch_setup(context, *args, **kwargs):
             'use_prediction':      perc,      # /predicted_obstacles costmap layer
             'use_semantic_costmap': perc,     # /semantic_obstacles costmap layer
             'use_object_memory':   perc,      # remembers where objects are (map frame)
+            # ‼️ Skeleton tracking was UNREACHABLE from `robot max`: use_pose is
+            # declared in bringup and defaults false, and this file never
+            # forwarded it — the exact shape of the use_situational bug below.
+            # pose_node was written, tested and wired into the dashboard's
+            # camera overlay, and no flag combination could start it.
+            # Tied to `perc` because it is a perception feature and shares the
+            # iGPU with the detector; use_pose:=false opts out.
+            'use_pose':            use_pose,
             # Without this the LLM's "Τρέχουσα κατάσταση" block only ever holds
             # the clock: no room, no battery, and no nearby-object distances.
             # That is why "πόση απόσταση έχει;" answered "δεν ξέρω" on
@@ -285,6 +299,11 @@ def generate_launch_description():
             description='Serve the web dashboard on :8080 — map, camera, arm, '
                         'vacuum, LLM chat, and RViz/MoveIt/Gazebo streamed from '
                         'VNC. Token printed at startup; set false to skip it.'),
+        DeclareLaunchArgument(
+            'use_pose', default_value='auto',
+            description="YOLO11n-pose on the iGPU: 17 COCO keypoints per person, "
+                        "drawn as a skeleton on the dashboard's camera tab. "
+                        "'auto' follows use_perception; true/false to force."),
         DeclareLaunchArgument(
             'use_perception', default_value='false',
             description='Bring up the YOLO detector + tracker, the dynamic-obstacle '
