@@ -438,13 +438,61 @@ def test_wrap_is_identity_in_range():
 # ── The selection metric is the fitting metric ────────────────────────
 
 def test_candidates_are_scored_by_wall_fit_not_fft_score():
-    """Regression guard on the actual bug: selection must not sort by FFT."""
+    """Regression guard on the original bug: selection must not sort by FFT.
+
+    2026-08-02: the FFT stage is gone entirely. It ranked where the scan
+    correlates, and the room the robot was actually in never reached its
+    shortlist. _sweep_candidates now scores every standable pose by scan->wall
+    fit directly, so the fitting metric and the selection metric are the same
+    thing and this bug is structurally impossible. The guard stays: it fails
+    loudly if correlation ordering is ever reintroduced.
+    """
     src = open(NODE).read()
-    block = src[src.index('# ── Pick the candidate by scan->wall fit'):
+    block = src[src.index('# ── Exhaustive pose sweep'):
                 src.index('best_score, laser_x, laser_y, best_theta')]
     assert '_wall_err_fn' in block, 'selection must measure scan->wall fit'
-    assert 'scored.sort(key=lambda c: c[0])' in block, 'must sort ascending by error'
-    assert 'reverse=True' not in block, 'FFT-score ordering must not decide the pick'
+    assert 'reverse=True' not in block, 'correlation ordering must not decide the pick'
+    assert '_fft_match' not in block, 'the FFT stage must not come back'
+
+
+def test_the_sweep_covers_the_whole_map():
+    """The point of the rewrite: every standable cell is a hypothesis.
+
+    The FFT proposed a handful of correlation peaks and the true pose was not
+    among them. Checked against a user-confirmed ground truth (robot in the
+    middle of the living room): the sweep landed 0.07 m and 3 deg out, in 0.1 s.
+    """
+    src = open(NODE).read()
+    assert 'def _sweep_candidates' in src, 'the exhaustive sweep is gone'
+    body = src[src.index('def _sweep_candidates'):src.index('def _visibility_fn')]
+    assert '_standable' in body, 'the sweep must enumerate standable cells'
+    assert 'np.arange(-math.pi, math.pi' in body, 'every heading must be tried'
+
+
+def test_line_of_sight_breaks_the_tie():
+    """Endpoint fit alone cannot tell repeated room shapes apart: candidates
+    routinely tie at 0.050 m. Measured the same day, 4-8% of beams blocked
+    where the robot really was against 22-47% everywhere else."""
+    src = open(NODE).read()
+    assert 'def _visibility_fn' in src, 'the beam model is gone'
+    block = src[src.index('# ── Reject what could not have produced this scan'):
+                src.index('best_score, laser_x, laser_y, best_theta')]
+    assert 'blocked_weight' in block, 'line-of-sight must be weighted into the score'
+    assert 'refined = [(c[0], c[3], c[4], c[5]) for c in combined]' in block, \
+        '_pick must receive the combined score or the prior silently overrides it'
+
+
+def test_the_beam_model_compares_ranges_not_contact():
+    """"Did the ray touch a wall cell" marks a beam blocked when it merely
+    grazes mapped furniture; that version scored 66-92% for every candidate and
+    decided nothing. What identifies a wrong room is a beam that should have
+    stopped far earlier than it did."""
+    src = open(NODE).read()
+    body = src[src.index('def _visibility_fn'):src.index('def _refine')]
+    assert 'short_by' in body and 'expected' in body, \
+        'the beam model must compare expected against measured range'
+    assert '< 5.0' in body, \
+        'long beams graze everything in a flat and must be excluded'
 
 
 def test_every_shortlisted_candidate_gets_refined():

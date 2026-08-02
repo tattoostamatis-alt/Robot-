@@ -178,6 +178,13 @@ class GlobalLocalizerNode(Node):
         # Fits within this of the best are treated as indistinguishable, and the
         # last known pose breaks the tie. 0 disables the tie-break.
         self.declare_parameter('prior_tie_margin', 0.05)          # m
+        # Metres of scan->wall error that a whole unit of blocked-beam fraction
+        # is worth. At 1.0 a candidate with 30% of its beams passing through
+        # walls must beat a clear one by 0.30 m of fit. 0 disables the check.
+        self.declare_parameter('blocked_weight', 1.0)
+        # Only used to warn: above this, even the winner is seeing through
+        # walls, which usually means the wrong map or moved furniture.
+        self.declare_parameter('max_blocked_fraction', 0.30)
         self.declare_parameter('depth_weight',  0.5)   # 0 → LiDAR only
         # On a random/cold start, briefly hold the auto-trigger until the D435
         # depth arrives so it joins the very first match (better disambiguation),
@@ -522,6 +529,134 @@ class GlobalLocalizerNode(Node):
 
         return median_err
 
+    def _standable(self, map_msg: OccupancyGrid):
+        """Free cells at least a robot radius clear of any wall, cached."""
+        if getattr(self, '_stand_cache', None) is None:
+            from scipy.ndimage import distance_transform_edt
+            g = np.array(map_msg.data, dtype=np.int16).reshape(
+                map_msg.info.height, map_msg.info.width)
+            d = distance_transform_edt(g < 65) * map_msg.info.resolution
+            self._stand_cache = (g == 0) & (d > 0.20)
+        return self._stand_cache
+
+    def _sweep_candidates(self, lidar, map_msg, pos_step=0.30,
+                          yaw_step_deg=10.0, shortlist=250):
+        """Exhaustive pose sweep: every standable cell x every heading.
+
+        ‼️ This replaces the FFT correlation stage, which was the real reason
+        global localization kept landing in the wrong room. The FFT ranks where
+        the scan CORRELATES with the likelihood field, and on 2026-08-02 the
+        room the robot was actually in never appeared in its shortlist at all —
+        so no amount of better scoring downstream could recover it.
+
+        Sweeping every pose sounds slower and is not: the scan-to-wall score
+        vectorises over all positions at once for a given heading, so the whole
+        map takes ~0.1 s against 17-21 s for the FFT path. Benchmarked against a
+        user-confirmed ground truth the same day it landed 0.07 m and 3° out;
+        the FFT picked a different room entirely.
+
+        Returns [(fit, x, y, yaw), ...] in the laser frame, best fit first.
+        """
+        info = map_msg.info
+        res, W, H = info.resolution, info.width, info.height
+        ox, oy = info.origin.position.x, info.origin.position.y
+        if self._dist is None:
+            self._wall_err_fn(lidar, map_msg)      # builds the distance field
+        dist = self._dist
+
+        ys, xs = np.nonzero(self._standable(map_msg))
+        stride = max(1, int(round(pos_step / res)))
+        sel = (ys % stride == 0) & (xs % stride == 0)
+        px, py = ox + xs[sel] * res, oy + ys[sel] * res
+        if px.size == 0:
+            return []
+
+        # A third of the beams is plenty to RANK poses; the winner is refined
+        # afterwards on the full scan.
+        pts = lidar[::3]
+        bx, by = pts[:, 0][None, :], pts[:, 1][None, :]
+        best = np.full(px.size, 9.9, dtype=np.float32)
+        best_yaw = np.zeros(px.size, dtype=np.float32)
+        for yaw in np.arange(-math.pi, math.pi, math.radians(yaw_step_deg)):
+            c, sn = math.cos(yaw), math.sin(yaw)
+            dx = c * bx - sn * by
+            dy = sn * bx + c * by
+            gx = ((px[:, None] + dx - ox) / res).astype(np.int32)
+            gy = ((py[:, None] + dy - oy) / res).astype(np.int32)
+            np.clip(gx, 0, W - 1, out=gx)
+            np.clip(gy, 0, H - 1, out=gy)
+            med = np.median(dist[gy, gx], axis=1)
+            upd = med < best
+            best[upd] = med[upd]
+            best_yaw[upd] = yaw
+
+        order = np.argsort(best)[:shortlist]
+        return [(float(best[i]), float(px[i]), float(py[i]), float(best_yaw[i]))
+                for i in order]
+
+    def _visibility_fn(self, lidar, map_msg):
+        """Build a beam-model evaluator: fraction of beams the map says should
+        have stopped much earlier than they did.
+
+        ‼️ This is the question scan->wall distance cannot ask. A likelihood
+        field only checks whether endpoints landed near SOME wall; it never
+        checks whether the beam could have got there. Stand the robot one room
+        over and its returns still land on walls — the neighbours' walls, seen
+        straight through the one in between — and it scores perfectly while
+        being physically impossible.
+
+        Two details matter, both learned the hard way on 2026-08-02:
+          * SHORT beams only. _lidar_pts keeps returns out to the C1's 12 m, and
+            in a flat a 10 m beam nearly always grazes something; with those
+            included every candidate scored 70-90% and the metric said nothing.
+          * Compare RANGES, not "did the ray touch a wall cell". This map has
+            furniture painted into it, so mere contact marks almost every beam.
+            What identifies a wrong room is a beam that should have stopped
+            METRES earlier.
+
+        Measured with the robot in the middle of the living room: 4-8% here,
+        22-47% for every candidate elsewhere on the map.
+        """
+        g = np.array(map_msg.data, dtype=np.int16).reshape(
+            map_msg.info.height, map_msg.info.width)
+        wall = g >= 65
+        res = map_msg.info.resolution
+        ox = map_msg.info.origin.position.x
+        oy = map_msg.info.origin.position.y
+        H, W = wall.shape
+
+        rho_all = np.hypot(lidar[:, 0], lidar[:, 1])
+        near = lidar[(rho_all > 0.15) & (rho_all < 5.0)][::3]
+        if near.shape[0] < 30:
+            return lambda x, y, yaw: 0.0        # nothing to judge on
+        px, py = near[:, 0], near[:, 1]
+        rho = np.hypot(px, py)
+        steps = 28
+        frac = np.linspace(0.04, 0.97, steps)[None, :]
+        tol = 0.45                               # m of slack for quantisation
+
+        def blocked(x, y, yaw):
+            c, sn = math.cos(yaw), math.sin(yaw)
+            ex = c * px - sn * py + x
+            ey = sn * px + c * py + y
+            # (beams, 1) * (1, steps) -> (beams, steps)
+            sx = x + (ex - x)[:, None] * frac
+            sy = y + (ey - y)[:, None] * frac
+            gx = np.round((sx - ox) / res).astype(np.int32)
+            gy = np.round((sy - oy) / res).astype(np.int32)
+            ib = (gx >= 0) & (gx < W) & (gy >= 0) & (gy < H)
+            if int(ib.sum()) < steps * 10:
+                return 1.0
+            hit = np.zeros(gx.shape, dtype=bool)
+            hit[ib] = wall[gy[ib], gx[ib]]
+            any_hit = hit.any(axis=1)
+            first = np.argmax(hit, axis=1)
+            expected = rho * frac[0][first]
+            short_by = np.where(any_hit, rho - expected, 0.0)
+            return float((short_by > tol).mean())
+
+        return blocked
+
     def _refine(self, lidar: np.ndarray, lx: float, ly: float, lyaw: float,
                 map_msg: OccupancyGrid, span: float = 0.4, step: float = 0.04,
                 ang: int = 8, quiet: bool = False):
@@ -669,20 +804,7 @@ class GlobalLocalizerNode(Node):
                 self.get_logger().error('Map or scan not yet available — aborting')
                 return
 
-            # Build likelihood field (cached across runs)
-            if self._lf is None:
-                self.get_logger().info('Building likelihood field…')
-                grid = np.array(map_msg.data, dtype=np.int8).reshape(
-                    map_msg.info.height, map_msg.info.width)
-                self._lf = _likelihood_field(grid, map_msg.info.resolution)
-
-            lf  = self._lf
-            res = map_msg.info.resolution
-            ox  = map_msg.info.origin.position.x
-            oy  = map_msg.info.origin.position.y
-            H, W = lf.shape
-
-            # ── Collect scan points (all in the LiDAR frame for FFT) ─
+            # ── Collect scan points, all in the LiDAR frame ─────────
             lidar_frame = scan.header.frame_id or 'laser'
             lidar = _lidar_pts(scan)
             self.get_logger().info(f'  LiDAR: {len(lidar)} pts')
@@ -698,49 +820,18 @@ class GlobalLocalizerNode(Node):
                     f'  Depth virtual scan: {len(depth_pts)} pts '
                     f'({depth_frame}->{lidar_frame})')
 
-            if len(depth_pts) > 0:
-                # Repeat depth points to give them relative weight w vs LiDAR
-                n_rep = max(1, round(w * len(lidar) / len(depth_pts)))
-                pts = np.vstack([lidar] + [depth_pts] * n_rep)
-            else:
-                pts = lidar
-
-            # ── Coarse FFT search ──────────────────────────────────
-            fft_lf  = np.fft.rfft2(lf)   # precompute — reused for all angles
-            coarse  = []
-            for i in range(COARSE_ANGLES):
-                theta = 2 * math.pi * i / COARSE_ANGLES
-                score, dx, dy = _fft_match(pts, fft_lf, (H, W), theta, res)
-                coarse.append((score, dx, dy, theta))
-            coarse.sort(key=lambda c: c[0], reverse=True)
-
-            # ── Fine search around top candidates ──────────────────
-            half = math.radians(FINE_HALF_DEG)
-            fine = []
-            for _, cdx, cdy, cth in coarse[:N_CANDIDATES]:
-                for j in range(FINE_STEPS):
-                    theta = cth - half + 2 * half * j / max(FINE_STEPS - 1, 1)
-                    score, dx, dy = _fft_match(pts, fft_lf, (H, W), theta, res)
-                    fine.append((score, dx, dy, theta))
-            fine.sort(key=lambda c: c[0], reverse=True)
-
-            # ── Pick the candidate by scan->wall fit, not by FFT score ──
-            # The FFT correlation peak is NOT the best-fitting pose. It rewards
-            # putting scan points anywhere near walls, so a cluttered part of
-            # the map outscores the true pose in a plainer one — observed
-            # 2026-07-29 landing 4.4 m out, in another room, with a "perfect"
-            # 0.071 m fit reported because only that one candidate was ever
-            # measured. Score every distinct candidate by median scan->wall
-            # distance (one cheap evaluation each), then refine the best few
-            # and keep whichever actually fits. Same metric decides throughout.
-            def laser_xy(dx, dy):
-                return ox + (W // 2 + dx) * res, oy + (H // 2 + dy) * res
-
+            # NB: the sweep and every scorer below use the LiDAR alone. The
+            # forward depth points were only ever there to sharpen the FFT
+            # correlation peak; the sweep does not correlate, and a 60° forward
+            # cone cannot help decide which room a 360° scan came from.
+            # ── Exhaustive pose sweep ──────────────────────────────
+            # Replaces the FFT correlation stage. See _sweep_candidates: the
+            # FFT ranked where the scan CORRELATES, and the room the robot was
+            # actually in never even reached the shortlist (2026-08-02). The
+            # sweep scores every standable cell at every heading, is ~0.1 s
+            # against 17-21 s, and hit a confirmed ground truth to 0.07 m / 3°.
             wall_err = self._wall_err_fn(lidar, map_msg)
-            scored = []
-            for _, dx, dy, theta in fine:
-                lx, ly = laser_xy(dx, dy)
-                scored.append((wall_err(lx, ly, theta), lx, ly, theta))
+            scored = self._sweep_candidates(lidar, map_msg)
             scored.sort(key=lambda c: c[0])
 
             # Distinct places only — the fine search returns many near-duplicate
@@ -774,6 +865,32 @@ class GlobalLocalizerNode(Node):
                 rx, ry, rtheta = self._refine(lidar, lx, ly, theta, map_msg)
                 refined.append((wall_err(rx, ry, rtheta), rx, ry, rtheta))
             refined.sort(key=lambda c: c[0])
+
+            # ── Reject what could not have produced this scan ───────
+            # Endpoint fit alone cannot tell rooms apart in a flat where the
+            # shapes repeat: candidates routinely tie at 0.050 m. The beam model
+            # breaks the tie by asking whether each return was even reachable —
+            # 4-8% blocked where the robot really is, 22-47% everywhere else.
+            see = self._visibility_fn(lidar, map_msg)
+            w_blk = self.get_parameter('blocked_weight').value
+            combined = sorted(
+                ((fit + w_blk * see(rx, ry, rt), fit, see(rx, ry, rt), rx, ry, rt)
+                 for fit, rx, ry, rt in refined), key=lambda c: c[0])
+            self.get_logger().info(
+                '  with line-of-sight: ' + ', '.join(
+                    f'({c[3]:.1f},{c[4]:.1f})={c[0]:.3f}'
+                    f'[fit {c[1]:.3f} blk {c[2]*100:.0f}%]' for c in combined[:5]))
+            if combined[0][2] > self.get_parameter('max_blocked_fraction').value:
+                self.get_logger().warning(
+                    f'  even the best pose has {combined[0][2]*100:.0f}% of beams '
+                    'passing through walls — is this the right map, or has '
+                    'furniture moved?')
+            # ‼️ Hand _pick the COMBINED score. It tie-breaks anything within
+            # prior_tie_margin by nearness to the last known pose, and on the
+            # raw fit everything ties at 0.050 — so the prior would decide and
+            # the robot would "find" itself wherever it last was, silently
+            # undoing all of the above.
+            refined = [(c[0], c[3], c[4], c[5]) for c in combined]
 
             best_score, laser_x, laser_y, best_theta = self._pick(refined)
 
