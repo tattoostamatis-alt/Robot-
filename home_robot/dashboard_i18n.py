@@ -46,6 +46,51 @@ TRANSLATIONS = {
          '= Stopp. Loslassen stoppt; geht der Tab oder das Netz verloren, stoppt '
          'die Basis nach 0,25 s von selbst.'),
 
+    # ── costmap pane ──────────────────────────────────────────────────────
+    # 'Costmap' and 'inflation' carry no Greek, so the extractor never sees them
+    # and an entry here would be dead weight (same as 'IMU' above).
+    'COSTMAP · 3×3m γύρω από το ρομπότ': ('COSTMAP · 3×3m around the robot',
+                                          'COSTMAP · 3×3 m um den Roboter'),
+    'Υπόμνημα':          ('Legend', 'Legende'),
+    'θανάσιμο':          ('lethal', 'tödlich'),
+    'ακουμπά':           ('inscribed', 'berührt'),
+    'από ανίχνευση':     ('from detection', 'aus Erkennung'),
+    'άγνωστο':           ('unknown', 'unbekannt'),
+    'Αυτό είναι ό,τι ΒΛΕΠΕΙ ο planner, όχι ο χάρτης. Το μπλε γύρω από τους '
+    'τοίχους είναι το inflation — αν δύο μπλε ζώνες ενωθούν σε μια πόρτα, το '
+    'ρομπότ δεν περνά, ακόμη κι αν το άνοιγμα φαίνεται καθαρό στον χάρτη. Τα ροζ '
+    'σημεία είναι εμπόδια που έβαλε η ΑΝΙΧΝΕΥΣΗ (άνθρωποι παίρνουν μεγαλύτερο '
+    'περιθώριο), όχι το lidar.':
+        ('This is what the planner SEES, not the map. The blue around walls is '
+         'inflation — where two blue zones meet in a doorway the robot will not '
+         'go through, however clear the gap looks on the map. The pink points '
+         'are obstacles placed by DETECTION (people get a wider margin), not by '
+         'the lidar.',
+         'Das ist, was der Planer SIEHT, nicht die Karte. Das Blau um Wände ist '
+         'die Inflation — wo sich zwei blaue Zonen in einer Tür treffen, fährt '
+         'der Roboter nicht durch, so frei die Lücke auf der Karte auch '
+         'aussieht. Die rosa Punkte sind Hindernisse aus der ERKENNUNG '
+         '(Menschen bekommen mehr Abstand), nicht vom Lidar.'),
+
+    # ── vision / detection ────────────────────────────────────────────────
+    'Ανίχνευση':         ('Detection', 'Erkennung'),
+    '👁 Πλαίσια/σκελετός': ('👁 Boxes/skeleton', '👁 Rahmen/Skelett'),
+    '👣 Ακολούθησέ με':  ('👣 Follow me', '👣 Folge mir'),
+    '■ Σταμάτα να ακολουθείς': ('■ Stop following', '■ Nicht mehr folgen'),
+    'Τα πράσινα πλαίσια είναι άνθρωποι, τα πορτοκαλί αντικείμενα· ο κίτρινος '
+    'σκελετός είναι 17 σημεία COCO. ‼️ Χρειάζονται τα perception nodes — ξεκίνα '
+    'με «robot max use_perception:=true», αλλιώς η εικόνα μένει καθαρή και ο '
+    'μετρητής στο 0. Το «Ακολούθησέ με» σταματά μόνο του μετά από 30 '
+    'δευτερόλεπτα.':
+        ('Green boxes are people, orange ones objects; the yellow skeleton is 17 '
+         'COCO keypoints. ‼️ Needs the perception nodes — start with "robot max '
+         'use_perception:=true", otherwise the picture stays clean and the '
+         'counter sits at 0. "Follow me" stops by itself after 30 seconds.',
+         'Grüne Rahmen sind Menschen, orange sind Objekte; das gelbe Skelett '
+         'sind 17 COCO-Punkte. ‼️ Braucht die Perception-Nodes — starte mit '
+         '„robot max use_perception:=true", sonst bleibt das Bild sauber und '
+         'der Zähler auf 0. „Folge mir" stoppt nach 30 Sekunden von selbst.'),
+
     # ── camera pane ───────────────────────────────────────────────────────
     'Τι βλέπει':         ('What it sees', 'Was es sieht'),
     'Κατάσταση περιβάλλοντος': ('Situation', 'Umgebungslage'),

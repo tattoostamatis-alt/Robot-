@@ -11,6 +11,12 @@ So the property under test is not "does it turn" but **does turning reduce the
 error and then stop** — plus the other half of the same mistake: never steer on
 a bearing nobody has confirmed recently.
 
+2026-08-02: and none of that had ever moved the robot, because the node
+published to /cmd_vel — which has four publishers and ZERO subscribers on this
+graph. roomba_driver listens on cmd_vel_safe alone. The control loop was fixed
+in the dark while the wire was cut; test_the_twists_go_to_the_topic_the_roomba_
+reads is now the first thing to check when "ακολούθησέ με" does nothing.
+
 Robot-free: `_pick_person` is a static method and `_turn_for`/`_control` touch
 only the tuning parameters, so they run on a bare class with no rclpy context
 and no camera. `_control`'s Twist is captured through a stub publisher.
@@ -124,9 +130,9 @@ def live():
 
 def _frame(node, objects):
     """Deliver one detection frame; return the Twist published, or None."""
-    before = len(node.pubs['/cmd_vel'].sent)
+    before = len(node.pubs['/cmd_vel_safe'].sent)
     node._detections_cb(_ns(data=json.dumps(objects)))
-    sent = node.pubs['/cmd_vel'].sent
+    sent = node.pubs['/cmd_vel_safe'].sent
     return sent[-1] if len(sent) > before else None
 
 
@@ -187,7 +193,7 @@ def test_following_expires_and_stops(live):
     """The timeout must leave the robot stopped, not mid-command."""
     live._active_until -= 1000
     _frame(live, [_person(600, 1.2)])
-    twist = live.pubs['/cmd_vel'].sent[-1]
+    twist = live.pubs['/cmd_vel_safe'].sent[-1]
     assert twist.angular.z == 0.0 and twist.linear.x == 0.0
     assert live._active is False
 
@@ -208,7 +214,7 @@ def test_nothing_is_published_before_a_follow_command():
     }
     node = _load(NODE, mods).PersonFollowerNode()
     node._detections_cb(_ns(data=json.dumps([_person(600, 1.2)])))
-    assert node.pubs['/cmd_vel'].sent == []
+    assert node.pubs['/cmd_vel_safe'].sent == []
 
 
 # ── ‼️ The regression: the loop must actually close ────────────────────
@@ -381,3 +387,29 @@ def test_centre_comes_from_the_frame_not_a_hardcoded_width(node):
     off to one side at any other resolution and bias every turn one way."""
     assert node._turn_for(160, 320) == 0.0        # centred in a 320-wide frame
     assert node._turn_for(160, IMG_W) > 0         # left of centre in a 640 one
+
+
+# ── the wire, not the loop ──────────────────────────────────────────────────
+
+def test_the_twists_go_to_the_topic_the_roomba_reads():
+    """/cmd_vel is a dead topic here: four publishers, zero subscribers.
+    roomba_driver subscribes to cmd_vel_safe alone, and Nav2 reaches it through
+    its own chain. This node published to /cmd_vel for its whole life, so every
+    correctly-computed twist went into a black hole — the FOURTH place in this
+    repo to make that exact mistake (PS5 teleop, keyboard teleop, web D-pad)."""
+    src = open(NODE).read()
+    m = re.search(r"_cmd_pub\s*=\s*self\.create_publisher\(\s*Twist,\s*'([^']+)'", src)
+    assert m, 'the velocity publisher is gone or changed shape'
+    assert m.group(1) == '/cmd_vel_safe', (
+        f'publishing to {m.group(1)!r} — the Roomba will never see it')
+
+
+def test_the_turn_rate_can_actually_move_the_wheels():
+    """The 879 cannot rotate below ~0.31 rad/s; a gentler minimum would make
+    the robot look broken rather than slow, and that mistake has been made on
+    the joystick (0.06) and the web D-pad (0.10) already."""
+    src = open(NODE).read()
+    m = re.search(r"declare_parameter\('min_turn_speed',\s*([\d.]+)", src)
+    assert m, 'min_turn_speed is gone'
+    assert float(m.group(1)) >= 0.35, \
+        f'min_turn_speed {m.group(1)} is at or under the rotation floor'

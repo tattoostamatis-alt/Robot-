@@ -9,7 +9,8 @@ Subscribes:
                                          carrying label + pixel box + box_distance
 
 Publishes:
-  /cmd_vel          (geometry_msgs/Twist) — velocity commands
+  /cmd_vel_safe     (geometry_msgs/Twist) — velocity commands. NOT /cmd_vel;
+                                            see the note at the publisher.
 
 Following logic:
   - Activates ONLY on an explicit follow_command=True (the llm_bridge 'follow' tool,
@@ -99,7 +100,25 @@ class PersonFollowerNode(Node):
         self._lost_warned  = False
 
         # --- Publishers ---------------------------------------------------
-        self._cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        # ‼️ cmd_vel_safe, NOT cmd_vel. /cmd_vel has FOUR publishers and ZERO
+        # subscribers on this graph: roomba_driver listens on cmd_vel_safe alone,
+        # and Nav2 reaches it by its own chain (cmd_vel_nav -> velocity_smoother
+        # -> cmd_vel_smoothed -> collision_monitor -> cmd_vel_safe). So every
+        # twist this node published went nowhere and "ακολούθησέ με" could not
+        # move the robot no matter how correct the control loop was — which is
+        # the cruel part, because the loop above had already been rewritten once
+        # (2026-08-01) to fix a real spinning bug that this masked entirely.
+        #
+        # This is the FOURTH time the same wrong topic has been used here (the
+        # PS5 teleop, the keyboard teleop and the web D-pad were the others).
+        # Before adding anything that moves the robot: `ros2 topic info -v
+        # /cmd_vel_safe` and check your publisher is in the list.
+        #
+        # Like the joystick and the web D-pad, this path bypasses
+        # collision_monitor. What still guards it: roomba_driver's bumper/cliff/
+        # wheel-drop stops, its 0.25 s stale-command watchdog, the latched
+        # e-stop, and this node's own follow_timeout.
+        self._cmd_pub = self.create_publisher(Twist, '/cmd_vel_safe', 10)
 
         # --- Subscribers --------------------------------------------------
         self.create_subscription(Bool, 'follow_command',

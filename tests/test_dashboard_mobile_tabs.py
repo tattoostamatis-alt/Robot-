@@ -58,26 +58,47 @@ def _tab_count():
     return len(re.findall(r"\['", m.group(1)))
 
 
-def test_the_tabs_are_sized_to_fill_two_even_rows():
-    """Derived from the tab count rather than hard-coded, so adding a tab makes
-    this fail loudly with the basis to use instead of silently stranding one
-    tab alone on a third row (which is what 13 tabs at the old 16.66% did)."""
+# Narrowest a cell may get on a 320pt iPhone SE before the icon and the label
+# collide. This is what caps a row at 7 tabs.
+MIN_CELL_PT = 45
+SE_WIDTH_PT = 320
+
+
+def _expected_basis(n):
+    """Fewest even rows whose cells still clear MIN_CELL_PT."""
+    max_per_row = int(SE_WIDTH_PT // MIN_CELL_PT)      # 7
+    rows = math.ceil(n / max_per_row)
+    per_row = math.ceil(n / rows)
+    return per_row, 100.0 / per_row
+
+
+def test_the_tabs_are_sized_to_fill_even_rows():
+    """Derived from the tab count rather than hard-coded, so adding a tab fails
+    loudly with the basis to use instead of silently stranding one tab alone on
+    a ragged last row (13 tabs at the old 16.66% wrapped 6+6+1) or squeezing a
+    row so tight the labels collide (15 tabs in two rows is 40pt a cell)."""
     tab = _rule('.tab')
     m = re.search(r'flex:\s*1\s+0\s+([\d.]+)%', tab)
     assert m, '.tab no longer declares a flex basis, so widths are content-driven'
     basis = float(m.group(1))
 
     n = _tab_count()
-    per_row = math.ceil(n / 2)          # two rows, the first one no fatter
-    want = 100.0 / per_row
+    per_row, want = _expected_basis(n)
     assert abs(basis - want) < 0.6, (
         f'{n} tabs want {per_row} per row (basis ~{want:.2f}%), not {basis}% — '
         f'at {basis}% they wrap {math.floor(100 / basis)} per row')
+    assert SE_WIDTH_PT / per_row >= MIN_CELL_PT, \
+        f'{per_row} per row is {SE_WIDTH_PT/per_row:.0f}pt on an iPhone SE'
 
-    # The wrap is only worth having while a row still fits a phone: below ~45px
-    # per cell on a 320pt iPhone SE the icon and label collide.
-    assert 320 / per_row >= 45, \
-        f'{per_row} tabs per row is {320/per_row:.0f}pt on an iPhone SE — too narrow'
+
+def test_the_rows_come_out_even():
+    """A last row holding one lonely tab reads as a rendering fault."""
+    n = _tab_count()
+    per_row, _ = _expected_basis(n)
+    rows = math.ceil(n / per_row)
+    last = n - per_row * (rows - 1)
+    assert last >= per_row - 1 or rows == 1, \
+        f'{n} tabs at {per_row} per row leaves a last row of {last}'
 
 
 def test_long_labels_cannot_widen_a_cell():

@@ -83,14 +83,14 @@ def test_follower_turns_toward_a_speaker_on_the_right(follower):
     never calls it."""
     mod, node = follower
     node._control(5.0, mod._CENTER_COL + 200)
-    out = node.pubs['/cmd_vel'].sent[-1]
+    out = node.pubs['/cmd_vel_safe'].sent[-1]
     assert out.angular.z < 0, 'the robot did not turn toward the speaker'
 
 
 def test_follower_turns_toward_a_speaker_on_the_left(follower):
     mod, node = follower
     node._control(5.0, mod._CENTER_COL - 200)
-    out = node.pubs['/cmd_vel'].sent[-1]
+    out = node.pubs['/cmd_vel_safe'].sent[-1]
     assert out.angular.z > 0
 
 
@@ -115,14 +115,14 @@ def test_follower_never_commands_below_the_rotation_floor(follower):
 def test_follower_still_drives_forward_when_far(follower):
     mod, node = follower
     node._control(5.0, mod._CENTER_COL)
-    out = node.pubs['/cmd_vel'].sent[-1]
+    out = node.pubs['/cmd_vel_safe'].sent[-1]
     assert out.linear.x == pytest.approx(node._speed)
 
 
 def test_follower_stops_when_too_close(follower):
     mod, node = follower
     node._control(0.2, mod._CENTER_COL)
-    out = node.pubs['/cmd_vel'].sent[-1]
+    out = node.pubs['/cmd_vel_safe'].sent[-1]
     assert out.linear.x == 0.0
 
 

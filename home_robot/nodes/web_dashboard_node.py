@@ -30,6 +30,7 @@ import math
 import os
 import secrets
 import socket
+import struct
 import subprocess
 import threading
 import time
@@ -304,6 +305,18 @@ class DashboardNode(Node):
         self.create_subscription(Image,
             '/camera/camera/color/image_raw', self._cb_camera, 5)
         self.create_subscription(String, '/detected_objects', self._cb_objects, 5)
+        # YOLO11n-pose, 17 COCO keypoints per person (pose_node.py, iGPU/ROCm).
+        self.create_subscription(String, '/pose_detections', self._cb_poses, 5)
+        # Latest overlay geometry, drawn onto the camera JPEG in _cb_camera.
+        # (payload, monotonic_stamp) — the stamp is what keeps a box from being
+        # painted over a scene the person already walked out of: detections
+        # arrive at a few Hz against the camera's 30, and the detector can stop
+        # entirely (it is behind use_perception) without saying so.
+        self._det_boxes: list = []
+        self._det_time  = 0.0
+        self._det_poses: list = []
+        self._pose_time = 0.0
+        self._overlay   = True        # toggled from the camera tab
 
         # ── Arm ─────────────────────────────────────────────────────────────
         self.create_subscription(JointState, '/arm/joint_states', self._cb_arm, 10)
@@ -343,6 +356,21 @@ class DashboardNode(Node):
             QoSProfile(depth=100,
                        reliability=QoSReliabilityPolicy.RELIABLE,
                        durability=QoSDurabilityPolicy.VOLATILE))
+
+        # ── Costmap (what Nav2 actually steers around) ──────────────────────
+        # The rolling local costmap: 60x60 cells of 0.05 m — a 3x3 m window
+        # around the robot — at ~3 Hz. Small enough to send as a PNG per update
+        # without thinking about it, and it is the one view that explains why
+        # the robot swerved or refused a doorway when the map looks clear.
+        self.create_subscription(OccupancyGrid, '/local_costmap/costmap',
+                                 self._cb_costmap, 1)
+        self._costmap_on: Set[object] = set()   # sockets watching the tab
+        self.create_subscription(PointCloud2, '/semantic_obstacles',
+                                 self._cb_semantic,
+                                 QoSProfile(depth=1,
+                                            reliability=QoSReliabilityPolicy.BEST_EFFORT))
+        self._semantic_pts: list = []
+        self._semantic_time = 0.0
 
         # ── RTAB-Map (3D map of the house) ──────────────────────────────────
         # Only ever live while the «3D Χάρτης» tab has its session up; the rest
@@ -395,6 +423,7 @@ class DashboardNode(Node):
         self._speech_pub = self.create_publisher(String, '/speech_text', 10)
         self._say_pub  = self.create_publisher(String, '/speech_response', 10)
         self._dock_pub = self.create_publisher(Bool, '/dock', 10)
+        self._follow_pub = self.create_publisher(Bool, '/follow_command', 10)
         self._arm_cmd_pub = self.create_publisher(JointState, '/arm/joint_cmd', 10)
         self._gripper_pub = self.create_publisher(Float32, '/arm/gripper_cmd', 10)
         self._arm_raw_pub = self.create_publisher(String, '/arm/raw_cmd', 10)
@@ -437,6 +466,81 @@ class DashboardNode(Node):
             **info,
             'image': base64.b64encode(self._state.map_png).decode(),
         }, remember=False)   # replayed from map_png on connect, not from latest
+
+    def _cb_semantic(self, msg: PointCloud2):
+        """Obstacles the DETECTOR put into the costmap, not the LiDAR.
+
+        semantic_costmap_node inflates people and animals into a cylinder wider
+        than their actual footprint so Nav2 keeps a margin, and that is invisible
+        in every other view: on the map the robot just appears to give someone a
+        strangely wide berth. Only the outline is needed here, so the cloud is
+        thinned hard — it is drawn as a scatter over a 3 m window.
+        """
+        try:
+            pts = []
+            step, n = msg.point_step, msg.width * msg.height
+            data = msg.data
+            stride = max(1, n // 400)
+            for i in range(0, n, stride):
+                off = i * step
+                x, y = struct.unpack_from('<ff', data, off)
+                if math.isfinite(x) and math.isfinite(y):
+                    pts.append([round(x, 2), round(y, 2)])
+            self._semantic_pts = pts
+            self._semantic_time = time.monotonic()
+        except (struct.error, IndexError):
+            pass
+
+    # Nav2 packs its costmap into an OccupancyGrid: 0 free, 1..98 the inflation
+    # gradient, 99 inscribed (the robot's body would touch), 100 lethal, -1
+    # unknown. Colouring the gradient is the point — "why did it not fit through
+    # there" is answered by how far the blue bleeds out from the walls.
+    def _cb_costmap(self, msg: OccupancyGrid):
+        if not self._costmap_on:
+            return                      # nobody is on the tab; skip the encode
+        w, h = msg.info.width, msg.info.height
+        if w == 0 or h == 0:
+            return
+        grid = np.array(msg.data, dtype=np.int8).reshape(h, w)
+        img = np.zeros((h, w, 3), dtype=np.uint8)
+        img[:] = (24, 24, 27)                       # free space, matching the UI
+        img[grid == -1] = (60, 60, 66)              # unknown
+        mid = (grid > 0) & (grid < 99)
+        if mid.any():
+            # Cost 1..98 -> deep blue to cyan. Brighter = closer to the wall.
+            g = grid[mid].astype(np.float32) / 98.0
+            img[mid] = np.stack([
+                (120 + 100 * g).astype(np.uint8),   # B
+                (60 + 150 * g).astype(np.uint8),    # G
+                np.full(g.shape, 30, np.uint8),     # R
+            ], axis=-1)
+        img[grid == 99]  = (0, 165, 255)            # inscribed
+        img[grid == 100] = (40, 40, 220)            # lethal
+        img = cv2.flip(img, 0)                      # ROS y-up -> image y-down
+        _, png = cv2.imencode('.png', img)
+
+        # Where the robot sits inside this window. The costmap rolls with the
+        # robot but is NOT exactly centred, so taking the middle would put the
+        # footprint a few centimetres off — enough to misread a near miss.
+        rx = ry = None
+        try:
+            tf = self._tf_buffer.lookup_transform(
+                msg.header.frame_id or 'odom', 'base_link', rclpy.time.Time())
+            rx = (tf.transform.translation.x - msg.info.origin.position.x) / msg.info.resolution
+            ry = (tf.transform.translation.y - msg.info.origin.position.y) / msg.info.resolution
+            ry = h - ry                             # same flip as the image
+        except Exception:
+            pass
+
+        self._state.broadcast({
+            'type': 'costmap',
+            'width': w, 'height': h,
+            'resolution': round(msg.info.resolution, 4),
+            'robot': [round(rx, 1), round(ry, 1)] if rx is not None else None,
+            'semantic': (self._semantic_pts
+                         if time.monotonic() - self._semantic_time < 2.0 else []),
+            'image': base64.b64encode(png.tobytes()).decode(),
+        }, remember=False)
 
     def _cb_pose(self, msg: PoseWithCovarianceStamped):
         p   = msg.pose.pose
@@ -592,16 +696,116 @@ class DashboardNode(Node):
                   if enc != 'bgr8' else arr
             if bgr is None or not isinstance(bgr, np.ndarray):
                 return
+            src_w = bgr.shape[1]
             if bgr.shape[1] > 640:
                 scale = 640 / bgr.shape[1]
                 bgr = cv2.resize(bgr, (640, int(bgr.shape[0] * scale)))
+            if self._overlay:
+                # Drawn server-side rather than as a canvas over the <img>. The
+                # stream is a single MJPEG whose frames the browser never times,
+                # so a client-side overlay would drift against it — boxes
+                # trailing the person by however long the last frame took. Here
+                # they are burned into the same pixels they describe, and the
+                # phone gets it for free.
+                self._draw_overlay(bgr, src_w)
             _, jpg = cv2.imencode('.jpg', bgr, [cv2.IMWRITE_JPEG_QUALITY, 75])
             self._state.camera_jpg = jpg.tobytes()
         except Exception:
             pass
 
+    # COCO-17 skeleton, the same edge list pose_node.py uses. Duplicated rather
+    # than imported: pose_node pulls in torch and ultralytics at import time,
+    # and the dashboard must start whether or not perception is even installed.
+    _KP_EDGES = [
+        (0, 1), (0, 2), (1, 3), (2, 4), (5, 6), (5, 7), (7, 9), (6, 8), (8, 10),
+        (5, 11), (6, 12), (11, 12), (11, 13), (13, 15), (12, 14), (14, 16),
+    ]
+    # Detections older than this are not drawn. Generous enough for a detector
+    # running at a few Hz, short enough that a stopped detector leaves the
+    # picture clean instead of freezing a box on screen for ever.
+    _OVERLAY_MAX_AGE = 1.5
+
+    def _draw_overlay(self, bgr, src_w: int):
+        """Burn YOLO boxes and COCO skeletons into the camera frame."""
+        now = time.monotonic()
+        h, w = bgr.shape[:2]
+
+        # ONE factor for both axes. The resize above is aspect-preserving
+        # (640, height*scale), so x and y share a ratio — deriving them
+        # separately from img_w/img_h invites an off-by-a-few-percent stretch
+        # that looks like a mis-calibrated camera rather than a bug here.
+        def sc(v, iw):
+            return int(v * w / float(iw or w))
+
+        if self._det_boxes and now - self._det_time < self._OVERLAY_MAX_AGE:
+            for d in self._det_boxes:
+                iw = d.get('img_w') or src_w
+                x1, y1 = sc(d.get('x1', 0), iw), sc(d.get('y1', 0), iw)
+                x2, y2 = sc(d.get('x2', 0), iw), sc(d.get('y2', 0), iw)
+                person = d.get('label') == 'person'
+                # ‼️ BGR, not RGB — cv2's order. (255,170,60) reads as orange
+                # until you remember that, and renders as pale BLUE, which is
+                # what the first live capture showed while the caption under the
+                # video promised orange.
+                colour = (80, 220, 80) if person else (60, 170, 255)
+                cv2.rectangle(bgr, (x1, y1), (x2, y2), colour, 2)
+                dist = d.get('box_distance')
+                label = f"{d.get('label', '?')} {d.get('conf', 0):.2f}"
+                if dist is not None:
+                    label += f'  {dist:.1f}m'
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+                ty = max(0, y1 - th - 4)
+                # Filled plate behind the text: white-on-white is unreadable, and
+                # a living room is mostly pale walls.
+                cv2.rectangle(bgr, (x1, ty), (x1 + tw + 6, ty + th + 4), colour, -1)
+                cv2.putText(bgr, label, (x1 + 3, ty + th),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (20, 20, 20), 1, cv2.LINE_AA)
+
+        if self._det_poses and now - self._pose_time < self._OVERLAY_MAX_AGE:
+            for p in self._det_poses:
+                kps = p.get('keypoints') or []
+                if len(kps) < 17:
+                    continue
+                # pose_detections carries no img_w/img_h, so the width of the
+                # frame this callback is holding is the only reference there is.
+                pts = [(sc(k.get('x', 0), src_w), sc(k.get('y', 0), src_w),
+                        k.get('v', 0.0)) for k in kps]
+                for a, b in self._KP_EDGES:
+                    xa, ya, va = pts[a]
+                    xb, yb, vb = pts[b]
+                    if va < 0.5 or vb < 0.5:
+                        continue
+                    cv2.line(bgr, (xa, ya), (xb, yb), (255, 210, 0), 2, cv2.LINE_AA)
+                for x, y, v in pts:
+                    if v >= 0.5:
+                        cv2.circle(bgr, (x, y), 3, (0, 90, 255), -1, cv2.LINE_AA)
+
     def _cb_objects(self, msg: String):
         self._state.broadcast({'type': 'objects', 'text': msg.data})
+        try:
+            dets = json.loads(msg.data)
+        except (ValueError, TypeError):
+            return
+        if not isinstance(dets, list):
+            return
+        self._det_boxes = [d for d in dets if isinstance(d, dict) and 'x1' in d]
+        self._det_time  = time.monotonic()
+        # Compact summary for the camera tab's counter, so "is it seeing
+        # anything" is answerable without reading the raw JSON dump.
+        self._state.broadcast({
+            'type': 'vision',
+            'objects': len(self._det_boxes),
+            'people': sum(1 for d in self._det_boxes if d.get('label') == 'person'),
+        })
+
+    def _cb_poses(self, msg: String):
+        try:
+            poses = json.loads(msg.data)
+        except (ValueError, TypeError):
+            return
+        if isinstance(poses, list):
+            self._det_poses = [p for p in poses if isinstance(p, dict)]
+            self._pose_time = time.monotonic()
 
     def _cb_room(self, msg: String):
         self._state.broadcast({'type': 'room', 'name': msg.data})
@@ -850,6 +1054,7 @@ class DashboardNode(Node):
         # A tab closed on the 3D pane never sends its 'off', so the camera would
         # keep building pointclouds for nobody.
         self._set_camera_pointcloud(bool(self._cloud_ws))
+        self._costmap_on.discard(client)
 
     def dispatch(self, msg: dict, client=None):
         t = msg.get('type')
@@ -896,6 +1101,24 @@ class DashboardNode(Node):
         elif t == 'localize':
             if self._loc_client.service_is_ready():
                 self._loc_client.call_async(Empty.Request())
+        elif t == 'costmap':
+            # Tracked per socket for the same reason the 3D cloud is: a browser
+            # closed on the tab never sends its 'off', and a counter would leave
+            # the encode running for ever with nobody watching.
+            if client is not None:
+                if msg.get('on'):
+                    self._costmap_on.add(client)
+                else:
+                    self._costmap_on.discard(client)
+        elif t == 'overlay':
+            self._overlay = bool(msg.get('on', True))
+        elif t == 'follow':
+            # The same topic the llm_bridge 'follow' tool publishes, so the
+            # button and "ακολούθησέ με" take one code path. person_follower
+            # stops itself after follow_timeout even if nothing sends False.
+            self._follow_pub.publish(Bool(data=bool(msg.get('on'))))
+            if not msg.get('on'):
+                self._vel_pub.publish(Twist())
         elif t == 'rtabmap_cmd':
             # pause/resume stop and restart map building without dropping the
             # graph — the usual reason is to carry the robot past somewhere it
@@ -1543,6 +1766,12 @@ button{font:inherit;color:inherit}
 #map-wrap{position:relative;background:#0c0c0e;border:1px solid #2c2c32;
   border-radius:12px;overflow:hidden;cursor:crosshair;flex:1;min-height:200px}
 #map-canvas{width:100%;height:100%;display:block}
+#cost-wrap{position:relative;background:#0c0c0e;border:1px solid #2c2c32;
+  border-radius:12px;overflow:hidden;flex:1;min-height:200px}
+#cost-canvas{width:100%;height:100%;display:block;
+  /* 60x60 cells blown up to a phone screen: keep the cells as crisp squares
+     rather than letting the browser smear them into a watercolour. */
+  image-rendering:pixelated}
 .ovl{position:absolute;top:8px;left:10px;font-size:10px;color:#6b6b73;
   background:rgba(0,0,0,.55);padding:3px 8px;border-radius:5px;pointer-events:none}
 /* ── Camera ── */
@@ -1598,16 +1827,18 @@ button{font:inherit;color:inherit}
      only 7 of the 12 tabs fit — Gazebo, Σύστημα, Log and Ρυθμίσεις were simply
      unreachable, and the dashboard read as "it only shows the first page"
      (reported 2026-08-02, reproduced in WebKit at 428pt).
-     Two rows cost ~40px of height and need no gesture to discover.
-     The basis is ceil(tabs/2) per row, so both rows stay full: at 12 tabs that
-     was 16.66% (6+6); adding the IMU tab made it 13, where 16.66% would wrap
-     6+6+1 and strand one tab alone on a third row. 14.28% gives 7+6. */
+     Wrapped rows cost ~40px each and need no gesture to discover.
+     The basis is chosen so the rows come out EVEN and no cell is narrower than
+     ~45pt on a 320pt iPhone SE (below that the icon and label collide). That
+     caps a row at 7, so the row count is ceil(tabs/7) and the basis is
+     100/ceil(tabs/rows): 12 tabs -> 16.66% (6+6), 13-14 -> 14.28% (7+7),
+     15 -> 20% (5+5+5). Two rows of 8 would have been 40pt and unreadable. */
   /* The home indicator sits over the last row on a notched iPhone; without the
      inset the bottom row's labels are half-covered by it. */
   #tabs{width:100%;height:auto;display:flex;flex-wrap:wrap;padding:0;
     border-right:none;border-top:1px solid #2c2c32;
     padding-bottom:env(safe-area-inset-bottom,0px)}
-  .tab{flex:1 0 14.28%;flex-direction:column;gap:2px;padding:6px 2px;
+  .tab{flex:1 0 20%;flex-direction:column;gap:2px;padding:6px 2px;
     font-size:9.5px;border-left:none;border-top:3px solid transparent;
     justify-content:center;text-align:center;min-width:0}
   /* Long labels (Βραχίονας, Ρυθμίσεις) must shrink, not widen the cell and
@@ -1671,6 +1902,17 @@ button{font:inherit;color:inherit}
       <div id="cam-wrap">
         <img id="cam" alt="">
         <div class="ovl">📷 RealSense D435 · color</div>
+      </div>
+      <div class="card">
+        <h3>Ανίχνευση <span class="badge" id="vis-count">—</span></h3>
+        <div class="row">
+          <button class="btn pri" id="b-overlay">👁 Πλαίσια/σκελετός</button>
+          <button class="btn" id="b-follow">👣 Ακολούθησέ με</button>
+          <button class="btn warn" id="b-follow-stop">■ Σταμάτα να ακολουθείς</button>
+        </div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          Τα πράσινα πλαίσια είναι άνθρωποι, τα πορτοκαλί αντικείμενα· ο κίτρινος σκελετός είναι 17 σημεία COCO. ‼️ Χρειάζονται τα perception nodes — ξεκίνα με «robot max use_perception:=true», αλλιώς η εικόνα μένει καθαρή και ο μετρητής στο 0. Το «Ακολούθησέ με» σταματά μόνο του μετά από 30 δευτερόλεπτα.
+        </p>
       </div>
       <div class="card">
         <h3>Τι βλέπει</h3>
@@ -1748,6 +1990,21 @@ button{font:inherit;color:inherit}
           ‼️ Δεν εμφανίζεται μπαταρία: το σασί τρέφεται από powerbank και τα πεδία
           φόρτισης του OI δίνουν σκουπίδια. Αν το «Σύνδεση» ξεπεράσει τα ~3s, η
           βάση κοιμάται — τότε κάθε πρόβλημα πλοήγησης είναι ψεύτικο.
+        </p>
+      </div>
+    </section>
+
+    <!-- ── Costmap ─────────────────────────────────────────────── -->
+    <section class="pane" id="p-cost">
+      <div id="cost-wrap">
+        <canvas id="cost-canvas"></canvas>
+        <div class="ovl">COSTMAP · 3×3m γύρω από το ρομπότ</div>
+      </div>
+      <div class="card">
+        <h3>Υπόμνημα</h3>
+        <div class="row" id="cost-legend" style="flex-wrap:wrap;gap:14px"></div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          Αυτό είναι ό,τι ΒΛΕΠΕΙ ο planner, όχι ο χάρτης. Το μπλε γύρω από τους τοίχους είναι το inflation — αν δύο μπλε ζώνες ενωθούν σε μια πόρτα, το ρομπότ δεν περνά, ακόμη κι αν το άνοιγμα φαίνεται καθαρό στον χάρτη. Τα ροζ σημεία είναι εμπόδια που έβαλε η ΑΝΙΧΝΕΥΣΗ (άνθρωποι παίρνουν μεγαλύτερο περιθώριο), όχι το lidar.
         </p>
       </div>
     </section>
@@ -1903,6 +2160,7 @@ const TABS = [
   ['base',   '🧹', 'Σκούπα'],
   ['imu',    '🧭', 'IMU'],
   ['rtabmap','🏠', '3D Χάρτης'],
+  ['cost',   '🧱', 'Costmap'],
   ['llm',    '💬', 'Φωνή/LLM'],
   ['gazebo', '🌍', 'Gazebo'],
   ['sys',    '📊', 'Σύστημα'],
@@ -1932,6 +2190,8 @@ function showTab(id){
   if (id === 'map') resize();
   if (VNC_APPS[id]) ensureVnc(id);
   cloudSetActive(id === 'cloud');
+  costSetActive(id === 'cost');
+  if (id === 'cost') buildCostLegend();
   if (id === 'set') mapsRefresh();
 }
 // NB: the initial showTab() call lives at the bottom of the script — calling it
@@ -2296,6 +2556,15 @@ const HANDLERS = {
   },
   imu(m){ onImu(m); },
   rtabmap(m){ onRtab(m); },
+  costmap(m){ onCostmap(m); },
+  vision(m){
+    const e = $('vis-count'); if(!e) return;
+    // "0 αντικείμενα" and a blank overlay mean the same thing but read very
+    // differently — the count is what tells you the detector is alive at all.
+    e.textContent = m.people
+      ? `${m.objects} · 👤${m.people}`
+      : `${m.objects}`;
+  },
   dock(m){ $('r-dockst').textContent = m.status || '—'; },
   estop(m){
     estop = !!m.on;
@@ -2324,7 +2593,11 @@ function connect(){
   // Re-arm the cloud stream on reconnect: the node tracks viewers per socket,
   // so after a restart (or a map switch) it has forgotten this tab is open.
   ws.onopen  = ()=>{ $('dot').classList.add('on');
-                     if(cloudOn) send({type:'cloud', on:true}); };
+                     if(cloudOn) send({type:'cloud', on:true});
+                     // Same reason as the cloud: the node tracks viewers per
+                     // socket, so after a restart it has forgotten this tab.
+                     if(costOn) send({type:'costmap', on:true});
+                     if(!overlayOn) send({type:'overlay', on:false}); };
   ws.onclose = ()=>{ $('dot').classList.remove('on'); setTimeout(connect,2000); };
   ws.onmessage = e=>{
     const m=JSON.parse(e.data);
@@ -2373,6 +2646,78 @@ function bindDrive(id,v,w){
 }
 bindDrive('bf', LIN, 0); bindDrive('bb',-LIN, 0);
 bindDrive('bl', 0, ANG); bindDrive('br', 0,-ANG);
+
+// ── Costmap tab ────────────────────────────────────────────────────────────
+// The costmap arrives as a small PNG (60x60) plus the robot's cell position and
+// any detector-placed obstacles. Everything is drawn at the grid's own scale and
+// blown up by CSS, so a 3 m window stays legible on a phone.
+let costImg = null, costMeta = null, costOn = false;
+
+function costSetActive(on){
+  if (on === costOn) return;
+  costOn = on;
+  send({type:'costmap', on});     // the encode only runs while someone looks
+}
+
+function onCostmap(m){
+  costMeta = m;
+  const img = new Image();
+  img.onload = () => { costImg = img; drawCost(); };
+  img.src = 'data:image/png;base64,' + m.image;
+}
+
+function drawCost(){
+  const c = $('cost-canvas'); if (!c || !costImg || !costMeta) return;
+  const W = costMeta.width, H = costMeta.height;
+  if (c.width !== W || c.height !== H){ c.width = W; c.height = H; }
+  const g = c.getContext('2d');
+  g.imageSmoothingEnabled = false;
+  g.drawImage(costImg, 0, 0);
+
+  // Detector-placed obstacles. They come in metres in base_link, so they need
+  // the robot's cell AND the resolution to land in the right square.
+  const r = costMeta.robot;
+  if (r && costMeta.semantic && costMeta.semantic.length){
+    g.fillStyle = '#f472b6';
+    costMeta.semantic.forEach(([x, y]) => {
+      // base_link x is forward, y is left; the image is y-flipped already.
+      const cx = r[0] + x / costMeta.resolution;
+      const cy = r[1] - y / costMeta.resolution;
+      g.fillRect(cx - 0.5, cy - 0.5, 1.5, 1.5);
+    });
+  }
+
+  if (r){
+    g.fillStyle = '#22c55e';
+    g.beginPath(); g.arc(r[0], r[1], 2, 0, Math.PI*2); g.fill();
+    g.strokeStyle = '#22c55e'; g.lineWidth = 0.7;
+    g.beginPath(); g.arc(r[0], r[1], 3.4, 0, Math.PI*2); g.stroke();
+  }
+}
+
+// ‼️ These are CSS (RGB) and must match what _cb_costmap paints in cv2 (BGR).
+// Copying the BGR tuples straight across gave the inflation swatch as green
+// while the map drew it cyan — and green is the ROBOT's colour, so the legend
+// was pointing at the wrong thing twice over.
+const COST_LEGEND = [
+  ['#dc2828', 'θανάσιμο'],       // cv2 (40,40,220)
+  ['#ffa500', 'ακουμπά'],        // cv2 (0,165,255)
+  ['#1ed2dc', 'inflation'],      // cv2 (220,210,30) at its brightest
+  ['#f472b6', 'από ανίχνευση'],
+  ['#42423c', 'άγνωστο'],        // cv2 (60,60,66)
+];
+function buildCostLegend(){
+  const box = $('cost-legend'); if (!box || box.childElementCount) return;
+  COST_LEGEND.forEach(([colour, label]) => {
+    const s = document.createElement('span');
+    s.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:12px;color:#a1a1aa';
+    const sw = document.createElement('span');
+    sw.style.cssText = `width:12px;height:12px;border-radius:3px;background:${colour}`;
+    s.appendChild(sw);
+    s.appendChild(document.createTextNode(t(label)));
+    box.appendChild(s);
+  });
+}
 
 // ── IMU tab ────────────────────────────────────────────────────────────────
 // The rose is drawn from the fused yaw and is deliberately labelled with a
@@ -2504,6 +2849,20 @@ window.addEventListener('blur', releaseKeys);
 document.addEventListener('visibilitychange', ()=>{ if(document.hidden) releaseKeys(); });
 
 $('bstop').addEventListener('click',()=>{ stopDrive(); send({type:'stop'}); });
+// ── vision overlay + follow ────────────────────────────────────────────────
+let overlayOn = true;
+$('b-overlay').addEventListener('click',()=>{
+  overlayOn = !overlayOn;
+  $('b-overlay').classList.toggle('pri', overlayOn);
+  send({type:'overlay', on:overlayOn});
+});
+// Following drives the robot, so the stop is its own always-visible button
+// rather than a second click on the same one — with a person in the frame and
+// the robot already moving, a toggle you have to reason about is the wrong
+// control. Same reason the header e-stop is not a toggle-shaped thing.
+$('b-follow').addEventListener('click',()=>send({type:'follow', on:true}));
+$('b-follow-stop').addEventListener('click',()=>send({type:'follow', on:false}));
+
 $('b-loc').addEventListener('click',()=>send({type:'localize'}));
 $('b-xnav').addEventListener('click',()=>{ goal=null; send({type:'stop'}); draw(); });
 
