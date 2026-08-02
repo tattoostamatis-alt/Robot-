@@ -268,7 +268,13 @@ Visualization Manager:
   Global Options:
     Background Color: 48; 48; 48
     Fixed Frame: map
-    Frame Rate: 30
+    # 10, not 30. This RViz runs on a headless Xvnc with no GPU, so every frame
+    # is drawn by llvmpipe on the CPU — it was the single largest consumer on
+    # the machine at ~270% CPU, more than the whole rest of the stack. Nothing
+    # sees those 30 fps: the VNC stream and the dashboard's RViz tab both send
+    # far fewer, and a map/laser/costmap view has nothing that needs them.
+    # Measured 2026-08-02.
+    Frame Rate: 10
   Name: root
   Tools:
     - Class: rviz_default_plugins/Interact
