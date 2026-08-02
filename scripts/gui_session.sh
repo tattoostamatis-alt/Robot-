@@ -7,8 +7,8 @@
 # port 8080 behind the one dashboard token. This script's only job is owning the
 # X displays and the app processes.
 #
-#   gui_session.sh start  rviz|moveit|gazebo
-#   gui_session.sh stop   rviz|moveit|gazebo
+#   gui_session.sh start  rviz|moveit|gazebo|rtabmap
+#   gui_session.sh stop   rviz|moveit|gazebo|rtabmap
 #   gui_session.sh status [app]        # prints "running <vnc_port>" or "stopped"
 #
 # Display map — RViz keeps :2 on purpose. `robot max` already starts :2 for the
@@ -17,9 +17,10 @@
 # Nav2 goal fail with planner error 208. So the dashboard attaches to the same
 # session rather than spawning a rival one.
 #
-#   rviz   :2  → 5902   (shared with the phone's RealVNC session)
-#   gazebo :3  → 5903
-#   moveit :4  → 5904
+#   rviz    :2  → 5902   (shared with the phone's RealVNC session)
+#   gazebo  :3  → 5903
+#   moveit  :4  → 5904
+#   rtabmap :5  → 5905
 
 set -u
 
@@ -45,11 +46,12 @@ VNCDIR=/home/dimi/.vnc
 SIM_DOMAIN_ID=77
 
 case "${2:-}" in
-  rviz)   DISP=2; GEOM=1600x900 ;;
-  gazebo) DISP=3; GEOM=1600x900 ;;
-  moveit) DISP=4; GEOM=1600x900 ;;
-  '')     [ "${1:-}" = status ] || { echo "usage: $0 {start|stop|status} {rviz|gazebo|moveit}" >&2; exit 2; } ;;
-  *)      echo "unknown app '${2}' (rviz|gazebo|moveit)" >&2; exit 2 ;;
+  rviz)    DISP=2; GEOM=1600x900 ;;
+  gazebo)  DISP=3; GEOM=1600x900 ;;
+  moveit)  DISP=4; GEOM=1600x900 ;;
+  rtabmap) DISP=5; GEOM=1600x900 ;;
+  '')      [ "${1:-}" = status ] || { echo "usage: $0 {start|stop|status} {rviz|gazebo|moveit|rtabmap}" >&2; exit 2; } ;;
+  *)       echo "unknown app '${2}' (rviz|gazebo|moveit|rtabmap)" >&2; exit 2 ;;
 esac
 APP="${2:-}"
 PORT=$((5900 + ${DISP:-0}))
@@ -109,6 +111,49 @@ openbox &
 set -m
 ros2 launch home_robot arm_moveit.launch.py &
 echo \$! > "$VNCDIR/app-moveit.pgid"
+wait \$!
+EOF
+      ;;
+    rtabmap)
+      # RTAB-Map building the 3D map of the house from the D435, plus its own
+      # Qt GUI (loop closures, the pose graph, the accumulated cloud).
+      #
+      # Stays on the REAL domain — unlike gazebo, the entire point is the house
+      # the robot is actually standing in. What makes that safe is in
+      # rtabmap.launch.py: publish_tf is false, so AMCL keeps sole ownership of
+      # map->odom, and the node runs in the `rtabmap` namespace, so its own
+      # /map, /global_path and friends cannot collide with map_server's and
+      # Nav2's. Both were verified live before this tab existed; the namespace
+      # one had already started publishing to the real /map when it was caught.
+      #
+      # ‼️ align_depth: the lean camera from localize.launch.py starts with
+      # align_depth.enable false, and RTAB-Map needs depth registered to the
+      # colour image or every point lands in the wrong place. It is settable at
+      # runtime (23 Hz aligned depth appears within ~5 s, measured), so switch
+      # it on here and back off in `stop` rather than making every session pay
+      # for it. The dashboard does the same dance for the 3D tab's pointcloud.
+      cat > "$f" <<EOF
+#!/bin/bash
+unset SESSION_MANAGER DBUS_SESSION_BUS_ADDRESS
+export LIBGL_ALWAYS_SOFTWARE=1
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+source /opt/ros/jazzy/setup.bash
+source /home/dimi/robot_ws/install/setup.bash
+openbox &
+ros2 param set /camera/camera align_depth.enable true >/dev/null 2>&1
+# rtabmap_viz opens at its .ini-saved size, so the tab would show it floating
+# on black exactly like RViz and Gazebo did.
+# ‼️ The title is "RTAB-Map* [ROS]" — WITH the hyphen. Grepping for "rtabmap"
+# never matches it, so the window stayed at its saved size inside a 1600x900
+# display and the tab showed it floating on black.
+( for _ in \$(seq 1 60); do
+    wmctrl -l 2>/dev/null | grep -q "RTAB-Map" && {
+      wmctrl -r "RTAB-Map" -b add,maximized_vert,maximized_horz; break; }
+    sleep 2
+  done ) &
+set -m
+ros2 launch home_robot rtabmap.launch.py &
+echo \$! > "$VNCDIR/app-rtabmap.pgid"
 wait \$!
 EOF
       ;;
@@ -215,6 +260,22 @@ case "${1:-}" in
     # Belt and braces for the sim: an orphaned gz server holds /clock, and the
     # next start then fails silently by falling back to a namespaced one.
     [ "$APP" = gazebo ] && pkill -9 -f 'gz sim' 2>/dev/null
+    # Hand the camera back the way we found it. Aligned depth is a second 23 Hz
+    # image stream on a machine that already runs at load ~6; leaving it on
+    # after the mapping session would be a slow leak nobody would think to look
+    # for. Best-effort: if the camera is not up there is nothing to restore.
+    #
+    # ‼️ set +u FIRST. This file runs under `set -u`, and ROS's own setup.bash
+    # reads unbound variables (AMENT_TRACE_SETUP_FILES on line 8) — so sourcing
+    # it aborts the subshell before ros2 is ever reached. With stderr sent to
+    # /dev/null that failed in complete silence: `stop` printed "stopped" and
+    # aligned depth stayed on. Measured after the first stop, which is the only
+    # reason it was noticed at all.
+    if [ "$APP" = rtabmap ]; then
+      ( set +u
+        source /opt/ros/jazzy/setup.bash
+        timeout 40 ros2 param set /camera/camera align_depth.enable false ) >/dev/null 2>&1
+    fi
     echo stopped
     ;;
 
@@ -222,7 +283,7 @@ case "${1:-}" in
     if [ -n "$APP" ]; then
       is_up "$DISP" && echo "running $PORT" || echo stopped
     else
-      for a in rviz:2 gazebo:3 moveit:4; do
+      for a in rviz:2 gazebo:3 moveit:4 rtabmap:5; do
         n=${a%%:*}; d=${a##*:}
         is_up "$d" && echo "$n running $((5900 + d))" || echo "$n stopped"
       done
@@ -230,7 +291,7 @@ case "${1:-}" in
     ;;
 
   *)
-    echo "usage: $0 {start|stop|status} {rviz|gazebo|moveit}" >&2
+    echo "usage: $0 {start|stop|status} {rviz|gazebo|moveit|rtabmap}" >&2
     exit 2
     ;;
 esac

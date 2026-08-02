@@ -142,6 +142,38 @@ TRANSLATIONS = {
          'an GPIO18, damit es sich selbst erholt, wenn das Protokoll hängt. Es '
          'speist zusammen mit der Odometrie den EKF.'),
 
+    # ── RTAB-Map / 3D map pane ────────────────────────────────────────────
+    '3D Χάρτης':         ('3D Map', '3D-Karte'),
+    'Χαρτογράφηση':      ('Mapping', 'Kartierung'),
+    'Καρέ-κλειδιά':      ('Keyframes', 'Schlüsselbilder'),
+    'Κλεισίματα βρόχου': ('Loop closures', 'Schleifenschlüsse'),
+    '⏸ Παύση':           ('⏸ Pause', '⏸ Pause'),
+    '▶ Συνέχεια':        ('▶ Resume', '▶ Fortsetzen'),
+    '🆕 Νέος χάρτης':    ('🆕 New map', '🆕 Neue Karte'),
+    'χαρτογραφεί':       ('mapping', 'kartiert'),
+    'ανενεργό':          ('idle', 'inaktiv'),
+    'Χτίζει τρισδιάστατο χάρτη του σπιτιού από την D435. Οδήγησε αργά και κοίτα '
+    'τους τοίχους· ο χάρτης μεγαλώνει μόνο όσο κινείσαι. ΔΕΝ πειράζει την '
+    'πλοήγηση: δεν δημοσιεύει TF και ζει σε δικό του namespace.':
+        ('Builds a 3D map of the house from the D435. Drive slowly and face the '
+         'walls — the map only grows while you move. It does NOT disturb '
+         'navigation: it publishes no TF and lives in its own namespace.',
+         'Baut eine 3D-Karte der Wohnung aus der D435. Fahre langsam und richte '
+         'die Kamera auf die Wände — die Karte wächst nur in Bewegung. Sie '
+         'stört die Navigation NICHT: kein TF, eigener Namespace.'),
+    'Ο χάρτης αποθηκεύεται μόνος του στο ~/.home_robot/rtabmap/house.db. Για '
+    'εξαγωγή σε .ply/.obj χρησιμόποιησε File → Export στο ίδιο το RTAB-Map '
+    'παραπάνω. ‼️ Το «Νέος χάρτης» ξεκινά καθαρή συνεδρία — ό,τι έχεις '
+    'χαρτογραφήσει ως τώρα μένει στη βάση αλλά βγαίνει από τον τρέχοντα χάρτη.':
+        ('The map saves itself to ~/.home_robot/rtabmap/house.db. To export a '
+         '.ply/.obj use File → Export in RTAB-Map itself above. ‼️ "New map" '
+         'starts a clean session — what you have mapped so far stays in the '
+         'database but leaves the current map.',
+         'Die Karte speichert sich selbst unter ~/.home_robot/rtabmap/house.db. '
+         'Zum Export als .ply/.obj nutze File → Export in RTAB-Map oben. '
+         '‼️ „Neue Karte" startet eine saubere Sitzung — das bisher Kartierte '
+         'bleibt in der Datenbank, verlässt aber die aktuelle Karte.'),
+
     # ── vacuum base pane ──────────────────────────────────────────────────
     'Βάση Roomba 879':   ('Roomba 879 base', 'Roomba-879-Basis'),
     'Κατάσταση':         ('State', 'Zustand'),

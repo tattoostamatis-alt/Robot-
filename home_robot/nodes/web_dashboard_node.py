@@ -79,7 +79,7 @@ SRC_MAPS_DIR = (os.path.join(SRC_HOME, 'maps')
 NOVNC_DIR = '/usr/share/novnc'
 
 # Must match the display map in scripts/gui_session.sh.
-VNC_PORTS = {'rviz': 5902, 'gazebo': 5903, 'moveit': 5904}
+VNC_PORTS = {'rviz': 5902, 'gazebo': 5903, 'moveit': 5904, 'rtabmap': 5905}
 # TigerVNC sessions authenticate from ~/.vnc/passwd, which we cannot read back
 # (it is DES-obfuscated).  The browser side needs the cleartext to answer the
 # RFB challenge, so it is configured here rather than typed into every tab.
@@ -344,6 +344,27 @@ class DashboardNode(Node):
                        reliability=QoSReliabilityPolicy.RELIABLE,
                        durability=QoSDurabilityPolicy.VOLATILE))
 
+        # ── RTAB-Map (3D map of the house) ──────────────────────────────────
+        # Only ever live while the «3D Χάρτης» tab has its session up; the rest
+        # of the time these topics simply have no publisher, which is exactly
+        # what _rtab_health reports.
+        self._rtab_seen  = 0.0    # monotonic stamp of the last /rtabmap/info
+        self._rtab_nodes = 0      # keyframes in the graph
+        self._rtab_loops = 0      # loop closures accepted so far
+        try:
+            from rtabmap_msgs.msg import Info as RtabInfo, MapGraph as RtabGraph
+            self.create_subscription(RtabInfo, '/rtabmap/info', self._cb_rtab_info, 5)
+            self.create_subscription(RtabGraph, '/rtabmap/mapGraph',
+                                     self._cb_rtab_graph, 5)
+            self._rtab_ok = True
+        except ImportError:
+            # rtabmap_ros is an apt package, not a dependency of this workspace.
+            # Without it the tab still starts the VNC session (rtabmap_viz is a
+            # separate process); only this status strip goes dark.
+            self._rtab_ok = False
+            self.get_logger().info('rtabmap_msgs not installed — 3D map status off')
+        self.create_timer(2.0, self._rtab_health)
+
         # ── Vacuum base ─────────────────────────────────────────────────────
         self.create_subscription(String, '/roomba/status', self._cb_roomba, latch)
         self.create_subscription(String, '/dock_status', self._cb_dock, latch)
@@ -384,6 +405,10 @@ class DashboardNode(Node):
             QoSProfile(depth=1, durability=QoSDurabilityPolicy.TRANSIENT_LOCAL))
 
         self._loc_client = self.create_client(Empty, '/localize_globally')
+        # Created on first use: the services only exist while a mapping session
+        # is running, and a client made against a missing service is harmless
+        # but pointless to hold for the whole life of the dashboard.
+        self._rtab_clients: dict = {}
 
         self.create_timer(2.0, self._publish_system)
 
@@ -676,6 +701,35 @@ class DashboardNode(Node):
         except (ValueError, TypeError):
             pass
 
+    def _cb_rtab_info(self, msg):
+        """One per processed frame — the liveness signal for the 3D map tab."""
+        self._rtab_seen = time.monotonic()
+        # loop_closure_id is non-zero only on the frame that closed a loop, so
+        # it has to be counted as it goes by, not sampled.
+        if msg.loop_closure_id:
+            self._rtab_loops += 1
+
+    def _cb_rtab_graph(self, msg):
+        self._rtab_nodes = len(msg.poses)
+
+    def _rtab_health(self):
+        """Whether a mapping session is actually running, and how it is doing.
+
+        Worth its own strip because the tab can look perfectly alive — VNC up,
+        rtabmap_viz painted — while the mapper is receiving nothing at all: the
+        camera's aligned depth is off, or the RGB-D pair never syncs. The
+        keyframe count going up is the only honest 'it is working'.
+        """
+        if not self._rtab_ok:
+            return
+        live = (time.monotonic() - self._rtab_seen) < 3.0 if self._rtab_seen else False
+        self._state.broadcast({
+            'type':  'rtabmap',
+            'live':  live,
+            'nodes': self._rtab_nodes if live else 0,
+            'loops': self._rtab_loops if live else 0,
+        })
+
     def _cb_dock(self, msg: String):
         self._state.broadcast({'type': 'dock', 'status': msg.data})
 
@@ -842,6 +896,32 @@ class DashboardNode(Node):
         elif t == 'localize':
             if self._loc_client.service_is_ready():
                 self._loc_client.call_async(Empty.Request())
+        elif t == 'rtabmap_cmd':
+            # pause/resume stop and restart map building without dropping the
+            # graph — the usual reason is to carry the robot past somewhere it
+            # cannot drive without polluting the map with garbage frames.
+            # trigger_new_map starts a fresh session in the same database.
+            cmd = str(msg.get('cmd', ''))
+            if cmd in ('pause', 'resume', 'trigger_new_map'):
+                cli = self._rtab_clients.get(cmd)
+                if cli is None:
+                    # ‼️ /rtabmap/rtabmap/… — the namespace AND the node name.
+                    # /rtabmap/<cmd> also appeared in `ros2 service list` and is
+                    # the obvious guess, but it was a stale graph entry left by
+                    # an un-namespaced run: calling it succeeded, returned
+                    # cleanly, and did nothing at all. Measured — the frame
+                    # counter kept climbing at +24 per 10 s through a "pause".
+                    # Against this path it drops to +1.
+                    cli = self.create_client(Empty, f'/rtabmap/rtabmap/{cmd}')
+                    self._rtab_clients[cmd] = cli
+                if cli.service_is_ready():
+                    cli.call_async(Empty.Request())
+                    if cmd == 'trigger_new_map':
+                        self._rtab_loops = 0
+                else:
+                    self.get_logger().warn(
+                        f'/rtabmap/rtabmap/{cmd} not available — '
+                        'is the 3D map session up?')
         elif t == 'dock':
             self._dock_pub.publish(Bool(data=bool(msg.get('on', True))))
         elif t == 'arm_joint':
@@ -1602,10 +1682,11 @@ button{font:inherit;color:inherit}
       </div>
     </section>
 
-    <!-- ── RViz / MoveIt / Gazebo ──────────────────────────────── -->
+    <!-- ── RViz / MoveIt / Gazebo / RTAB-Map ───────────────────── -->
     <section class="pane" id="p-rviz"></section>
     <section class="pane" id="p-moveit"></section>
     <section class="pane" id="p-gazebo"></section>
+    <section class="pane" id="p-rtabmap"></section>
 
     <!-- ── Arm ─────────────────────────────────────────────────── -->
     <section class="pane" id="p-arm">
@@ -1821,6 +1902,7 @@ const TABS = [
   ['arm',    '🦾', 'Βραχίονας'],
   ['base',   '🧹', 'Σκούπα'],
   ['imu',    '🧭', 'IMU'],
+  ['rtabmap','🏠', '3D Χάρτης'],
   ['llm',    '💬', 'Φωνή/LLM'],
   ['gazebo', '🌍', 'Gazebo'],
   ['sys',    '📊', 'Σύστημα'],
@@ -1864,6 +1946,7 @@ const VNC_APPS = {
   rviz:   {title:'RViz',   note:'Η ίδια συνεδρία :2 που ανοίγει το <code>robot max</code> — και αυτή που βλέπεις από το RealVNC στο κινητό.'},
   moveit: {title:'MoveIt', note:'Ξεκινά <code>arm_moveit.launch.py</code>: move_group + RViz με το Motion Planning panel. Τράβα τη δαγκάνα, Plan, Execute.'},
   gazebo: {title:'Gazebo', note:'‼️ ΠΡΟΣΟΜΟΙΩΣΗ. Δημοσιεύει δικά της /clock, /scan, /odom — μην την ανοίγεις ενώ οδηγείς το πραγματικό ρομπότ.'},
+  rtabmap:{title:'RTAB-Map', note:'Χτίζει τρισδιάστατο χάρτη του σπιτιού από την D435. Οδήγησε αργά και κοίτα τους τοίχους· ο χάρτης μεγαλώνει μόνο όσο κινείσαι. ΔΕΝ πειράζει την πλοήγηση: δεν δημοσιεύει TF και ζει σε δικό του namespace.'},
 };
 const vncState = {};
 Object.keys(VNC_APPS).forEach(k => vncState[k] = {frame:null, busy:false});
@@ -1949,6 +2032,71 @@ function renderVnc(app, mode, detail){
   row.appendChild(s);
   card.appendChild(row);
   pane.appendChild(card);
+
+  if (app === 'rtabmap') pane.appendChild(rtabControls());
+}
+
+// ── RTAB-Map controls + progress ───────────────────────────────────────────
+// The VNC view already carries the full rtabmap_viz, so this strip deliberately
+// does NOT duplicate it. It answers the one question the GUI makes you hunt for
+// on a phone-sized screen: is the mapper actually taking frames, or is the
+// window just sitting there looking alive? A keyframe count that climbs while
+// you drive is the only trustworthy answer.
+// Built with DOM calls rather than an innerHTML template on purpose: the i18n
+// test scans for Greek inside quotes, and HTML attributes written inside a
+// template literal next to a t() call read as one long quoted Greek span to it
+// (it is explicitly not a full JS tokeniser). textContent keeps every Greek
+// string a lone t() argument, which is also what the rest of this file does.
+function rtabControls(){
+  const card = document.createElement('div');
+  card.className = 'card';
+
+  const h = document.createElement('h3');
+  h.textContent = t('Χαρτογράφηση') + ' ';
+  const badge = document.createElement('span');
+  badge.className = 'badge'; badge.id = 'rt-state'; badge.textContent = '—';
+  h.appendChild(badge);
+  card.appendChild(h);
+
+  const grid = document.createElement('div');
+  grid.className = 'grid2';
+  [[t('Καρέ-κλειδιά'), 'rt-nodes'], [t('Κλεισίματα βρόχου'), 'rt-loops']]
+   .forEach(([label, id]) => {
+    const k = document.createElement('span');
+    k.className = 'k'; k.textContent = label;
+    const v = document.createElement('span');
+    v.className = 'v'; v.id = id; v.textContent = '—';
+    grid.appendChild(k); grid.appendChild(v);
+  });
+  card.appendChild(grid);
+
+  const row = document.createElement('div');
+  row.className = 'row';
+  row.style.marginTop = '10px';
+  const mk = (label, cls, cmd) => {
+    const b = document.createElement('button');
+    b.className = 'btn ' + (cls || '');
+    b.textContent = label;
+    b.onclick = () => send({type:'rtabmap_cmd', cmd});
+    row.appendChild(b);
+  };
+  mk(t('⏸ Παύση'), '', 'pause');
+  mk(t('▶ Συνέχεια'), '', 'resume');
+  mk(t('🆕 Νέος χάρτης'), 'warn', 'trigger_new_map');
+  card.appendChild(row);
+  const p = document.createElement('p');
+  p.style.cssText = 'font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6';
+  p.textContent = t('Ο χάρτης αποθηκεύεται μόνος του στο ~/.home_robot/rtabmap/house.db. Για εξαγωγή σε .ply/.obj χρησιμόποιησε File → Export στο ίδιο το RTAB-Map παραπάνω. ‼️ Το «Νέος χάρτης» ξεκινά καθαρή συνεδρία — ό,τι έχεις χαρτογραφήσει ως τώρα μένει στη βάση αλλά βγαίνει από τον τρέχοντα χάρτη.');
+  card.appendChild(p);
+  return card;
+}
+
+function onRtab(m){
+  const st = $('rt-state'); if (!st) return;   // tab not built yet
+  st.className = 'pill' + (m.live ? ' ok' : '');
+  st.textContent = m.live ? t('χαρτογραφεί') : t('ανενεργό');
+  $('rt-nodes').textContent = m.live ? m.nodes : '—';
+  $('rt-loops').textContent = m.live ? m.loops : '—';
 }
 
 async function guiCall(app, action){
@@ -2147,6 +2295,7 @@ const HANDLERS = {
     $('r-dock').innerHTML  = flag(m.docking, false);
   },
   imu(m){ onImu(m); },
+  rtabmap(m){ onRtab(m); },
   dock(m){ $('r-dockst').textContent = m.status || '—'; },
   estop(m){
     estop = !!m.on;
