@@ -26,6 +26,24 @@ set -u
 WS=/home/dimi/robot_ws
 VNCDIR=/home/dimi/.vnc
 
+# ‼️ Gazebo runs on its OWN ROS domain. The robot lives on domain 0 (see
+# deploy/systemd/*.service); the simulation is a second, complete robot —
+# sim.launch.py brings up its own AMCL, map_server, planner, controller,
+# collision_monitor, the lot — and on a shared domain those collide by name
+# with the live ones.
+#
+# Measured 2026-08-02 by starting this tab against a running `robot max`:
+# 18 duplicated nodes, /scan and /odom with two publishers each, and — worst —
+# the sim's startup /initialpose landed in the REAL AMCL and teleported the
+# robot's pose from (-7.01, 1.17) to (-6.09, 0.49). The UI note "don't open it
+# while driving the real robot" understated it twice over: the damage does not
+# need the robot to be driving, and no note can prevent a click.
+#
+# A separate domain makes the two graphs invisible to each other, so the tab is
+# safe to open at any time. Nothing inside the sim notices — it is self-
+# contained, and the user watches it over VNC either way.
+SIM_DOMAIN_ID=77
+
 case "${2:-}" in
   rviz)   DISP=2; GEOM=1600x900 ;;
   gazebo) DISP=3; GEOM=1600x900 ;;
@@ -54,6 +72,13 @@ export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 source /opt/ros/jazzy/setup.bash
 source /home/dimi/robot_ws/install/setup.bash
 openbox &
+# RViz restores the window size stored in robot.rviz, which is smaller than the
+# Xvnc geometry — the dashboard tab then shows it floating on black.
+( for _ in $(seq 1 60); do
+    wmctrl -l 2>/dev/null | grep -q "RViz" && {
+      wmctrl -r "RViz" -b add,maximized_vert,maximized_horz; break; }
+    sleep 2
+  done ) &
 exec rviz2 -d /home/dimi/robot_ws/install/home_robot/share/home_robot/config/robot.rviz
 EOF
       ;;
@@ -62,7 +87,11 @@ EOF
       # motion-planning panel (drag the gripper, plan, execute). It must run
       # ALONGSIDE bringup's arm_driver, never with a second one — the bridge in
       # that launch file forwards MoveIt's trajectories to the existing driver.
-      cat > "$f" <<'EOF'
+      #
+      # Stays on the REAL domain, unlike gazebo: the whole point is to drive
+      # the arm that is actually attached. `set -m` + the pgid file is only so
+      # `stop` can take move_group and its RViz down together.
+      cat > "$f" <<EOF
 #!/bin/bash
 unset SESSION_MANAGER DBUS_SESSION_BUS_ADDRESS
 export LIBGL_ALWAYS_SOFTWARE=1
@@ -70,23 +99,55 @@ export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 source /opt/ros/jazzy/setup.bash
 source /home/dimi/robot_ws/install/setup.bash
 openbox &
-exec ros2 launch home_robot arm_moveit.launch.py
+# Same as gazebo: RViz opens at its .rviz-saved size, leaving black around it
+# in the tab. Match the display instead.
+( for _ in \$(seq 1 60); do
+    wmctrl -l 2>/dev/null | grep -q "RViz" && {
+      wmctrl -r "RViz" -b add,maximized_vert,maximized_horz; break; }
+    sleep 2
+  done ) &
+set -m
+ros2 launch home_robot arm_moveit.launch.py &
+echo \$! > "$VNCDIR/app-moveit.pgid"
+wait \$!
 EOF
       ;;
     gazebo)
-      # The headless-sim launch file plus the Gazebo GUI client. Note this is a
-      # SIMULATION: it publishes its own /clock, /scan and /odom. Do not run it
-      # while driving the real robot — see the orphan-/clock note in the docs.
-      cat > "$f" <<'EOF'
+      # The headless-sim launch file plus the Gazebo GUI client. This is a
+      # SIMULATION — a whole second robot, with its own /clock, /scan, /odom
+      # and its own Nav2 — so it is confined to SIM_DOMAIN_ID and cannot see
+      # or be seen by the real one. See the note at the top of this file.
+      #
+      # `set -m` puts the launch in its own process group so `stop` can kill
+      # the whole tree by PGID; without it the ROS nodes outlived every attempt
+      # to shut the session down.
+      cat > "$f" <<EOF
 #!/bin/bash
 unset SESSION_MANAGER DBUS_SESSION_BUS_ADDRESS
+# LIBGL_ALWAYS_SOFTWARE alone is not enough here — it steers GLX, and Mesa says
+# so out loud on the EGL path ("Not allowed to force software rendering when API
+# explicitly selects a hardware device"). GALLIUM_DRIVER + the loader override
+# pick llvmpipe for both. The engine itself is chosen in sim.launch.py.
 export LIBGL_ALWAYS_SOFTWARE=1
+export GALLIUM_DRIVER=llvmpipe
+export MESA_LOADER_DRIVER_OVERRIDE=llvmpipe
 export OGRE_RTT_MODE=Copy
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export ROS_DOMAIN_ID=$SIM_DOMAIN_ID
 source /opt/ros/jazzy/setup.bash
 source /home/dimi/robot_ws/install/setup.bash
 openbox &
-exec ros2 launch home_robot sim.launch.py headless:=false use_rviz:=false
+# Gazebo opens at its saved ~/.gz size, not the display's, so the tab showed a
+# window floating on black. openbox does not maximise anything by itself.
+( for _ in \$(seq 1 60); do
+    wmctrl -l 2>/dev/null | grep -q "Gazebo Sim" && {
+      wmctrl -r "Gazebo Sim" -b add,maximized_vert,maximized_horz; break; }
+    sleep 2
+  done ) &
+set -m
+ros2 launch home_robot sim.launch.py headless:=false use_rviz:=false &
+echo \$! > "$VNCDIR/app-gazebo.pgid"
+wait \$!
 EOF
       ;;
   esac
@@ -124,10 +185,35 @@ case "${1:-}" in
       echo "refusing: :2 is the shared session started by 'robot max'" >&2
       exit 1
     fi
+    # Kill the app's process group FIRST, while we still know its PGID — once
+    # Xvnc goes the pid file is all we have.
+    #
+    # ‼️ This used to be `pkill -9 -f "DISPLAY=:$DISP"`, which never matched a
+    # single process: DISPLAY is an environment variable, not part of any
+    # command line, and pkill -f only reads /proc/PID/cmdline. So `stop` printed
+    # "stopped", tigervncserver dropped the X display, and every ROS node the
+    # launch had started went on running reparented to init — 18 of them, still
+    # publishing. Confirmed by /proc/<pid>/cmdline on 2026-08-02.
+    #
+    # The xstartup scripts put the launch in its own process group (set -m) and
+    # write its PGID here, so a negative kill reaches the launch, its ROS nodes
+    # and the gz server in one signal.
+    pgidf="$VNCDIR/app-$APP.pgid"
+    if [ -r "$pgidf" ]; then
+      pgid=$(cat "$pgidf")
+      if [ -n "$pgid" ]; then
+        kill -TERM "-$pgid" 2>/dev/null      # let ROS shut down cleanly
+        for _ in $(seq 1 10); do
+          kill -0 "-$pgid" 2>/dev/null || break
+          sleep 1
+        done
+        kill -9 "-$pgid" 2>/dev/null         # whatever ignored SIGTERM
+      fi
+      rm -f "$pgidf"
+    fi
     tigervncserver -kill ":$DISP" >/dev/null 2>&1
-    # tigervncserver -kill only signals Xvnc; ros2 launch children survive it,
-    # and an orphaned gz server holds /clock so the next sim start dies silently.
-    pkill -9 -f "DISPLAY=:$DISP" 2>/dev/null
+    # Belt and braces for the sim: an orphaned gz server holds /clock, and the
+    # next start then fails silently by falling back to a namespaced one.
     [ "$APP" = gazebo ] && pkill -9 -f 'gz sim' 2>/dev/null
     echo stopped
     ;;

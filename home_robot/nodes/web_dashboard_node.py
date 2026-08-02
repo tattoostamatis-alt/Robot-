@@ -42,10 +42,13 @@ import psutil
 import yaml
 
 import rclpy
+import tf2_ros
 from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 from rcl_interfaces.msg import Log as RosoutLog
+from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
+from rcl_interfaces.srv import SetParameters
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from sensor_msgs.msg import Image, JointState, LaserScan, PointCloud2
@@ -259,6 +262,12 @@ class DashboardNode(Node):
         # ── Navigation / map ────────────────────────────────────────────────
         self.create_subscription(OccupancyGrid, '/map', self._cb_map, latch)
         self.create_subscription(PoseWithCovarianceStamped, '/amcl_pose', self._cb_pose, 10)
+        # Kept as the fast path (it fires the instant AMCL corrects), but it is
+        # not the only one — see _poll_tf_pose for why a standing robot needs
+        # the TF poll or the map tab shows nothing but the map.
+        self._tf_buffer   = tf2_ros.Buffer()
+        self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
+        self.create_timer(0.5, self._poll_tf_pose)
         self.create_subscription(LaserScan, '/scan', self._cb_scan, 5)
         self.create_subscription(Path, '/plan', self._cb_plan, 5)
         self.create_subscription(Odometry, '/odom', self._cb_odom, 5)
@@ -286,6 +295,11 @@ class DashboardNode(Node):
         # forever at 150 kB/s with nobody watching.
         self._cloud_ws: Set[object] = set()
         self._cloud_last = 0.0
+        # The camera ships with its pointcloud filter off; _set_camera_pointcloud
+        # turns it on for as long as someone is on the 3D tab.
+        self._cloud_param_on = False
+        self._cam_param_cli = self.create_client(
+            SetParameters, '/camera/camera/set_parameters')
         self._map_cache = None          # (fetched_at, name); see active_map()
         self._backend_cache = None      # (fetched_at, backend); see llm_backend()
         self.create_subscription(
@@ -366,12 +380,39 @@ class DashboardNode(Node):
     def _cb_pose(self, msg: PoseWithCovarianceStamped):
         p   = msg.pose.pose
         yaw = 2.0 * math.atan2(p.orientation.z, p.orientation.w)
+        self._publish_pose(p.position.x, p.position.y, yaw)
+
+    def _publish_pose(self, x: float, y: float, yaw: float):
         self._state.broadcast({
             'type': 'pose',
-            'x':   round(p.position.x, 3),
-            'y':   round(p.position.y, 3),
+            'x':   round(x, 3),
+            'y':   round(y, 3),
             'yaw': round(yaw, 4),
         })
+
+    def _poll_tf_pose(self):
+        """Derive the pose from map->base_link when AMCL's topic stays quiet.
+
+        ‼️ /amcl_pose is NOT a position feed — AMCL publishes it only when it
+        updates its estimate, which it does only while the robot drives. Open
+        the dashboard on a robot standing still (the normal case) and that topic
+        never fires, so the map tab drew the map and nothing else: no robot
+        marker, no laser (the scan is drawn in the robot's frame, so no pose
+        means no dots), and X/Y/Γωνία stuck on '—'. It read like a dead
+        localization stack while `tf2_echo map base_link` was answering fine.
+
+        room_markers_node hit exactly this and grew the same 2 Hz TF poll
+        (fc6f1cb); the dashboard was left on the topic alone. TF is the same
+        estimate AMCL would have published, just always current.
+        """
+        try:
+            tf = self._tf_buffer.lookup_transform(
+                'map', 'base_link', rclpy.time.Time())
+        except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
+                tf2_ros.ExtrapolationException):
+            return   # not localized yet — drawing no robot is correct
+        t, r = tf.transform.translation, tf.transform.rotation
+        self._publish_pose(t.x, t.y, 2.0 * math.atan2(r.z, r.w))
 
     def _cb_scan(self, msg: LaserScan):
         self._scan_seq += 1
@@ -429,6 +470,33 @@ class DashboardNode(Node):
     # ~48 kB once base64'd, three times a second.
     CLOUD_MAX_POINTS = 4000
     CLOUD_PERIOD = 0.33
+
+    def _set_camera_pointcloud(self, on: bool):
+        """Turn the D435's pointcloud filter on while the 3D tab is watching.
+
+        ‼️ Without this the 3D tab could never show anything. localize.launch.py
+        starts the lean depth-only stream with pointcloud.enable:=false (it costs
+        CPU and nothing else subscribes), so /camera/camera/depth/color/points
+        was advertised but never published — the tab sat on "αναμονή για νέφος
+        σημείων…" forever, on every default `robot max`. Confirmed live
+        2026-08-02, and confirmed that flipping the parameter at runtime brings
+        the topic up at ~18 Hz.
+
+        Enabling it only while someone is looking keeps the default cost at zero,
+        which is the same reason the stream itself is gated on _cloud_ws.
+        """
+        if on == self._cloud_param_on:
+            return
+        if not self._cam_param_cli.service_is_ready():
+            return          # camera not up (or not the realsense) — nothing to do
+        req = SetParameters.Request()
+        req.parameters = [Parameter(
+            name='pointcloud.enable',
+            value=ParameterValue(type=ParameterType.PARAMETER_BOOL, bool_value=on),
+        )]
+        self._cam_param_cli.call_async(req)
+        self._cloud_param_on = on
+        self.get_logger().info(f'D435 pointcloud {"on" if on else "off"} (3D tab)')
 
     def _cb_cloud(self, msg: PointCloud2):
         if not self._cloud_ws:
@@ -610,6 +678,9 @@ class DashboardNode(Node):
     def release_client(self, client):
         """A browser went away — forget anything it had switched on."""
         self._cloud_ws.discard(client)
+        # A tab closed on the 3D pane never sends its 'off', so the camera would
+        # keep building pointclouds for nobody.
+        self._set_camera_pointcloud(bool(self._cloud_ws))
 
     def dispatch(self, msg: dict, client=None):
         t = msg.get('type')
@@ -652,6 +723,7 @@ class DashboardNode(Node):
                     self._cloud_ws.add(client)
                 else:
                     self._cloud_ws.discard(client)
+                self._set_camera_pointcloud(bool(self._cloud_ws))
         elif t == 'localize':
             if self._loc_client.service_is_ready():
                 self._loc_client.call_async(Empty.Request())
@@ -1071,13 +1143,29 @@ async def maps_action(request: Request, action: str, name: str, t: str = ''):
 async def vnc_bridge(ws: WebSocket, app_name: str, t: str = ''):
     """noVNC <-> Xvnc. This is websockify, minus the extra daemon.
 
-    noVNC opens the socket with the 'binary' subprotocol and then speaks raw
-    RFB over it, so all we do is copy bytes both ways until either end hangs up.
+    noVNC speaks raw RFB over the socket, so all we do is copy bytes both ways
+    until either end hangs up.
+
+    ‼️ The subprotocol is echoed, never asserted. This used to accept with a
+    hardcoded subprotocol='binary' on the belief that "noVNC opens the socket
+    with the 'binary' subprotocol" — it does not. rfb.js defaults
+    `_wsProtocols` to [] (core/rfb.js:94 in the installed 1.3.0) and our viewer
+    page passes no wsProtocols, so the request carries no Sec-WebSocket-Protocol
+    header at all. RFC 6455 §4.1 forbids the server from naming one the client
+    did not offer, and Chromium enforces it: the handshake was rejected with
+
+        Response must not include 'Sec-WebSocket-Protocol' header
+        if not present in request: binary
+
+    and the RViz/MoveIt/Gazebo panes died at close code 1006 — after the
+    "Script error." fix, so the tab reported the failure honestly and was still
+    unusable. Verified in a real browser 2026-08-02.
     """
     if not _authorised(t, ws.cookies) or app_name not in VNC_PORTS:
         await ws.close(code=1008)      # policy violation
         return
-    await ws.accept(subprotocol='binary')
+    offered = ws.scope.get('subprotocols') or []
+    await ws.accept(subprotocol='binary' if 'binary' in offered else None)
     try:
         reader, writer = await asyncio.open_connection('127.0.0.1',
                                                        VNC_PORTS[app_name])

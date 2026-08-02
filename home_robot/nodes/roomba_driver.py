@@ -408,6 +408,14 @@ class RoombaDriver(Node):
         self._last_ok_time = 0.0
         self._last_oi_mode = None      # packet 35, refreshed by every read
         self._last_brc_pulse = 0.0
+        # A base that is asleep answers every query with 0 bytes, forever. At
+        # 20 Hz x 3 retries that is 60 warnings and 20 errors a SECOND, all
+        # identical — 256 of them filled the dashboard's log tab on 2026-08-02
+        # and pushed out everything else, while never once naming the cause.
+        # _note_link_failure replaces that with one diagnosis and a periodic
+        # reminder; see it for why the advice is a power cycle.
+        self._link_down_since = 0.0
+        self._link_last_report = 0.0
         self._connect_oi()
         self.get_logger().info(f'Roomba driver started on {port}')
 
@@ -953,9 +961,53 @@ class RoombaDriver(Node):
         if (now - self._last_brc_pulse) > 60.0:
             self._brc_pulse()
 
+    # How often to repeat the "base is asleep" line while it stays asleep.
+    LINK_REPORT_PERIOD = 30.0
+
+    def _note_link_failure(self, what: str, detail: str):
+        """One line per outage, then one every 30 s — not 80 a second.
+
+        ‼️ Read the shape of the failure before repeating it. Every read
+        returning ZERO bytes is not a flaky cable, it is the documented signature
+        of a Roomba that has gone to sleep: the OI stops answering entirely and
+        stays that way. On this robot the wake paths are gone — the BRC line is
+        dead (all 10 DTR/RTS/polarity/baud combinations were swept on
+        2026-07-31) — so nothing the driver can send will bring it back. The
+        only thing that works is a power cycle, which is why that is what the
+        message says instead of a byte count nobody can act on.
+
+        The old code logged each of the three retries at WARN plus a final
+        ERROR, from two pollers, at 20 Hz. That is the noise this replaces.
+        """
+        now = time.monotonic()
+        if not self._link_down_since:
+            self._link_down_since = now
+            self._link_last_report = 0.0
+        if now - self._link_last_report < self.LINK_REPORT_PERIOD:
+            return
+        self._link_last_report = now
+        secs = int(now - self._link_down_since)
+        if 'not 9 bytes long, it is: 0' in detail or 'not 80 bytes long, it is: 0' in detail:
+            self.get_logger().error(
+                f'Η ΒΑΣΗ ΔΕΝ ΑΠΑΝΤΑ ({secs}s): κάθε ερώτημα γυρνά 0 bytes — το '
+                'Roomba κοιμάται. Το BRC είναι νεκρό σε αυτό το σκαφάκι, οπότε '
+                'ο driver ΔΕΝ μπορεί να το ξυπνήσει: κάνε power cycle (~10s '
+                'από το power station). Μέχρι τότε δεν υπάρχει odometry.')
+        else:
+            self.get_logger().error(
+                f'{what} αποτυγχάνει εδώ και {secs}s: {detail}')
+
+    def _note_link_ok(self):
+        """Say so once when the base comes back, then go quiet again."""
+        if self._link_down_since:
+            secs = int(time.monotonic() - self._link_down_since)
+            self.get_logger().info(f'Η βάση ξαναπαντά μετά από {secs}s')
+            self._link_down_since = 0.0
+
     def _safe_get_sensors(self):
         """get_sensors() με retry — το Roomba μερικές φορές επιστρέφει 0 bytes."""
-        for attempt in range(3):
+        last = None
+        for _ in range(3):
             try:
                 # Discard any stale/leftover bytes so this read is aligned to
                 # the response of the query we're about to send — otherwise a
@@ -968,11 +1020,12 @@ class RoombaDriver(Node):
                 mode = getattr(val, 'open_interface_mode', None)
                 if mode is not None:
                     self._last_oi_mode = mode
+                self._note_link_ok()
                 return val
             except Exception as e:
-                self.get_logger().warn(f'get_sensors() attempt {attempt}: {e!r}')
+                last = e
                 time.sleep(0.05)
-        self.get_logger().error('get_sensors() failed after 3 attempts')
+        self._note_link_failure('get_sensors()', str(last))
         return None
 
     def _dock_cb(self, msg: Bool):
@@ -1235,7 +1288,8 @@ class RoombaDriver(Node):
         nothing. A separate poll would add a second serial transaction at 20 Hz
         and starve odometry on this shared port.
         """
-        for attempt in range(3):
+        last = None
+        for _ in range(3):
             try:
                 self.bot.SCI.ser.reset_input_buffer()
                 # encoders + bumps/wheel-drops + the four cliff sensors. The
@@ -1263,11 +1317,12 @@ class RoombaDriver(Node):
                     self._last_cliff_time = time.monotonic()
                 result = (left, right)
                 self._last_ok_time = time.monotonic()
+                self._note_link_ok()
                 return result
             except Exception as e:
-                self.get_logger().warn(f'get_encoders() attempt {attempt}: {e!r}')
+                last = e
                 time.sleep(0.05)
-        self.get_logger().error('get_encoders() failed after 3 attempts')
+        self._note_link_failure('get_encoders()', str(last))
         return None
 
     def _publish_odom(self):

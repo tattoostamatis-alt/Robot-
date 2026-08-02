@@ -94,9 +94,16 @@ def _launch_setup(context, *args, **kwargs):
             # That is why "πόση απόσταση έχει;" answered "δεν ξέρω" on
             # 2026-07-30 — the node was never started, on any flag combination,
             # because this argument was simply not forwarded (bringup defaults
-            # it to false). It only consumes topics, so it costs nothing beyond
-            # the detections use_perception already pays for.
-            'use_situational':     perc,      # fills the LLM's situation context
+            # it to false).
+            #
+            # Tied to `perc` it was still off under plain `robot max`, which is
+            # how the robot ships: /situation_context had no publisher at all
+            # (checked live 2026-08-02). But the room name comes from TF plus
+            # the room mask and the CPU/RAM from psutil — none of that needs the
+            # detector. Perception only enriches the "nearby objects" line, so
+            # this is unconditional and the node degrades to a shorter context
+            # when the detections aren't there.
+            'use_situational':     'true',    # fills the LLM's situation context
             # Docking is a mission (navigate to the handover point in front of
             # the base, relocalize on the tag above it, then hand over to IR
             # homing), and this is the launch `robot max` uses — with the
@@ -123,7 +130,7 @@ def _launch_setup(context, *args, **kwargs):
             # and then silently ignored — bringup fell back to its 'lemonade'
             # default and the robot kept thinking on the NPU. Nothing errored;
             # the only symptom was the 4.7 GB that never got freed.
-            'llm_backend':         LaunchConfiguration('llm_backend', default='lemonade'),
+            'llm_backend':         LaunchConfiguration('llm_backend', default='gemini'),
             'use_recovery':        'true' if use_recovery else 'false',
             'use_obstacle_safety': 'true' if use_obstacle_safety else 'false',
             # Forwarded, not hardcoded: `robot max` decides. It was pinned to
@@ -285,10 +292,11 @@ def generate_launch_description():
                         'memory during navigation. Starts the full camera (replaces '
                         'the lean depth-only stream); costs iGPU/CPU.'),
         DeclareLaunchArgument(
-            'llm_backend', default_value='lemonade',
-            description="Which LLM answers: 'lemonade' is FastFlowLM on the NPU "
-                        "(offline, ~4.7 GB RAM), 'gemini' is the cloud (frees that "
-                        "RAM, needs ~/.home_robot/gemini_api_key and a network), "
-                        "'ollama' is a local GGUF server."),
+            'llm_backend', default_value='gemini',
+            description="Which LLM answers: 'gemini' is the cloud (the default — "
+                        "same tool-call rate as the NPU model at 0.45 s instead of "
+                        "6.7 s, and it frees 4.7 GB; needs ~/.home_robot/gemini_api_key "
+                        "and a network), 'lemonade' is FastFlowLM on the NPU "
+                        "(offline, holds that 4.7 GB), 'ollama' a local GGUF server."),
         OpaqueFunction(function=_launch_setup),
     ])

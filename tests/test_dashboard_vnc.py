@@ -297,3 +297,59 @@ def test_the_stock_page_still_mutes_its_own_errors():
     html = Path(NOVNC_DIR, 'vnc.html').read_text()
     assert re.search(r'<script type="module" crossorigin="anonymous"', html), \
         'vnc.html no longer mutes errors — revisit this note'
+
+
+# ── the RFB socket handshake ─────────────────────────────────────────────────
+# 2026-08-02, found by driving the page in a real Chromium: every VNC pane died
+# at close code 1006 with
+#
+#   Response must not include 'Sec-WebSocket-Protocol' header
+#   if not present in request: binary
+#
+# The bridge accepted with a hardcoded subprotocol='binary', but neither our
+# viewer nor rfb.js ever offers one, and RFC 6455 §4.1 lets the server name
+# only a subprotocol the client sent.
+
+def _bridge():
+    m = re.search(r'async def vnc_bridge\(.*?(?=\n\n# )', _SRC, re.S)
+    assert m, 'the /vnc bridge is gone or changed shape'
+    return m.group(0)
+
+
+def test_the_bridge_never_invents_a_subprotocol():
+    """Accepting with one the client did not offer fails the handshake."""
+    accept = re.search(r'await ws\.accept\((.*?)\)', _bridge(), re.S)
+    assert accept, 'the bridge no longer accepts the socket'
+    args = accept.group(1)
+    assert "subprotocol='binary')" not in args + ')', \
+        'subprotocol is hardcoded again — Chromium rejects the handshake'
+    assert 'offered' in args or 'subprotocols' in args, \
+        'the accepted subprotocol must be derived from what the client offered'
+
+
+def test_the_offered_subprotocols_come_from_the_request():
+    assert re.search(r"ws\.scope\.get\(\s*'subprotocols'", _bridge()), \
+        'the bridge must read the client\'s offer off the ASGI scope'
+
+
+def test_binary_is_still_echoed_when_it_is_offered():
+    """Older noVNC builds (and websockify clients) do ask for 'binary'."""
+    assert re.search(r"'binary'\s+if\s+'binary'\s+in\s+offered", _bridge()), \
+        'a client that offers binary must still get it back'
+
+
+@pytest.mark.skipif(not os.path.isdir(NOVNC_DIR), reason='novnc not installed')
+def test_the_installed_rfb_really_offers_no_subprotocol():
+    """The fact that made the hardcoded 'binary' wrong. If a future noVNC goes
+    back to offering one, the echo above keeps working either way."""
+    src = Path(NOVNC_DIR, 'core', 'rfb.js').read_text()
+    m = re.search(r'this\._wsProtocols = (.*?);', src)
+    assert m, 'rfb.js changed shape — re-check what it offers'
+    assert m.group(1).strip().endswith('|| []'), \
+        f'rfb.js now defaults to {m.group(1)} — re-check the bridge'
+
+
+def test_our_viewer_passes_no_wsProtocols():
+    """The other half: the RFB options we hand rfb.js leave the default in."""
+    assert 'wsProtocols' not in VIEW, \
+        'the viewer now sets wsProtocols — the bridge echo must agree with it'

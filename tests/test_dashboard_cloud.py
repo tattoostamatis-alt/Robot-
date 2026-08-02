@@ -223,3 +223,69 @@ def test_reading_the_backend_does_not_block_the_event_loop():
     """It shells out to `ros2 param get`, which takes a second or two."""
     body = _DASH_SRC.split('async def maps_action')[1].split('\n@app')[0]
     assert 'await asyncio.to_thread(ros_node.llm_backend)' in body
+
+
+# ── the camera has to be producing a cloud at all ───────────────────────────
+# 2026-08-02: the 3D tab said "αναμονή για νέφος σημείων…" forever on a default
+# `robot max`. Everything above this line worked — the encoder, the decoder, the
+# gating — but localize.launch.py starts the lean depth stream with
+# pointcloud.enable:=false, so /camera/camera/depth/color/points was advertised
+# and never published. The tab could not have worked on any default launch.
+# Flipping the parameter at runtime brings the topic up at ~18 Hz, so the tab
+# now turns the filter on while someone is watching and off again after.
+
+import re as _re
+from pathlib import Path as _Path
+
+_NODE_SRC = (_Path(__file__).resolve().parents[1]
+             / 'home_robot' / 'nodes' / 'web_dashboard_node.py').read_text()
+
+
+def _node_method(name):
+    m = _re.search(r'\n    def %s\(self.*?(?=\n    def )' % name, _NODE_SRC, _re.S)
+    assert m, f'{name}() is gone or changed shape'
+    return m.group(0)
+
+
+def test_the_tab_switches_the_cameras_pointcloud_on():
+    assert '_set_camera_pointcloud' in _NODE_SRC, \
+        'nothing enables pointcloud.enable — the 3D tab shows an empty scene'
+
+
+def test_it_sets_the_realsense_parameter():
+    body = _node_method('_set_camera_pointcloud')
+    assert "'pointcloud.enable'" in body, 'the wrong parameter is being set'
+    assert '/camera/camera/set_parameters' in _NODE_SRC, \
+        'the parameter client no longer points at the camera'
+
+
+def test_it_follows_whether_anyone_is_watching():
+    """On when the first viewer arrives, off when the last leaves."""
+    disp = _node_method('dispatch')
+    assert '_set_camera_pointcloud(bool(self._cloud_ws))' in disp, \
+        "the 'cloud' message must drive the camera parameter"
+
+
+def test_a_closed_tab_turns_it_off():
+    """A browser closed on the 3D pane never sends its 'off'."""
+    assert '_set_camera_pointcloud(bool(self._cloud_ws))' in _node_method('release_client'), \
+        'a vanished viewer would leave the camera building clouds for nobody'
+
+
+def test_it_does_not_spam_the_camera_with_the_same_value():
+    body = _node_method('_set_camera_pointcloud')
+    assert 'if on == self._cloud_param_on' in body, \
+        'every tab switch would fire another set_parameters call'
+
+
+def test_it_survives_the_camera_being_absent():
+    """localize can run without the D435 at all; that is not an error here."""
+    body = _node_method('_set_camera_pointcloud')
+    assert 'service_is_ready()' in body, \
+        'a missing camera must not raise out of the websocket handler'
+
+
+def test_it_does_not_block_the_event_loop():
+    body = _node_method('_set_camera_pointcloud')
+    assert 'call_async' in body and 'call(' not in body.replace('call_async', ''), \
+        'a synchronous service call here would stall the dashboard socket'

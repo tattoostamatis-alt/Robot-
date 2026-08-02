@@ -41,7 +41,7 @@ def generate_launch_description():
     use_person_follower = LaunchConfiguration('use_person_follower', default='true')
     use_llm       = LaunchConfiguration('use_llm',       default='false')
     use_dashboard = LaunchConfiguration('use_dashboard', default='false')
-    llm_backend   = LaunchConfiguration('llm_backend',   default='lemonade')
+    llm_backend   = LaunchConfiguration('llm_backend',   default='gemini')
     # The `lemonade` backend is really "any OpenAI-compatible server". Exposed
     # because Lemonade 11.0.0 dropped every FLM/NPU model from its catalogue
     # (2026-07-16), so the NPU path now goes through FastFlowLM's own server on
@@ -1065,7 +1065,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_person_follower', default_value='false'),
         DeclareLaunchArgument('use_llm',       default_value='false'),
         DeclareLaunchArgument('use_dashboard', default_value='false'),
-        DeclareLaunchArgument('llm_backend',   default_value='lemonade'),
+        DeclareLaunchArgument('llm_backend',   default_value='gemini'),
         DeclareLaunchArgument('llm_url',
             default_value='http://127.0.0.1:52625/v1'),
         DeclareLaunchArgument('llm_model',     default_value='qwen3.5:4b'),

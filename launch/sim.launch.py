@@ -88,12 +88,38 @@ def generate_launch_description():
 
     # ── Gazebo ───────────────────────────────────────────────────
     # headless:=true runs the server only (-s), for CI / display-less hosts.
+    #
+    # render_engine defaults to Ogre 1.x, NOT the ogre2 (Ogre-Next) default.
+    # ‼️ This machine has no usable GL on the displays the sim ever runs on: the
+    # dashboard's Gazebo tab renders into a headless Xvnc (scripts/gui_session.sh)
+    # and ogre2 takes the EGL path, where Mesa dies:
+    #
+    #   libEGL warning: Not allowed to force software rendering when API
+    #                   explicitly selects a hardware device.
+    #   ...libgz-sim-sensors-system.so -> libgz-rendering-ogre2.so
+    #      -> RenderSystem_GL3Plus.so -> libEGL_mesa -> driCreateNewScreen3
+    #   Segmentation fault (Address not mapped to object [0x8])
+    #
+    # Two things that look like fixes are not. LIBGL_ALWAYS_SOFTWARE=1 steers
+    # GLX, and that warning is Mesa saying it ignored it on the EGL path. And
+    # --render-engine-gui only re-points the GUI: the crash above is in the
+    # SERVER's sensors system, which renders the sim's lidar and camera and
+    # keeps its own engine. Fixing only the GUI left the tab black exactly as
+    # before. So this sets the engine for both halves.
+    #
+    # Ogre 1.x uses GLX, honours the software flag, and renders on the same
+    # display (verified on :3, 2026-08-02). Pass render_engine:=ogre2 on a host
+    # with a real GPU.
+    #
+    # One expression for the whole mode switch — headless still needs the engine,
+    # because --headless-rendering is exactly the sensor path that crashed.
+    gz_mode = PythonExpression([
+        "('-s --headless-rendering ' if '", headless, "'.lower()=='true' else '') "
+        "+ '--render-engine ' + '", LaunchConfiguration('render_engine'), "' + ' '",
+    ])
     gz = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(ros_gz_sim, 'launch', 'gz_sim.launch.py')),
-        launch_arguments={'gz_args': ['-r -v3 ',
-                                      PythonExpression(["'-s --headless-rendering ' if '", headless,
-                                                        "'.lower()==\"true\" else ''"]),
-                                      world]}.items(),
+        launch_arguments={'gz_args': ['-r -v3 ', gz_mode, world]}.items(),
     )
 
     robot_state_publisher = Node(
@@ -221,6 +247,10 @@ def generate_launch_description():
         DeclareLaunchArgument('use_rviz', default_value='true'),
         DeclareLaunchArgument('headless', default_value='false',
                               description='run gz server only (no GUI) for display-less hosts'),
+        DeclareLaunchArgument('render_engine', default_value='ogre',
+                              description='Render engine for BOTH the GUI and the server-side '
+                                          'sensors: ogre (Ogre 1.x, GLX — works on headless '
+                                          'Xvnc) or ogre2 (Ogre-Next, EGL — needs a real GPU)'),
         gz,
         robot_state_publisher,
         spawn,
