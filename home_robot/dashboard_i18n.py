@@ -36,6 +36,15 @@ TRANSLATIONS = {
     'Ταχύτητα':          ('Speed', 'Geschwindigkeit'),
     '🔍 Εντοπισμός':     ('🔍 Localize', '🔍 Lokalisieren'),
     '✕ Ακύρωση στόχου':  ('✕ Cancel goal', '✕ Ziel abbrechen'),
+    '⌨️ Και από πληκτρολόγιο: βελάκια ή WASD (κράτα πατημένο), space = στοπ. '
+    'Αφήνοντας το πλήκτρο σταματά· αν χαθεί το tab ή το δίκτυο, η βάση σταματά '
+    'μόνη της σε 0.25s.':
+        ('⌨️ Keyboard too: arrows or WASD (hold them down), space = stop. '
+         'Releasing the key stops the robot; if the tab or the network is lost, '
+         'the base stops by itself within 0.25 s.',
+         '⌨️ Auch per Tastatur: Pfeiltasten oder WASD (gedrückt halten), Leertaste '
+         '= Stopp. Loslassen stoppt; geht der Tab oder das Netz verloren, stoppt '
+         'die Basis nach 0,25 s von selbst.'),
 
     # ── camera pane ───────────────────────────────────────────────────────
     'Τι βλέπει':         ('What it sees', 'Was es sieht'),
@@ -65,8 +74,77 @@ TRANSLATIONS = {
         ('Torque is about to be cut — the arm will drop. Are you holding it?',
          'Das Drehmoment wird abgeschaltet — der Arm fällt. Hältst du ihn?'),
 
+    # ── IMU pane (BNO085) ─────────────────────────────────────────────────
+    # 'IMU' and 'Quaternion w/x/y/z' are deliberately absent: they carry no
+    # Greek, so the extractor never sees them and an entry here would be dead.
+    'Προσανατολισμός':   ('Orientation', 'Ausrichtung'),
+    'Yaw (στροφή)':      ('Yaw (turn)', 'Gierwinkel (Drehung)'),
+    'Pitch (μύτη)':      ('Pitch (nose)', 'Nickwinkel'),
+    'Roll (κλίση)':      ('Roll (tilt)', 'Rollwinkel'),
+    'Ρυθμός στροφής':    ('Turn rate', 'Drehrate'),
+    'Συχνότητα':         ('Rate', 'Frequenz'),
+    'Ακατέργαστες τιμές BNO085': ('Raw BNO085 values', 'BNO085-Rohwerte'),
+    'Γυροσκόπιο X/Y/Z':  ('Gyroscope X/Y/Z', 'Gyroskop X/Y/Z'),
+    'Επιτάχυνση X/Y/Z':  ('Acceleration X/Y/Z', 'Beschleunigung X/Y/Z'),
+    'Θέση στο ρομπότ':   ('Mounting', 'Einbau am Roboter'),
+    'χωρίς σήμα':        ('no signal', 'kein Signal'),
+    'ΝΕΚΡΟ':             ('DEAD', 'TOT'),
+    'ΓΥΡΟΣΚΟΠΙΟ ΝΕΚΡΟ':  ('GYRO DEAD', 'GYROSKOP TOT'),
+    'εντάξει':           ('ok', 'ok'),
+    'σταθερά 0 ενώ στρίβει': ('stuck at 0 while turning',
+                              'konstant 0 während der Drehung'),
+    'ακίνητο':           ('at rest', 'in Ruhe'),
+    'δεν στέλνεται (ανενεργό report)':
+        ('not streamed (report disabled)', 'wird nicht gesendet (Report aus)'),
+    '‼️ ΣΧΕΤΙΚΗ πυξίδα, όχι Βορράς. Το firmware στέλνει GAME_ROTATION_VECTOR — '
+    'σύντηξη γυροσκοπίου και επιταχυνσιομέτρου χωρίς το μαγνητόμετρο, επίτηδες: '
+    'μέσα στο σπίτι οι κινητήρες DC της Roomba και τα μέταλλα διέλυαν την απόλυτη '
+    'γωνία, ο EKF γύριζε και το AMCL δεν κρατούσε σύγκλιση. Το 0° είναι τυχαία '
+    'κατεύθυνση σε κάθε boot. Για πλοήγηση δεν χρειάζεται αληθινός Βορράς — μόνο '
+    'σταθερή σχετική γωνία, και το AMCL διορθώνει τη μικρή απόκλιση με scan matching.':
+        ('‼️ RELATIVE compass, not North. The firmware sends GAME_ROTATION_VECTOR '
+         '— gyro and accelerometer fusion without the magnetometer, deliberately: '
+         'indoors the Roomba\'s DC motors and nearby metal wrecked the absolute '
+         'heading, the EKF rotated and AMCL could not stay converged. 0° is an '
+         'arbitrary direction on every boot. Navigation does not need true north '
+         '— only a stable relative heading, and AMCL corrects the slow drift by '
+         'scan matching.',
+         '‼️ RELATIVER Kompass, nicht Norden. Die Firmware sendet '
+         'GAME_ROTATION_VECTOR — Fusion aus Gyroskop und Beschleunigungsmesser '
+         'ohne Magnetometer, mit Absicht: drinnen zerstörten die DC-Motoren des '
+         'Roomba und Metall die absolute Richtung, der EKF drehte sich und AMCL '
+         'blieb nicht konvergent. 0° ist bei jedem Start eine zufällige Richtung. '
+         'Die Navigation braucht keinen echten Norden — nur eine stabile relative '
+         'Richtung, und AMCL korrigiert die Drift per Scan-Matching.'),
+    'Το BNO085 μπορεί να δώσει και μαγνητόμετρο, γραμμική επιτάχυνση, βαρύτητα, '
+    'βήματα και ταξινόμηση κίνησης — κανένα δεν είναι ενεργό. Το firmware '
+    'ενεργοποιεί μόνο δύο reports (γωνία και γυροσκόπιο), γιατί όταν ζητούνται '
+    'πολλά μαζί το I2C ρίχνει σιωπηλά μερικά — έτσι είχε «πεθάνει» το γυροσκόπιο. '
+    'Η επιτάχυνση στέλνεται ως σταθερό 0.':
+        ('The BNO085 can also report magnetometer, linear acceleration, gravity, '
+         'step count and activity classification — none of them are enabled. The '
+         'firmware turns on only two reports (orientation and gyro), because '
+         'requesting several at once makes the I2C bus drop some silently — that '
+         'is how the gyro once "died". Acceleration is streamed as a constant 0.',
+         'Das BNO085 kann auch Magnetometer, lineare Beschleunigung, Schwerkraft, '
+         'Schritte und Bewegungsklassifikation liefern — nichts davon ist aktiv. '
+         'Die Firmware aktiviert nur zwei Reports (Lage und Gyroskop), denn bei '
+         'mehreren gleichzeitig verwirft der I2C-Bus stillschweigend einige — so '
+         '„starb“ einmal das Gyroskop. Die Beschleunigung wird als konstante 0 '
+         'gesendet.'),
+    'BNO085 σε ESP32 (CH340) στο /dev/imu, τοποθετημένο ανάποδα· nRESET στο '
+    'GPIO18 ώστε να επανέρχεται μόνο του όταν κολλήσει το πρωτόκολλο. Τροφοδοτεί '
+    'τον EKF μαζί με το odometry.':
+        ('BNO085 on an ESP32 (CH340) at /dev/imu, mounted UPSIDE-DOWN; nRESET on '
+         'GPIO18 so it recovers by itself when the protocol wedges. It feeds the '
+         'EKF together with the odometry.',
+         'BNO085 an einem ESP32 (CH340) unter /dev/imu, KOPFÜBER montiert; nRESET '
+         'an GPIO18, damit es sich selbst erholt, wenn das Protokoll hängt. Es '
+         'speist zusammen mit der Odometrie den EKF.'),
+
     # ── vacuum base pane ──────────────────────────────────────────────────
     'Βάση Roomba 879':   ('Roomba 879 base', 'Roomba-879-Basis'),
+    'Κατάσταση':         ('State', 'Zustand'),
     'Σύνδεση':           ('Link', 'Verbindung'),
     'Προφυλακτήρας':     ('Bumper', 'Stoßfänger'),
     'Γκρεμός':           ('Cliff', 'Absturzkante'),
@@ -80,6 +158,7 @@ TRANSLATIONS = {
     'ΝΑΙ':               ('YES', 'JA'),
     'όχι':               ('no', 'nein'),
     'ΚΟΙΜΑΤΑΙ':          ('ASLEEP', 'SCHLÄFT'),
+    'ΞΥΠΝΙΑ':            ('AWAKE', 'WACH'),
     'ζητά':              ('wants', 'verlangt'),
     '‼️ Δεν εμφανίζεται μπαταρία: το σασί τρέφεται από powerbank και τα πεδία '
     'φόρτισης του OI δίνουν σκουπίδια. Αν το «Σύνδεση» ξεπεράσει τα ~3s, η '

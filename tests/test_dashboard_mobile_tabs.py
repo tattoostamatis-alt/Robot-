@@ -15,6 +15,7 @@ tapping every tab in WebKit at 428x746, 390x664 and 320x568.
 
     cd ~/robot_ws/src/home_robot && python3 -m pytest tests/test_dashboard_mobile_tabs.py -q
 """
+import math
 import re
 from pathlib import Path
 
@@ -51,15 +52,32 @@ def test_the_bar_can_grow_to_a_second_row():
         'a fixed height clips the wrapped row out of sight'
 
 
-def test_the_tabs_are_sized_to_fit_six_per_row():
-    """12 tabs / 2 rows. A wider basis reflows to 5 and leaves a ragged row;
-    a narrower one fits 7 and wastes the wrap."""
+def _tab_count():
+    m = re.search(r'const TABS = \[(.*?)\];', _SRC, re.S)
+    assert m, 'the TABS table is gone'
+    return len(re.findall(r"\['", m.group(1)))
+
+
+def test_the_tabs_are_sized_to_fill_two_even_rows():
+    """Derived from the tab count rather than hard-coded, so adding a tab makes
+    this fail loudly with the basis to use instead of silently stranding one
+    tab alone on a third row (which is what 13 tabs at the old 16.66% did)."""
     tab = _rule('.tab')
     m = re.search(r'flex:\s*1\s+0\s+([\d.]+)%', tab)
     assert m, '.tab no longer declares a flex basis, so widths are content-driven'
     basis = float(m.group(1))
-    assert 15.0 <= basis <= 17.0, \
-        f'basis {basis}% does not give six per row'
+
+    n = _tab_count()
+    per_row = math.ceil(n / 2)          # two rows, the first one no fatter
+    want = 100.0 / per_row
+    assert abs(basis - want) < 0.6, (
+        f'{n} tabs want {per_row} per row (basis ~{want:.2f}%), not {basis}% — '
+        f'at {basis}% they wrap {math.floor(100 / basis)} per row')
+
+    # The wrap is only worth having while a row still fits a phone: below ~45px
+    # per cell on a 320pt iPhone SE the icon and label collide.
+    assert 320 / per_row >= 45, \
+        f'{per_row} tabs per row is {320/per_row:.0f}pt on an iPhone SE — too narrow'
 
 
 def test_long_labels_cannot_widen_a_cell():
@@ -74,10 +92,13 @@ def test_long_labels_cannot_widen_a_cell():
 
 def test_every_tab_is_still_in_the_bar():
     """The fix must not have been "show fewer tabs on mobile"."""
+    # Every tab in the table must also have a pane to show, or tapping it blanks
+    # the page — the failure mode a bare count check would not catch.
     m = re.search(r'const TABS = \[(.*?)\];', _SRC, re.S)
-    assert m, 'the TABS table is gone'
-    assert len(re.findall(r"\['", m.group(1))) == 12, \
-        'the tab count changed — re-check that six-per-row still gives two even rows'
+    ids = re.findall(r"\['(\w+)'", m.group(1))
+    assert len(ids) >= 12, 'tabs were removed rather than made to fit'
+    for tab_id in ids:
+        assert f'id="p-{tab_id}"' in _SRC, f'tab {tab_id!r} has no pane'
     assert 'display:none' not in _rule('.tab'), 'tabs are being hidden on mobile'
 
 

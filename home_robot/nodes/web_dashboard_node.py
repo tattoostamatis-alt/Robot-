@@ -51,7 +51,7 @@ from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
 from rcl_interfaces.srv import SetParameters
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
-from sensor_msgs.msg import Image, JointState, LaserScan, PointCloud2
+from sensor_msgs.msg import Image, Imu, JointState, LaserScan, PointCloud2
 from std_msgs.msg import Bool, Float32, String
 from std_srvs.srv import Empty
 
@@ -271,6 +271,30 @@ class DashboardNode(Node):
         self.create_subscription(LaserScan, '/scan', self._cb_scan, 5)
         self.create_subscription(Path, '/plan', self._cb_plan, 5)
         self.create_subscription(Odometry, '/odom', self._cb_odom, 5)
+
+        # ── IMU (BNO085) ────────────────────────────────────────────────────
+        # BEST_EFFORT: the IMU is a 10 Hz firehose of "current truth" — a
+        # retransmitted stale sample is worthless, dropping it is correct.
+        self._imu_n     = 0        # samples seen, for the measured rate
+        self._imu_t0    = time.monotonic()
+        self._imu_hz    = 0.0
+        self._imu_last  = 0.0      # last broadcast, for the 5 Hz throttle
+        self._imu_seen  = 0.0      # monotonic stamp of the newest sample
+        # Consecutive gx=gy=gz==0 samples seen WHILE THE ROBOT IS TURNING. A
+        # standing robot reads exact zeros all the time (the BNO085 quantises
+        # small rates straight to 0), so counting them unconditionally cried
+        # "GYRO DEAD" at a robot parked on the carpet — measured on the live
+        # stream before this was qualified. Only a turn that produces no yaw
+        # rate is evidence of the real failure.
+        self._gyro_zero = 0
+        self._turning   = False    # set from /odom, see _cb_odom
+        self.create_subscription(
+            Imu, '/imu/data', self._cb_imu,
+            QoSProfile(depth=1, reliability=QoSReliabilityPolicy.BEST_EFFORT))
+        # Fires even when /imu/data goes silent, which is the case that matters:
+        # a dead BNO085 is SILENT, so a callback-driven panel would just freeze
+        # on the last good reading and look healthy.
+        self.create_timer(1.0, self._imu_health)
         # room_markers publishes this latched (TRANSIENT_LOCAL) precisely so a
         # late subscriber gets the current room; asking for volatile threw that
         # away, so the badge stayed '—' until the robot next changed room.
@@ -333,7 +357,19 @@ class DashboardNode(Node):
         self.create_subscription(String, '/situation_context', self._cb_situation, 10)
 
         # ── Publishers ──────────────────────────────────────────────────────
-        self._vel_pub  = self.create_publisher(Twist, '/cmd_vel', 10)
+        # ‼️ cmd_vel_safe, NOT cmd_vel — the D-pad published to /cmd_vel and the
+        # robot never moved, because nothing on this graph relays it: Nav2 drives
+        # cmd_vel_nav -> velocity_smoother -> cmd_vel_smoothed -> collision_monitor
+        # -> cmd_vel_safe, and roomba_driver subscribes to cmd_vel_safe alone.
+        # /cmd_vel had four publishers and no subscriber at all. This is the same
+        # wiring the PS5 teleop already uses (localize.launch.py remaps its
+        # cmd_vel -> cmd_vel_safe), so the web D-pad now takes the identical path.
+        #
+        # It does bypass collision_monitor, exactly as the joystick does. What
+        # still protects it: roomba_driver's own bumper/cliff/wheel-drop stops,
+        # its 0.25 s stale-command watchdog (so a browser that dies mid-press
+        # coasts to a stop rather than running away), and the latched e-stop.
+        self._vel_pub  = self.create_publisher(Twist, '/cmd_vel_safe', 10)
         self._goal_pub = self.create_publisher(PoseStamped, '/goal_pose', 10)
         self._speech_pub = self.create_publisher(String, '/speech_text', 10)
         self._say_pub  = self.create_publisher(String, '/speech_response', 10)
@@ -438,11 +474,90 @@ class DashboardNode(Node):
         })
 
     def _cb_odom(self, msg: Odometry):
+        wz = msg.twist.twist.angular.z
+        # Well clear of the 879's ~0.31 rad/s rotation floor, so this is only
+        # true when the wheels are genuinely turning the robot.
+        self._turning = abs(wz) > 0.15
         self._state.broadcast({
             'type': 'odom',
             'vx': round(msg.twist.twist.linear.x, 3),
-            'wz': round(msg.twist.twist.angular.z, 3),
+            'wz': round(wz, 3),
         })
+
+    def _cb_imu(self, msg: Imu):
+        """BNO085 -> the IMU tab: attitude, turn rate, and honest health.
+
+        ‼️ Two things this panel must NOT pretend about, both by design in
+        bno085_imu.ino:
+          - The heading is a GAME rotation vector: gyro+accel fusion with the
+            magnetometer deliberately left out (indoors the Roomba's DC motors
+            wrecked it). So yaw=0 is an arbitrary direction chosen at each boot
+            — a *relative* compass, never magnetic north.
+          - ax/ay/az are streamed as literal 0.0: SH2_LINEAR_ACCELERATION is
+            not enabled, because imu0_config leaves accel out of the EKF. The
+            panel says "not streamed" rather than drawing three zeroes as if
+            the robot were perfectly still.
+        """
+        now = time.monotonic()
+        self._imu_n += 1
+        self._imu_seen = now
+
+        q = msg.orientation
+        # ZYX Euler from the quaternion. atan2/asin rather than a matrix so a
+        # denormalised quaternion off a garbled serial line cannot raise.
+        sinr = 2 * (q.w * q.x + q.y * q.z)
+        cosr = 1 - 2 * (q.x * q.x + q.y * q.y)
+        roll = math.atan2(sinr, cosr)
+        sinp = max(-1.0, min(1.0, 2 * (q.w * q.y - q.z * q.x)))
+        pitch = math.asin(sinp)
+        siny = 2 * (q.w * q.z + q.x * q.y)
+        cosy = 1 - 2 * (q.y * q.y + q.z * q.z)
+        yaw = math.atan2(siny, cosy)
+
+        g = msg.angular_velocity
+        a = msg.linear_acceleration
+        # The firmware's own failure mode: enabling several SH2 reports
+        # back-to-back silently drops some over the flaky I2C bus, and the
+        # symptom is a gyro pinned at exactly 0 while the quaternion keeps
+        # updating — the EKF then fights every turn with a constant 0 yaw rate.
+        # Only counted while the wheels are actually turning: at rest exact
+        # zeros are normal quantisation, not a fault.
+        if g.x == 0.0 and g.y == 0.0 and g.z == 0.0:
+            if self._turning:
+                self._gyro_zero += 1
+        else:
+            self._gyro_zero = 0
+
+        if now - self._imu_last < 0.2:   # 5 Hz is plenty for a phone
+            return
+        self._imu_last = now
+
+        self._state.broadcast({
+            'type':  'imu',
+            'roll':  round(math.degrees(roll), 1),
+            'pitch': round(math.degrees(pitch), 1),
+            'yaw':   round(math.degrees(yaw), 1),
+            'quat':  [round(q.w, 4), round(q.x, 4), round(q.y, 4), round(q.z, 4)],
+            'gx':    round(g.x, 4), 'gy': round(g.y, 4), 'gz': round(g.z, 4),
+            'ax':    round(a.x, 3), 'ay': round(a.y, 3), 'az': round(a.z, 3),
+            'hz':    round(self._imu_hz, 1),
+            # ~1 s of turning (the stream runs ~19 Hz) with no yaw rate at all.
+            'gyro_dead': self._gyro_zero > 20,
+            'turning': self._turning,
+            'alive': True,
+        })
+
+    def _imu_health(self):
+        """Measured rate + the silent-IMU alarm."""
+        now = time.monotonic()
+        dt = now - self._imu_t0
+        if dt > 0:
+            self._imu_hz = self._imu_n / dt
+        self._imu_n, self._imu_t0 = 0, now
+        # Nothing for 2 s. imu_node reopens the serial port on error, so this
+        # covers both a wedged BNO085 and a dead imu_node.
+        if now - self._imu_seen > 2.0:
+            self._state.broadcast({'type': 'imu', 'alive': False, 'hz': 0.0})
 
     def _cb_camera(self, msg: Image):
         try:
@@ -1372,6 +1487,9 @@ button{font:inherit;color:inherit}
   align-items:center;justify-content:center;cursor:pointer;font-size:19px;
   user-select:none;-webkit-user-select:none;touch-action:none}
 .dbtn:active{background:#3d3d47}
+/* Keyboard driving has no :active, so a held key gets its own lit state —
+   without it there is no feedback that the arrow key was even received. */
+.dbtn.lit{background:#1d4ed8;border-color:#3b82f6;color:#fff}
 .dbtn.ghost{background:transparent;border:none;pointer-events:none}
 #bstop{background:#7f1d1d;border-color:#b91c1c;font-size:12px;font-weight:700;color:#fecaca}
 /* ── Arm ── */
@@ -1400,13 +1518,16 @@ button{font:inherit;color:inherit}
      only 7 of the 12 tabs fit — Gazebo, Σύστημα, Log and Ρυθμίσεις were simply
      unreachable, and the dashboard read as "it only shows the first page"
      (reported 2026-08-02, reproduced in WebKit at 428pt).
-     Six per row costs ~40px of height and needs no gesture to discover. */
+     Two rows cost ~40px of height and need no gesture to discover.
+     The basis is ceil(tabs/2) per row, so both rows stay full: at 12 tabs that
+     was 16.66% (6+6); adding the IMU tab made it 13, where 16.66% would wrap
+     6+6+1 and strand one tab alone on a third row. 14.28% gives 7+6. */
   /* The home indicator sits over the last row on a notched iPhone; without the
      inset the bottom row's labels are half-covered by it. */
   #tabs{width:100%;height:auto;display:flex;flex-wrap:wrap;padding:0;
     border-right:none;border-top:1px solid #2c2c32;
     padding-bottom:env(safe-area-inset-bottom,0px)}
-  .tab{flex:1 0 16.66%;flex-direction:column;gap:2px;padding:6px 2px;
+  .tab{flex:1 0 14.28%;flex-direction:column;gap:2px;padding:6px 2px;
     font-size:9.5px;border-left:none;border-top:3px solid transparent;
     justify-content:center;text-align:center;min-width:0}
   /* Long labels (Βραχίονας, Ρυθμίσεις) must shrink, not widen the cell and
@@ -1459,6 +1580,9 @@ button{font:inherit;color:inherit}
             <button class="btn" id="b-xnav">✕ Ακύρωση στόχου</button>
           </div>
         </div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          ⌨️ Και από πληκτρολόγιο: βελάκια ή WASD (κράτα πατημένο), space = στοπ. Αφήνοντας το πλήκτρο σταματά· αν χαθεί το tab ή το δίκτυο, η βάση σταματά μόνη της σε 0.25s.
+        </p>
       </div>
     </section>
 
@@ -1522,6 +1646,7 @@ button{font:inherit;color:inherit}
       <div class="card">
         <h3>Βάση Roomba 879</h3>
         <div class="grid2">
+          <span class="k">Κατάσταση</span><span class="v" id="r-awake">—</span>
           <span class="k">Σύνδεση</span><span class="v" id="r-link">—</span>
           <span class="k">OI mode</span><span class="v" id="r-mode">—</span>
           <span class="k">Προφυλακτήρας</span><span class="v" id="r-bump">—</span>
@@ -1542,6 +1667,44 @@ button{font:inherit;color:inherit}
           ‼️ Δεν εμφανίζεται μπαταρία: το σασί τρέφεται από powerbank και τα πεδία
           φόρτισης του OI δίνουν σκουπίδια. Αν το «Σύνδεση» ξεπεράσει τα ~3s, η
           βάση κοιμάται — τότε κάθε πρόβλημα πλοήγησης είναι ψεύτικο.
+        </p>
+      </div>
+    </section>
+
+    <!-- ── IMU (BNO085) ────────────────────────────────────────── -->
+    <section class="pane" id="p-imu">
+      <div class="card">
+        <h3>Προσανατολισμός <span class="badge" id="i-health">—</span></h3>
+        <div class="row" style="align-items:center;gap:18px;flex-wrap:wrap">
+          <canvas id="imu-rose" width="200" height="200"
+                  style="width:200px;height:200px;flex:0 0 auto"></canvas>
+          <div class="grid2" style="flex:1;min-width:190px">
+            <span class="k">Yaw (στροφή)</span><span class="v" id="i-yaw">—</span>
+            <span class="k">Pitch (μύτη)</span><span class="v" id="i-pitch">—</span>
+            <span class="k">Roll (κλίση)</span><span class="v" id="i-roll">—</span>
+            <span class="k">Ρυθμός στροφής</span><span class="v" id="i-gz">—</span>
+            <span class="k">Συχνότητα</span><span class="v" id="i-hz">—</span>
+          </div>
+        </div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:12px;line-height:1.6">
+          ‼️ ΣΧΕΤΙΚΗ πυξίδα, όχι Βορράς. Το firmware στέλνει GAME_ROTATION_VECTOR — σύντηξη γυροσκοπίου και επιταχυνσιομέτρου χωρίς το μαγνητόμετρο, επίτηδες: μέσα στο σπίτι οι κινητήρες DC της Roomba και τα μέταλλα διέλυαν την απόλυτη γωνία, ο EKF γύριζε και το AMCL δεν κρατούσε σύγκλιση. Το 0° είναι τυχαία κατεύθυνση σε κάθε boot. Για πλοήγηση δεν χρειάζεται αληθινός Βορράς — μόνο σταθερή σχετική γωνία, και το AMCL διορθώνει τη μικρή απόκλιση με scan matching.
+        </p>
+      </div>
+      <div class="card">
+        <h3>Ακατέργαστες τιμές BNO085</h3>
+        <div class="grid2">
+          <span class="k">Γυροσκόπιο X/Y/Z</span><span class="v" id="i-gyro">—</span>
+          <span class="k">Επιτάχυνση X/Y/Z</span><span class="v" id="i-acc">—</span>
+          <span class="k">Quaternion w/x/y/z</span><span class="v" id="i-quat">—</span>
+        </div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          Το BNO085 μπορεί να δώσει και μαγνητόμετρο, γραμμική επιτάχυνση, βαρύτητα, βήματα και ταξινόμηση κίνησης — κανένα δεν είναι ενεργό. Το firmware ενεργοποιεί μόνο δύο reports (γωνία και γυροσκόπιο), γιατί όταν ζητούνται πολλά μαζί το I2C ρίχνει σιωπηλά μερικά — έτσι είχε «πεθάνει» το γυροσκόπιο. Η επιτάχυνση στέλνεται ως σταθερό 0.
+        </p>
+      </div>
+      <div class="card">
+        <h3>Θέση στο ρομπότ</h3>
+        <p style="font-size:11.5px;color:#71717a;line-height:1.6">
+          BNO085 σε ESP32 (CH340) στο /dev/imu, τοποθετημένο ανάποδα· nRESET στο GPIO18 ώστε να επανέρχεται μόνο του όταν κολλήσει το πρωτόκολλο. Τροφοδοτεί τον EKF μαζί με το odometry.
         </p>
       </div>
     </section>
@@ -1631,7 +1794,12 @@ const TOKEN_QS   = __TOKEN_QS__;    // '' when auth is disabled
 const ARM_LIMITS = __ARM_LIMITS__;
 const ARM_JOINTS = __ARM_JOINTS__;
 const HAS_NOVNC  = __HAS_NOVNC__;
-const LIN = 0.10, ANG = 0.10;
+// ‼️ ANG was 0.10, which is BELOW the 879's ~0.31 rad/s rotation floor — the
+// wheels physically do not turn under it, so ◄/► sent a twist that the base
+// swallowed in silence. 0.60 rad/s (~34 deg/s) is a deliberate half of the
+// PS5's 1.20: a phone has no analogue stick, so the web D-pad is for nudging
+// into position, not for crossing the room. See teleop_twist_joy_ps5.yaml.
+const LIN = 0.10, ANG = 0.60;
 // ‼️ Must match bringup.launch.py's tf_base_laser: x=0, yaw=pi. This said 0.0
 // and drew every scan point mirrored through the robot, so the dots never
 // landed on the walls and the dashboard looked like a localization failure
@@ -1652,6 +1820,7 @@ const TABS = [
   ['moveit', '🎯', 'MoveIt'],
   ['arm',    '🦾', 'Βραχίονας'],
   ['base',   '🧹', 'Σκούπα'],
+  ['imu',    '🧭', 'IMU'],
   ['llm',    '💬', 'Φωνή/LLM'],
   ['gazebo', '🌍', 'Gazebo'],
   ['sys',    '📊', 'Σύστημα'],
@@ -1961,6 +2130,14 @@ const HANDLERS = {
     $('r-link').innerHTML = age === null || age === undefined
       ? '<span class="pill">—</span>'
       : `<span class="pill ${age<3?'ok':'bad'}">${age.toFixed(1)}s ${age<3?'':'· '+t('ΚΟΙΜΑΤΑΙ')}</span>`;
+    // The one-glance answer to "is the base actually awake?". link_age alone
+    // needed decoding; an OI mode of passive/off means asleep even when the
+    // serial link is answering, so both have to agree before we say awake.
+    const awake = age !== null && age !== undefined && age < 3
+                  && (m.oi_mode === 2 || m.oi_mode === 3);
+    $('r-awake').innerHTML = age === null || age === undefined
+      ? '<span class="pill">—</span>'
+      : `<span class="pill ${awake?'ok':'bad'}">${awake?'✅ '+t('ΞΥΠΝΙΑ'):'💤 '+t('ΚΟΙΜΑΤΑΙ')}</span>`;
     $('r-mode').innerHTML = `<span class="pill ${m.oi_mode===3||m.oi_mode===2?'ok':'warn'}">`
       + (OI[m.oi_mode] || '—') + `</span> <span style="color:#52525b">${t('ζητά')} ${m.oi_mode_want}</span>`;
     $('r-bump').innerHTML  = flag(m.bump, true);
@@ -1969,6 +2146,7 @@ const HANDLERS = {
     $('r-motors').textContent = `${m.left_mm_s} / ${m.right_mm_s} mm/s`;
     $('r-dock').innerHTML  = flag(m.docking, false);
   },
+  imu(m){ onImu(m); },
   dock(m){ $('r-dockst').textContent = m.status || '—'; },
   estop(m){
     estop = !!m.on;
@@ -2046,6 +2224,135 @@ function bindDrive(id,v,w){
 }
 bindDrive('bf', LIN, 0); bindDrive('bb',-LIN, 0);
 bindDrive('bl', 0, ANG); bindDrive('br', 0,-ANG);
+
+// ── IMU tab ────────────────────────────────────────────────────────────────
+// The rose is drawn from the fused yaw and is deliberately labelled with a
+// relative 0°, not N/S/E/W: there is no magnetometer in the fix (see the note
+// in the pane), and cardinal letters would be a confident lie.
+function drawRose(yawDeg, alive){
+  const c = $('imu-rose'); if(!c) return;
+  const g = c.getContext('2d'), R = 100;
+  g.clearRect(0,0,200,200);
+  g.translate(R,R);
+
+  g.strokeStyle = '#3a3a44'; g.lineWidth = 2;
+  g.beginPath(); g.arc(0,0,88,0,Math.PI*2); g.stroke();
+
+  // Ticks every 30°, drawn in the fixed frame so the needle is what moves.
+  g.strokeStyle = '#52525b'; g.lineWidth = 1;
+  for(let a=0; a<360; a+=30){
+    const r = (a%90===0) ? 12 : 6, t = (a-90)*Math.PI/180;
+    g.beginPath();
+    g.moveTo(Math.cos(t)*88, Math.sin(t)*88);
+    g.lineTo(Math.cos(t)*(88-r), Math.sin(t)*(88-r));
+    g.stroke();
+  }
+  g.fillStyle = '#71717a'; g.font = '11px system-ui'; g.textAlign = 'center';
+  g.fillText('0°',   0, -70); g.fillText('90°',  70,   4);
+  g.fillText('180°', 0,  78); g.fillText('-90°',-70,   4);
+
+  if(alive){
+    // Screen y grows downward, so -90° maps yaw=0 to straight up and the
+    // needle turns counter-clockwise for a positive (left) yaw, matching REP-103.
+    const t = (-yawDeg - 90) * Math.PI/180;
+    g.strokeStyle = '#3b82f6'; g.lineWidth = 4; g.lineCap = 'round';
+    g.beginPath(); g.moveTo(0,0);
+    g.lineTo(Math.cos(t)*72, Math.sin(t)*72); g.stroke();
+    g.fillStyle = '#3b82f6';
+    g.beginPath(); g.arc(0,0,6,0,Math.PI*2); g.fill();
+    g.fillStyle = '#e4e4e7'; g.font = 'bold 20px system-ui';
+    g.fillText(yawDeg.toFixed(0)+'°', 0, 38);
+  } else {
+    g.fillStyle = '#71717a'; g.font = '13px system-ui';
+    g.fillText(t('χωρίς σήμα'), 0, 5);
+  }
+  g.setTransform(1,0,0,1,0,0);
+}
+
+function onImu(m){
+  const pill = (cls, txt) => `<span class="pill ${cls}">${txt}</span>`;
+  if(!m.alive){
+    // A dead BNO085 is SILENT — it does not report an error, it just stops. So
+    // the panel must say so loudly instead of freezing on the last good frame.
+    $('i-health').innerHTML = pill('bad', t('ΝΕΚΡΟ'));
+    ['i-yaw','i-pitch','i-roll','i-gz','i-gyro','i-acc','i-quat']
+      .forEach(id => { const e=$(id); if(e) e.textContent='—'; });
+    $('i-hz').textContent = '0 Hz';
+    drawRose(0, false);
+    return;
+  }
+  $('i-health').innerHTML = m.gyro_dead
+    ? pill('bad', t('ΓΥΡΟΣΚΟΠΙΟ ΝΕΚΡΟ'))
+    : pill('ok', t('εντάξει'));
+  $('i-yaw').textContent   = m.yaw.toFixed(1)+'°';
+  $('i-pitch').textContent = m.pitch.toFixed(1)+'°';
+  $('i-roll').textContent  = m.roll.toFixed(1)+'°';
+  $('i-gz').textContent    = m.gz.toFixed(3)+' rad/s ('
+                           + (m.gz*180/Math.PI).toFixed(0)+'°/s)';
+  $('i-hz').textContent    = m.hz.toFixed(1)+' Hz';
+  // At rest the BNO085 quantises small rates to exact zeros, so three zeroes
+  // are only worth flagging while the robot is actually turning.
+  const zeroGyro = (m.gx===0 && m.gy===0 && m.gz===0);
+  $('i-gyro').textContent  = `${m.gx.toFixed(3)} / ${m.gy.toFixed(3)} / ${m.gz.toFixed(3)}`
+                           + (m.gyro_dead ? '  ⚠ '+t('σταθερά 0 ενώ στρίβει')
+                              : (zeroGyro && !m.turning ? '  · '+t('ακίνητο') : ''));
+  // Not "0.0 / 0.0 / 0.0": the firmware never enables the accel report, so a
+  // zero here is an absent reading, not a stationary robot.
+  $('i-acc').textContent   = (m.ax===0 && m.ay===0 && m.az===0)
+    ? t('δεν στέλνεται (ανενεργό report)')
+    : `${m.ax.toFixed(2)} / ${m.ay.toFixed(2)} / ${m.az.toFixed(2)} m/s²`;
+  $('i-quat').textContent  = m.quat.map(v=>v.toFixed(3)).join(' / ');
+  drawRose(m.yaw, true);
+}
+
+// ── keyboard driving ───────────────────────────────────────────────────────
+// There were no key bindings at all — the D-pad was mouse/touch only, so on a
+// laptop "the keys don't work" was literally true. Arrows + WASD, held down.
+//
+// Auto-repeat matters here: holding a key fires keydown over and over, and
+// restarting the 100 ms timer on each repeat would leave a stale interval
+// running, so e.repeat is ignored. Release (or losing focus, or the tab going
+// to the background) stops the robot — the driver's 0.25 s watchdog is the
+// backstop if even that is missed.
+const KEYS = {
+  ArrowUp:[LIN,0], ArrowDown:[-LIN,0], ArrowLeft:[0,ANG], ArrowRight:[0,-ANG],
+  w:[LIN,0], s:[-LIN,0], a:[0,ANG], d:[0,-ANG],
+  W:[LIN,0], S:[-LIN,0], A:[0,ANG], D:[0,-ANG],
+};
+let keyHeld = null;
+// Typing "sad" into the chat box must not drive the robot across the room.
+const typing = e => {
+  const n = e.target;
+  return n && (n.tagName === 'INPUT' || n.tagName === 'TEXTAREA' || n.isContentEditable);
+};
+document.addEventListener('keydown', e=>{
+  if(typing(e) || e.ctrlKey || e.metaKey || e.altKey) return;
+  if(e.key === ' '){                       // space = panic stop
+    e.preventDefault(); keyHeld=null; stopDrive(); send({type:'stop'}); return;
+  }
+  const k = KEYS[e.key];
+  if(!k) return;
+  e.preventDefault();                      // arrows must not scroll the pane
+  if(e.repeat && keyHeld === e.key) return;
+  keyHeld = e.key;
+  startDrive(k[0], k[1]);
+  const el = $({ArrowUp:'bf',w:'bf',W:'bf', ArrowDown:'bb',s:'bb',S:'bb',
+                ArrowLeft:'bl',a:'bl',A:'bl', ArrowRight:'br',d:'br',D:'br'}[e.key]);
+  if(el) el.classList.add('lit');
+});
+document.addEventListener('keyup', e=>{
+  if(!KEYS[e.key]) return;
+  if(keyHeld === e.key){ keyHeld=null; stopDrive(); }
+  document.querySelectorAll('.dbtn.lit').forEach(b=>b.classList.remove('lit'));
+});
+// A key can be held while the tab is switched away, in which case keyup never
+// arrives and the robot would drive on with nobody watching it.
+const releaseKeys = ()=>{
+  if(keyHeld){ keyHeld=null; stopDrive(); }
+  document.querySelectorAll('.dbtn.lit').forEach(b=>b.classList.remove('lit'));
+};
+window.addEventListener('blur', releaseKeys);
+document.addEventListener('visibilitychange', ()=>{ if(document.hidden) releaseKeys(); });
 
 $('bstop').addEventListener('click',()=>{ stopDrive(); send({type:'stop'}); });
 $('b-loc').addEventListener('click',()=>send({type:'localize'}));
