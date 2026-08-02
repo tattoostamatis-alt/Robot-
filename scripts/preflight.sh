@@ -105,6 +105,31 @@ for pair in "map odom" "odom base_link" "base_link laser"; do
     fi
 done
 
+# ‼️ A transform with TWO publishers is worse than one that is missing: the
+# lookup keeps succeeding, and just returns whichever writer was last. Found
+# 2026-08-02 — an orphaned odom_tf_broadcaster from a Gazebo session was
+# fighting ekf_filter_node, so map→base_link swung 0.49 m and 14.6° with the
+# robot standing perfectly still. Every symptom pointed at the lidar ("the red
+# lines point somewhere else"), while /scan, /odom, the IMU and the laser TF
+# were all provably fine. Nothing else in this script would have caught it: the
+# node names differ, so the duplicate-node check above stays quiet.
+# Counting message rate does NOT work here (a single writer at 16 Hz looks like
+# two at 8), so name the culprits instead: odom->base_link has exactly one legal
+# owner, and which one depends on the mode.
+#   ekf_filter_node      — the real robot (bringup)
+#   odom_tf_broadcaster  — the Gazebo sim (sim.launch.py), which has no EKF
+# Both alive at once means a sim leftover survived, and the two disagree.
+ekf_n=$(pgrep -cf "[/ =]ekf_filter_node" || true)
+otb_n=$(pgrep -cf "[/ =]odom_tf_broadcaster" || true)
+if [ "${ekf_n:-0}" -ge 1 ] && [ "${otb_n:-0}" -ge 1 ]; then
+    bad "odom→base_link έχει ΔΥΟ publishers (ekf_filter_node + odom_tf_broadcaster)"
+    bad "  ↳ ορφανό από συνεδρία Gazebo· η πόζα θα χοροπηδά και το scan θα «δείχνει αλλού»"
+elif [ "${ekf_n:-0}" -ge 1 ] || [ "${otb_n:-0}" -ge 1 ]; then
+    ok "odom→base_link: ένας publisher"
+else
+    bad "odom→base_link: κανένας publisher (ούτε EKF ούτε odom_tf_broadcaster)"
+fi
+
 echo "── Nav2 lifecycle"
 NAV_OK=true
 for n in controller_server planner_server behavior_server velocity_smoother collision_monitor bt_navigator; do

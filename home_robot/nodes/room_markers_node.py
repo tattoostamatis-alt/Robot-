@@ -3,13 +3,22 @@
 
 Topics published:
   /room_markers   (MarkerArray)  — coloured spheres + labels in RViz
-  /current_room   (String)       — nearest room, latched; from map->base_link
-                                   (polled) or /amcl_pose, whichever arrives
+  /current_room   (String)       — the room the robot is IN, latched; from
+                                   map->base_link (polled) or /amcl_pose
+
+‼️ The room comes from maps/room_mask.png, not from the nearest waypoint.
+Waypoints are goals, not room centres, and several sit inside another room:
+`dock` and `dock_staging` are both painted saloni. Nearest-waypoint therefore
+reported "dock" for a robot standing correctly in the living room, which reads
+as a localization failure and sent a long 2026-08-02 debugging session chasing
+one that was not there. situational_awareness_node already did this properly;
+this node did not.
 """
 
 import math
 import os
 
+import numpy as np
 import yaml
 import rclpy
 import tf2_ros
@@ -17,8 +26,43 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseWithCovarianceStamped
+from nav_msgs.msg import OccupancyGrid
 from std_msgs.msg import String
 from visualization_msgs.msg import Marker, MarkerArray
+
+
+def _load_room_mask():
+    """maps/room_mask.png + room_colors.yaml, or (None, None) if unavailable."""
+    try:
+        from PIL import Image
+        pkg = get_package_share_directory('home_robot')
+        arr = np.array(Image.open(
+            os.path.join(pkg, 'maps', 'room_mask.png')).convert('RGBA'))
+        with open(os.path.join(pkg, 'maps', 'room_colors.yaml')) as f:
+            return arr, yaml.safe_load(f)
+    except Exception:
+        return None, None
+
+
+def _room_from_mask(x, y, mask, colours, map_info):
+    """Painted room at (x, y), or None where the mask says nothing."""
+    if mask is None or not colours or map_info is None:
+        return None
+    ox, oy, res = map_info
+    h, w = mask.shape[:2]
+    col = int((x - ox) / res)
+    row = h - 1 - int((y - oy) / res)      # mask is stored image-side up
+    if not (0 <= col < w and 0 <= row < h):
+        return None
+    r, g, b, a = mask[row, col]
+    if a <= 50:
+        return None                        # unpainted: fall back to waypoints
+    best, best_d = None, float('inf')
+    for name, rgb in colours.items():
+        d = (int(r) - rgb[0]) ** 2 + (int(g) - rgb[1]) ** 2 + (int(b) - rgb[2]) ** 2
+        if d < best_d:
+            best_d, best = d, name
+    return best
 
 
 COLORS = [
@@ -53,6 +97,17 @@ class RoomMarkersNode(Node):
         # the one subsystem the user would go and debug. Subscribers must
         # request TRANSIENT_LOCAL too, or they will not get the retained sample.
         self._room_pub   = self.create_publisher(String, '/current_room', latch)
+
+        # Painted rooms. The map's origin/resolution are needed to turn a world
+        # position into a mask pixel, so take them from /map rather than
+        # hardcoding the active map's values.
+        self._mask, self._colours = _load_room_mask()
+        self._map_info = None
+        self.create_subscription(OccupancyGrid, '/map', self._on_map, latch)
+        if self._mask is None:
+            self.get_logger().warning(
+                'maps/room_mask.png unavailable — falling back to nearest '
+                'waypoint, which names goals (dock…) rather than rooms')
 
         # TRANSIENT_LOCAL, matching AMCL's own publisher QoS (verified with
         # `ros2 topic info /amcl_pose --verbose`). AMCL publishes a pose only
@@ -100,7 +155,30 @@ class RoomMarkersNode(Node):
     def _on_pose(self, msg: PoseWithCovarianceStamped):
         self._update_room(msg.pose.pose.position.x, msg.pose.pose.position.y)
 
+    def _on_map(self, msg: OccupancyGrid):
+        i = msg.info
+        self._map_info = (i.origin.position.x, i.origin.position.y, i.resolution)
+        if self._mask is not None:
+            h, w = self._mask.shape[:2]
+            if (w, h) != (i.width, i.height):
+                self.get_logger().warning(
+                    f'room_mask.png is {w}x{h} but the map is {i.width}x{i.height} '
+                    '— it was painted on an older map; falling back to waypoints. '
+                    'Regenerate it with scripts/make_room_mask.py')
+                self._mask = None
+
     def _update_room(self, rx: float, ry: float):
+        # The painted mask is the answer wherever it has one.
+        painted = _room_from_mask(rx, ry, self._mask, self._colours, self._map_info)
+        if painted:
+            if painted != self._current_room:
+                self._current_room = painted
+                self.get_logger().info(f'Room: {painted}  (mask)')
+            self._room_pub.publish(String(data=painted))
+            return
+
+        # Unpainted corner of the map: nearest waypoint is all we have. It can
+        # name a goal rather than a room (see the note at the top), so say so.
         best_name = ''
         best_dist = float('inf')
         for name, pose in self._locs.items():
@@ -111,7 +189,9 @@ class RoomMarkersNode(Node):
 
         if best_name != self._current_room:
             self._current_room = best_name
-            self.get_logger().info(f'Room: {best_name}  (dist {best_dist:.2f}m)')
+            self.get_logger().info(
+                f'Room: {best_name}  (nearest waypoint, {best_dist:.2f}m — '
+                'position is outside the painted mask)')
 
         self._room_pub.publish(String(data=best_name))
 
