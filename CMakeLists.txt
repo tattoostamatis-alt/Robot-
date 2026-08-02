@@ -42,6 +42,7 @@ install(PROGRAMS
   home_robot/nodes/object_memory_node.py
   home_robot/nodes/face_detection_node.py
   home_robot/nodes/pose_node.py
+  home_robot/nodes/nerf_capture_node.py
   home_robot/nodes/goto_room.py
   home_robot/nodes/record_location.py
   scripts/collect_keepout_clicks.py

@@ -64,41 +64,47 @@ MIN_CELL_PT = 45
 SE_WIDTH_PT = 320
 
 
-def _expected_basis(n):
-    """Fewest even rows whose cells still clear MIN_CELL_PT."""
-    max_per_row = int(SE_WIDTH_PT // MIN_CELL_PT)      # 7
-    rows = math.ceil(n / max_per_row)
-    per_row = math.ceil(n / rows)
-    return per_row, 100.0 / per_row
-
-
-def test_the_tabs_are_sized_to_fill_even_rows():
-    """Derived from the tab count rather than hard-coded, so adding a tab fails
-    loudly with the basis to use instead of silently stranding one tab alone on
-    a ragged last row (13 tabs at the old 16.66% wrapped 6+6+1) or squeezing a
-    row so tight the labels collide (15 tabs in two rows is 40pt a cell)."""
+def _basis():
     tab = _rule('.tab')
-    m = re.search(r'flex:\s*1\s+0\s+([\d.]+)%', tab)
+    m = re.search(r'flex:\s*(\d)\s+0\s+([\d.]+)%', tab)
     assert m, '.tab no longer declares a flex basis, so widths are content-driven'
-    basis = float(m.group(1))
+    return int(m.group(1)), float(m.group(2))
 
+
+def test_the_cells_do_not_stretch_to_fill_a_short_last_row():
+    """‼️ flex-grow must be 0.
+
+    With grow:1 a partly-filled last row spreads its cells across the full
+    width. At 16 tabs the bottom four came out half again as wide as the twelve
+    above them, and the bar read as a rendering fault rather than a tidy
+    left-aligned remainder. Fixed basis keeps every cell identical."""
+    grow, _ = _basis()
+    assert grow == 0, \
+        'flex-grow is back — a short last row will stretch and look broken'
+
+
+def test_a_tab_stays_wide_enough_to_read_on_a_phone():
+    """Below ~45pt on a 320pt iPhone SE the icon and the label collide. This is
+    the only constraint the basis actually has to satisfy, so adding tabs grows
+    the bar downward instead of squeezing it sideways."""
+    _, basis = _basis()
+    per_row = math.floor(100.0 / basis)
+    cell = SE_WIDTH_PT * basis / 100.0
+    assert cell >= MIN_CELL_PT, \
+        f'basis {basis}% is {cell:.0f}pt on an iPhone SE — labels will collide'
+    assert per_row >= 4, f'{per_row} tabs per row wastes the width'
+
+
+def test_the_bar_does_not_grow_past_a_readable_number_of_rows():
+    """Rows are free vertically only up to a point: past four the tab bar owns
+    more of a phone screen than the content does."""
     n = _tab_count()
-    per_row, want = _expected_basis(n)
-    assert abs(basis - want) < 0.6, (
-        f'{n} tabs want {per_row} per row (basis ~{want:.2f}%), not {basis}% — '
-        f'at {basis}% they wrap {math.floor(100 / basis)} per row')
-    assert SE_WIDTH_PT / per_row >= MIN_CELL_PT, \
-        f'{per_row} per row is {SE_WIDTH_PT/per_row:.0f}pt on an iPhone SE'
-
-
-def test_the_rows_come_out_even():
-    """A last row holding one lonely tab reads as a rendering fault."""
-    n = _tab_count()
-    per_row, _ = _expected_basis(n)
+    _, basis = _basis()
+    per_row = math.floor(100.0 / basis)
     rows = math.ceil(n / per_row)
-    last = n - per_row * (rows - 1)
-    assert last >= per_row - 1 or rows == 1, \
-        f'{n} tabs at {per_row} per row leaves a last row of {last}'
+    assert rows <= 4, (
+        f'{n} tabs at {per_row} per row needs {rows} rows — either widen the '
+        'basis or the dashboard has outgrown a flat tab bar')
 
 
 def test_long_labels_cannot_widen_a_cell():

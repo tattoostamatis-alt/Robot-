@@ -424,6 +424,8 @@ class DashboardNode(Node):
         self._say_pub  = self.create_publisher(String, '/speech_response', 10)
         self._dock_pub = self.create_publisher(Bool, '/dock', 10)
         self._follow_pub = self.create_publisher(Bool, '/follow_command', 10)
+        self._nerf_pub = self.create_publisher(Bool, '/nerf/capture', 10)
+        self.create_subscription(String, '/nerf/status', self._cb_nerf, 5)
         self._arm_cmd_pub = self.create_publisher(JointState, '/arm/joint_cmd', 10)
         self._gripper_pub = self.create_publisher(Float32, '/arm/gripper_cmd', 10)
         self._arm_raw_pub = self.create_publisher(String, '/arm/raw_cmd', 10)
@@ -934,6 +936,12 @@ class DashboardNode(Node):
             'loops': self._rtab_loops if live else 0,
         })
 
+    def _cb_nerf(self, msg: String):
+        try:
+            self._state.broadcast({'type': 'nerf', **json.loads(msg.data)})
+        except (ValueError, TypeError):
+            pass
+
     def _cb_dock(self, msg: String):
         self._state.broadcast({'type': 'dock', 'status': msg.data})
 
@@ -1110,6 +1118,8 @@ class DashboardNode(Node):
                     self._costmap_on.add(client)
                 else:
                     self._costmap_on.discard(client)
+        elif t == 'nerf_capture':
+            self._nerf_pub.publish(Bool(data=bool(msg.get('on'))))
         elif t == 'overlay':
             self._overlay = bool(msg.get('on', True))
         elif t == 'follow':
@@ -1828,17 +1838,22 @@ button{font:inherit;color:inherit}
      unreachable, and the dashboard read as "it only shows the first page"
      (reported 2026-08-02, reproduced in WebKit at 428pt).
      Wrapped rows cost ~40px each and need no gesture to discover.
-     The basis is chosen so the rows come out EVEN and no cell is narrower than
-     ~45pt on a 320pt iPhone SE (below that the icon and label collide). That
-     caps a row at 7, so the row count is ceil(tabs/7) and the basis is
-     100/ceil(tabs/rows): 12 tabs -> 16.66% (6+6), 13-14 -> 14.28% (7+7),
-     15 -> 20% (5+5+5). Two rows of 8 would have been 40pt and unreadable. */
+
+     flex-GROW is 0 on purpose. With grow:1 a partly-filled last row stretches
+     its cells to fill the width, so at 16 tabs the bottom four were half again
+     as wide as the twelve above them and the bar read as broken. Fixed basis
+     means every cell is the same size and a short last row simply ends early,
+     which looks deliberate.
+
+     The basis only has to keep a cell wider than ~45pt on a 320pt iPhone SE —
+     below that the icon and the label collide. 16.66% is 53pt there, and six
+     per row is a comfortable count to scan. */
   /* The home indicator sits over the last row on a notched iPhone; without the
      inset the bottom row's labels are half-covered by it. */
   #tabs{width:100%;height:auto;display:flex;flex-wrap:wrap;padding:0;
     border-right:none;border-top:1px solid #2c2c32;
     padding-bottom:env(safe-area-inset-bottom,0px)}
-  .tab{flex:1 0 20%;flex-direction:column;gap:2px;padding:6px 2px;
+  .tab{flex:0 0 16.66%;flex-direction:column;gap:2px;padding:6px 2px;
     font-size:9.5px;border-left:none;border-top:3px solid transparent;
     justify-content:center;text-align:center;min-width:0}
   /* Long labels (Βραχίονας, Ρυθμίσεις) must shrink, not widen the cell and
@@ -2009,6 +2024,34 @@ button{font:inherit;color:inherit}
       </div>
     </section>
 
+    <!-- ── NeRF capture ────────────────────────────────────────── -->
+    <section class="pane" id="p-nerf">
+      <div class="card">
+        <h3>Καταγραφή <span class="badge" id="nf-state">—</span></h3>
+        <div class="grid2">
+          <span class="k">Καρέ</span><span class="v" id="nf-frames">—</span>
+          <span class="k">Φάκελος</span><span class="v" id="nf-dir">—</span>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button class="btn pri" id="b-nerf-go">⏺ Ξεκίνα καταγραφή</button>
+          <button class="btn warn" id="b-nerf-stop">■ Σταμάτα</button>
+        </div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          Καταγράφει εικόνες μαζί με τις ΜΕΤΡΗΜΕΝΕΣ πόζες της κάμερας από το TF — γι' αυτό δεν χρειάζεται COLMAP, που είναι το αργό και εύθραυστο μισό κάθε NeRF. Οδήγησε αργά γύρω από τον χώρο κοιτώντας τον από πολλές γωνίες. Κρατά καρέ μόνο όταν η κάμερα έχει όντως μετακινηθεί (12cm ή 8°), αλλιώς 30 πανομοιότυπες λήψεις τον δευτερόλεπτο δεν διδάσκουν τίποτα.
+        </p>
+      </div>
+      <div class="card">
+        <h3>Εκπαίδευση</h3>
+        <p style="font-size:12px;color:#a1a1aa;line-height:1.7">
+          Η εκπαίδευση τρέχει ΞΕΧΩΡΙΣΤΑ, από τερματικό:<br>
+          <code>scripts/train_nerf.py --data ~/.home_robot/nerf/house --steps 8000</code>
+        </p>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          ‼️ ΔΕΝ μπορεί να μοιραστεί το iGPU με το perception. Με το object_detector και το pose_node ενεργά, η εκπαίδευση ΡΙΧΝΕΙ την ουρά του ROCm (memory aperture violation) — δεν είναι έλλειψη μνήμης, μετρήθηκαν 5.9GB ελεύθερα. Σταμάτα πρώτα το perception· το script αρνείται να ξεκινήσει και μόνο του. Μετρημένη ταχύτητα: ~310ms/βήμα, άρα ένα δωμάτιο θέλει 45 λεπτά έως 2 ώρες.
+        </p>
+      </div>
+    </section>
+
     <!-- ── IMU (BNO085) ────────────────────────────────────────── -->
     <section class="pane" id="p-imu">
       <div class="card">
@@ -2161,6 +2204,7 @@ const TABS = [
   ['imu',    '🧭', 'IMU'],
   ['rtabmap','🏠', '3D Χάρτης'],
   ['cost',   '🧱', 'Costmap'],
+  ['nerf',   '✨', 'NeRF'],
   ['llm',    '💬', 'Φωνή/LLM'],
   ['gazebo', '🌍', 'Gazebo'],
   ['sys',    '📊', 'Σύστημα'],
@@ -2557,6 +2601,13 @@ const HANDLERS = {
   imu(m){ onImu(m); },
   rtabmap(m){ onRtab(m); },
   costmap(m){ onCostmap(m); },
+  nerf(m){
+    const st = $('nf-state'); if(!st) return;
+    st.className = 'pill' + (m.active ? ' ok' : '');
+    st.textContent = m.active ? t('καταγράφει') : t('σταματημένο');
+    $('nf-frames').textContent = `${m.frames} / ${m.max_frames}`;
+    $('nf-dir').textContent = m.dir || '—';
+  },
   vision(m){
     const e = $('vis-count'); if(!e) return;
     // "0 αντικείμενα" and a blank overlay mean the same thing but read very
@@ -2860,6 +2911,8 @@ $('b-overlay').addEventListener('click',()=>{
 // rather than a second click on the same one — with a person in the frame and
 // the robot already moving, a toggle you have to reason about is the wrong
 // control. Same reason the header e-stop is not a toggle-shaped thing.
+$('b-nerf-go').addEventListener('click',()=>send({type:'nerf_capture', on:true}));
+$('b-nerf-stop').addEventListener('click',()=>send({type:'nerf_capture', on:false}));
 $('b-follow').addEventListener('click',()=>send({type:'follow', on:true}));
 $('b-follow-stop').addEventListener('click',()=>send({type:'follow', on:false}));
 

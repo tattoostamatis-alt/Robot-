@@ -219,6 +219,48 @@ TRANSLATIONS = {
          '‼️ „Neue Karte" startet eine saubere Sitzung — das bisher Kartierte '
          'bleibt in der Datenbank, verlässt aber die aktuelle Karte.'),
 
+    # ── NeRF pane ─────────────────────────────────────────────────────────
+    'Καταγραφή':         ('Capture', 'Aufnahme'),
+    'Καρέ':              ('Frames', 'Bilder'),
+    'Φάκελος':           ('Folder', 'Ordner'),
+    '⏺ Ξεκίνα καταγραφή': ('⏺ Start capture', '⏺ Aufnahme starten'),
+    '■ Σταμάτα':         ('■ Stop', '■ Stopp'),
+    'καταγράφει':        ('recording', 'nimmt auf'),
+    'Εκπαίδευση':        ('Training', 'Training'),
+    'Η εκπαίδευση τρέχει ΞΕΧΩΡΙΣΤΑ, από τερματικό:':
+        ('Training runs SEPARATELY, from a terminal:',
+         'Das Training läuft SEPARAT, im Terminal:'),
+    'Καταγράφει εικόνες μαζί με τις ΜΕΤΡΗΜΕΝΕΣ πόζες της κάμερας από το TF — '
+    "γι' αυτό δεν χρειάζεται COLMAP, που είναι το αργό και εύθραυστο μισό κάθε "
+    'NeRF. Οδήγησε αργά γύρω από τον χώρο κοιτώντας τον από πολλές γωνίες. '
+    'Κρατά καρέ μόνο όταν η κάμερα έχει όντως μετακινηθεί (12cm ή 8°), αλλιώς '
+    '30 πανομοιότυπες λήψεις τον δευτερόλεπτο δεν διδάσκουν τίποτα.':
+        ('Records images together with the MEASURED camera poses from TF — which '
+         'is why it needs no COLMAP, the slow and fragile half of every NeRF. '
+         'Drive slowly around the space, looking at it from many angles. Frames '
+         'are only kept once the camera has actually moved (12 cm or 8°); '
+         'otherwise 30 identical shots a second teach it nothing.',
+         'Nimmt Bilder zusammen mit den GEMESSENEN Kameraposen aus TF auf — '
+         'deshalb braucht es kein COLMAP, die langsame und fragile Hälfte jedes '
+         'NeRF. Fahre langsam umher und blicke aus vielen Winkeln. Bilder werden '
+         'nur gespeichert, wenn sich die Kamera wirklich bewegt hat (12 cm oder '
+         '8°); sonst lehren 30 identische Aufnahmen pro Sekunde nichts.'),
+    '‼️ ΔΕΝ μπορεί να μοιραστεί το iGPU με το perception. Με το object_detector '
+    'και το pose_node ενεργά, η εκπαίδευση ΡΙΧΝΕΙ την ουρά του ROCm (memory '
+    'aperture violation) — δεν είναι έλλειψη μνήμης, μετρήθηκαν 5.9GB ελεύθερα. '
+    'Σταμάτα πρώτα το perception· το script αρνείται να ξεκινήσει και μόνο του. '
+    'Μετρημένη ταχύτητα: ~310ms/βήμα, άρα ένα δωμάτιο θέλει 45 λεπτά έως 2 ώρες.':
+        ('‼️ It CANNOT share the iGPU with perception. With object_detector and '
+         'pose_node running, training brings down the ROCm queue (memory '
+         'aperture violation) — not a memory shortage, 5.9 GB was free. Stop '
+         'perception first; the script also refuses to start on its own. '
+         'Measured speed: ~310 ms/step, so one room takes 45 minutes to 2 hours.',
+         '‼️ Es kann die iGPU NICHT mit der Perception teilen. Mit laufendem '
+         'object_detector und pose_node bricht das Training die ROCm-Queue ab '
+         '(memory aperture violation) — kein Speichermangel, 5,9 GB waren frei. '
+         'Stoppe zuerst die Perception; das Skript verweigert den Start auch '
+         'selbst. Gemessen: ~310 ms/Schritt, ein Raum dauert 45 Min bis 2 Std.'),
+
     # ── vacuum base pane ──────────────────────────────────────────────────
     'Βάση Roomba 879':   ('Roomba 879 base', 'Roomba-879-Basis'),
     'Κατάσταση':         ('State', 'Zustand'),

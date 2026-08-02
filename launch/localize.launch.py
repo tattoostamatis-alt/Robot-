@@ -66,6 +66,7 @@ def _launch_setup(context, *args, **kwargs):
     # Defaults to whatever use_perception is, so `use_perception:=true` brings
     # the skeleton with it; pass use_pose:=false explicitly to keep the iGPU for
     # the detector alone.
+    use_nerf = LaunchConfiguration('use_nerf').perform(context).lower() in ('true', '1')
     _pose_arg = LaunchConfiguration('use_pose').perform(context).strip().lower()
     use_pose = perc if _pose_arg in ('', 'auto') else (
         'true' if _pose_arg in ('true', '1') else 'false')
@@ -255,6 +256,20 @@ def _launch_setup(context, *args, **kwargs):
             }],
         ))
 
+    # NeRF dataset capture. Idle until told to record, so it is on by default:
+    # its whole value is that you can hit the button in the dashboard while the
+    # robot happens to be somewhere interesting, and the poses it needs
+    # (map -> camera_color_optical_frame) only exist while localisation runs.
+    # It does NOT train — see scripts/train_nerf.py, which will not even start
+    # while the perception stack holds the iGPU.
+    if use_nerf:
+        actions.append(Node(
+            package='home_robot',
+            executable='nerf_capture_node.py',
+            name='nerf_capture_node',
+            output='screen',
+        ))
+
     return actions
 
 
@@ -299,6 +314,11 @@ def generate_launch_description():
             description='Serve the web dashboard on :8080 — map, camera, arm, '
                         'vacuum, LLM chat, and RViz/MoveIt/Gazebo streamed from '
                         'VNC. Token printed at startup; set false to skip it.'),
+        DeclareLaunchArgument(
+            'use_nerf', default_value='true',
+            description='Record RGB frames + MEASURED camera poses for a NeRF '
+                        'while driving (dashboard «NeRF» tab). Idle until asked; '
+                        'training is a separate offline step.'),
         DeclareLaunchArgument(
             'use_pose', default_value='auto',
             description="YOLO11n-pose on the iGPU: 17 COCO keypoints per person, "
