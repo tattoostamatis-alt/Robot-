@@ -1376,10 +1376,22 @@ button{font:inherit;color:inherit}
 /* ── Mobile ── */
 @media(max-width:760px){
   #shell{flex-direction:column-reverse}
-  #tabs{width:100%;height:56px;display:flex;overflow-x:auto;padding:0;
+  /* ‼️ WRAP, never scroll. This was one row with overflow-x:auto, and on iOS
+     Safari that is invisible: the scrollbar is not rendered until a scroll is
+     already in progress, so there is no hint the row continues. On an iPhone
+     only 7 of the 12 tabs fit — Gazebo, Σύστημα, Log and Ρυθμίσεις were simply
+     unreachable, and the dashboard read as "it only shows the first page"
+     (reported 2026-08-02, reproduced in WebKit at 428pt).
+     Six per row costs ~40px of height and needs no gesture to discover. */
+  #tabs{width:100%;height:auto;display:flex;flex-wrap:wrap;padding:0;
     border-right:none;border-top:1px solid #2c2c32}
-  .tab{flex-direction:column;gap:2px;padding:7px 13px;font-size:10px;
-    border-left:none;border-top:3px solid transparent;justify-content:center}
+  .tab{flex:1 0 16.66%;flex-direction:column;gap:2px;padding:6px 2px;
+    font-size:9.5px;border-left:none;border-top:3px solid transparent;
+    justify-content:center;text-align:center;min-width:0}
+  /* Long labels (Βραχίονας, Ρυθμίσεις) must shrink, not widen the cell and
+     push the row back into overflow. */
+  .tab>span:last-child{overflow:hidden;text-overflow:ellipsis;
+    white-space:nowrap;max-width:100%}
   .tab.active{border-left-color:transparent;border-top-color:#3b82f6}
   #title{display:none}
   .pane{padding:8px}
