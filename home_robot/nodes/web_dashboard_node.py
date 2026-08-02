@@ -778,7 +778,16 @@ async def index(request: Request, t: str = ''):
             status_code=401)
     # The page keeps carrying the token in its own sub-requests, so nothing
     # depends on the cookie surviving; it only saves the *next* visit.
-    resp = HTMLResponse(_make_html(list(locations.keys()), t or TOKEN))
+    #
+    # no-store: this page IS the application — the CSS, the JS and the room list
+    # are all inlined in it, and it carries the token. Served with no cache
+    # directive at all, Safari falls back to heuristic caching and happily
+    # re-serves a build from before the last `robot max`, so a fixed layout
+    # looks unfixed and the only way out is clearing website data. Nothing here
+    # is worth caching: it is regenerated per request and the heavy things
+    # (map, camera, clouds) come over their own routes.
+    resp = HTMLResponse(_make_html(list(locations.keys()), t or TOKEN),
+                        headers={'Cache-Control': 'no-store'})
     if not NO_AUTH:
         resp.set_cookie(COOKIE_NAME, TOKEN, max_age=COOKIE_MAX_AGE,
                         httponly=True, samesite='strict')
@@ -1275,7 +1284,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="el">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<!-- viewport-fit=cover is what makes env(safe-area-inset-*) resolve to anything
+     other than 0 on a notched iPhone; the tab bar uses it. -->
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Home Robot</title>
@@ -1298,7 +1309,14 @@ button{font:inherit;color:inherit}
 #estop.engaged{background:#dc2626;color:#fff;animation:pulse 1s infinite}
 @keyframes pulse{50%{opacity:.55}}
 /* ── Shell ── */
-#shell{display:flex;height:calc(100vh - 48px)}
+/* ‼️ dvh, not vh. On iOS Safari 100vh is the height the page WOULD have with
+   the address bar hidden — it is taller than what you can actually see. With
+   the tab bar at the bottom on mobile (column-reverse) that put the tabs
+   underneath Safari's bottom bar, and html{overflow:hidden} meant you could not
+   even scroll down to find them: "μπαίνει αλλά δεν βλέπω tabs" (2026-08-02).
+   100dvh tracks the visible area as that bar shows and hides (iOS 15.4+); the
+   vh line above stays as the fallback for anything older. */
+#shell{display:flex;height:calc(100vh - 48px);height:calc(100dvh - 48px)}
 #tabs{width:150px;background:#1a1a1e;border-right:1px solid #2c2c32;
   padding:8px 0;flex-shrink:0;overflow-y:auto}
 .tab{display:flex;align-items:center;gap:9px;padding:10px 14px;cursor:pointer;
@@ -1383,8 +1401,11 @@ button{font:inherit;color:inherit}
      unreachable, and the dashboard read as "it only shows the first page"
      (reported 2026-08-02, reproduced in WebKit at 428pt).
      Six per row costs ~40px of height and needs no gesture to discover. */
+  /* The home indicator sits over the last row on a notched iPhone; without the
+     inset the bottom row's labels are half-covered by it. */
   #tabs{width:100%;height:auto;display:flex;flex-wrap:wrap;padding:0;
-    border-right:none;border-top:1px solid #2c2c32}
+    border-right:none;border-top:1px solid #2c2c32;
+    padding-bottom:env(safe-area-inset-bottom,0px)}
   .tab{flex:1 0 16.66%;flex-direction:column;gap:2px;padding:6px 2px;
     font-size:9.5px;border-left:none;border-top:3px solid transparent;
     justify-content:center;text-align:center;min-width:0}
