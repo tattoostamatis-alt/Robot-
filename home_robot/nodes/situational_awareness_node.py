@@ -30,7 +30,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from nav_msgs.msg import OccupancyGrid, Odometry
 from sensor_msgs.msg import BatteryState
-from std_msgs.msg import String
+from std_msgs.msg import Float32, String
 from ament_index_python.packages import get_package_share_directory
 
 
@@ -95,6 +95,7 @@ def _nearest_room(x: float, y: float, locations: dict,
 # Single source of truth, shared with format_location() so the room never gets
 # spoken as greeklish in one answer and Greek in another.
 from home_robot.status_query import ROOM_NAMES_EL  # noqa: E402
+from home_robot.speaker_fusion import SpeakerTracker  # noqa: E402
 
 
 class SituationalAwarenessNode(Node):
@@ -114,11 +115,16 @@ class SituationalAwarenessNode(Node):
         # the exact failure status_query exists to prevent, entering by the
         # back door. Set true only if a real pack is refitted.
         self.declare_parameter('report_battery', False)
+        # Width of the colour frame face_detection_node measured its boxes in.
+        # It publishes no frame size, and the bearing->column projection needs
+        # one; 640 is the lean stream this robot runs.
+        self.declare_parameter('face_frame_width', 640)
 
         self._report_battery = self.get_parameter('report_battery').value
         self._max_range  = self.get_parameter('max_obj_range').value
         self._max_obj    = self.get_parameter('max_obj_count').value
         hz               = self.get_parameter('update_hz').value
+        self._face_frame_w = self.get_parameter('face_frame_width').value
 
         self._locations  = _load_locations()
         self._mask_arr, self._color_map = _load_room_mask()
@@ -142,7 +148,20 @@ class SituationalAwarenessNode(Node):
         self.create_subscription(String, 'tracked_objects',  self._on_tracked, 10)
         self.create_subscription(String, 'detected_objects', self._on_detected, 10)
 
+        # ── who is speaking ──
+        # Three signals that each answer a third of the question and were never
+        # combined: a name from diarization, a bearing from the XVF3800, faces
+        # from the detector. speaker_fusion ties them together; all three are
+        # optional, and any that is absent simply drops out of the answer.
+        self._speaker = SpeakerTracker()
+        self.create_subscription(String, 'current_speaker', self._on_speaker, 10)
+        self.create_subscription(Float32, 'doa/angle', self._on_doa, 10)
+        self.create_subscription(String, 'face_detections', self._on_faces, 10)
+
         self._pub = self.create_publisher(String, 'situation_context', 10)
+        # Richer than the context line: the dashboard wants the bearing and the
+        # face box, which have no place in an LLM prompt.
+        self._speaker_pub = self.create_publisher(String, 'speaker_state', 10)
         self.create_timer(1.0 / hz, self._publish)
 
         self.get_logger().info('Situational awareness node ready')
@@ -202,6 +221,22 @@ class SituationalAwarenessNode(Node):
 
     # ── Context assembly ─────────────────────────────────────────────
 
+    def _on_speaker(self, msg: String):
+        self._speaker.set_name(msg.data)
+
+    def _on_doa(self, msg: Float32):
+        self._speaker.set_angle(msg.data)
+
+    def _on_faces(self, msg: String):
+        try:
+            faces = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        if isinstance(faces, list):
+            # face_detection_node carries no frame size; the boxes are in the
+            # colour stream's own pixels, which is 640 wide on this camera.
+            self._speaker.set_faces(faces, self._face_frame_w)
+
     def _publish(self):
         # Room — mask and locations.yaml are in the map frame, not odom
         x, y = self._map_xy()
@@ -242,6 +277,16 @@ class SituationalAwarenessNode(Node):
         }
         if batt_pct is not None:
             ctx['battery_pct'] = batt_pct
+
+        # Only when there is something to say — this line lands in every LLM
+        # prompt, so an empty one costs prefill on every single utterance.
+        snap = self._speaker.snapshot()
+        line = self._speaker.describe(snap)
+        if line:
+            ctx['speaker'] = line
+        self._speaker_pub.publish(String(data=json.dumps(
+            {k: v for k, v in snap.items() if k != 'face'},
+            ensure_ascii=False)))
 
         self._pub.publish(String(data=json.dumps(ctx, ensure_ascii=False)))
 

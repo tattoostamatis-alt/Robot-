@@ -311,6 +311,22 @@ TRANSLATIONS = {
     # ── room colours (map pane) ───────────────────────────────────────────
     'Χρώματα':           ('Colours', 'Farben'),
 
+    # ── who is speaking ───────────────────────────────────────────────────
+    'Ποιος μιλάει':      ('Who is speaking', 'Wer spricht'),
+    'Θέλει use_diarization (ποιος), DoA (από πού), use_face_detection '
+    '(ποιον βλέπω). Ό,τι λείπει παραλείπεται.':
+        ('Needs use_diarization (who), DoA (from where), use_face_detection '
+         '(who is visible). Whatever is missing is left out.',
+         'Braucht use_diarization (wer), DoA (woher), use_face_detection '
+         '(wer sichtbar ist). Fehlendes wird weggelassen.'),
+    'μπροστά':           ('ahead', 'vorne'),
+    'δεξιά':             ('right', 'rechts'),
+    'αριστερά':          ('left', 'links'),
+    'πρόσωπα':           ('faces', 'Gesichter'),
+    'άγνωστος':          ('unknown', 'unbekannt'),
+    'ταυτοποιημένος':    ('identified', 'identifiziert'),
+    'κανείς δεν μιλάει': ('nobody speaking', 'niemand spricht'),
+
     # ── fall alert ────────────────────────────────────────────────────────
     'Κάποιος μπορεί να έπεσε': ('Someone may have fallen',
                                 'Jemand ist möglicherweise gestürzt'),

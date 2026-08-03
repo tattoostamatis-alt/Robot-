@@ -328,6 +328,7 @@ class DashboardNode(Node):
         self._det_poses: list = []
         self._pose_time = 0.0
         self._pose_src_w = 0        # frame width poses were measured in
+        self._speaker_key = None    # last speaker snapshot forwarded
         self._overlay   = True        # toggled from the camera tab
 
         # ── Arm ─────────────────────────────────────────────────────────────
@@ -455,6 +456,7 @@ class DashboardNode(Node):
             QoSProfile(depth=1, durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
                        reliability=QoSReliabilityPolicy.RELIABLE))
         self.create_subscription(String, '/fall_event', self._cb_fall_event, 10)
+        self.create_subscription(String, '/speaker_state', self._cb_speaker, 10)
         self.create_subscription(String, '/nerf/status', self._cb_nerf, 5)
         self._arm_cmd_pub = self.create_publisher(JointState, '/arm/joint_cmd', 10)
         self._gripper_pub = self.create_publisher(Float32, '/arm/gripper_cmd', 10)
@@ -1067,6 +1069,20 @@ class DashboardNode(Node):
             self._state.broadcast({'type': 'nerf', **json.loads(msg.data)})
         except (ValueError, TypeError):
             pass
+
+    def _cb_speaker(self, msg: String):
+        try:
+            snap = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        # 1 Hz and mostly unchanged; only forward transitions so the socket is
+        # not carrying an identical message every second all day.
+        key = (snap.get('name'), snap.get('identified'),
+               None if snap.get('angle') is None else round(snap['angle'] / 15))
+        if key == self._speaker_key:
+            return
+        self._speaker_key = key
+        self._state.broadcast({'type': 'speaker', **snap})
 
     def _cb_fall(self, msg: Bool):
         # remember=True: replayed to a browser that connects later, which is
@@ -2617,6 +2633,12 @@ button{font:inherit;color:inherit}
     <!-- ── Voice / LLM ─────────────────────────────────────────── -->
     <section class="pane" id="p-llm">
       <div class="card" style="margin-bottom:9px">
+        <h3>Ποιος μιλάει <span class="badge" id="sp-badge">—</span></h3>
+        <div id="sp-detail" style="font-size:11.5px;color:#71717a;line-height:1.55">
+          Θέλει use_diarization (ποιος), DoA (από πού), use_face_detection (ποιον βλέπω). Ό,τι λείπει παραλείπεται.
+        </div>
+      </div>
+      <div class="card" style="margin-bottom:9px">
         <h3>Ποιος απαντά <span class="badge" id="be-badge">—</span></h3>
         <div class="row">
           <button class="btn" id="be-gemini">🌩️ Gemini (cloud)</button>
@@ -3195,6 +3217,7 @@ const HANDLERS = {
   mission(m){ onMission(m); },
   fall(m){ onFall(m); },
   fall_event(m){ onFallEvent(m); },
+  speaker(m){ onSpeaker(m); },
 };
 
 function connect(){
@@ -3770,6 +3793,24 @@ async function mapSave(){
 // (no CDN) and 4000 points sorted back-to-front is about a millisecond, so the
 // extra machinery would buy nothing. Points arrive as int16 millimetres +
 // RGB, in the camera optical frame: +x right, +y DOWN, +z forward.
+// ── who is speaking ─────────────────────────────────────────────────────────
+// Deliberately shows what it does NOT know: a name with no matched face reads
+// differently from a confident identification, and the badge should not imply
+// the robot can tell two people apart when it cannot.
+function onSpeaker(m){
+  const bits = [];
+  if (m.angle !== null && m.angle !== undefined){
+    const side = Math.abs(m.angle) <= 20 ? t('μπροστά')
+               : m.angle > 0 ? t('δεξιά') : t('αριστερά');
+    bits.push(side + ' (' + Math.round(m.angle) + '°)');
+  }
+  if (m.faces_visible) bits.push(m.faces_visible + ' ' + t('πρόσωπα'));
+  $('sp-badge').textContent = m.name || (bits.length ? t('άγνωστος') : '—');
+  $('sp-detail').textContent =
+    (m.identified ? '✅ ' + t('ταυτοποιημένος') + ' · ' : '') +
+    (bits.join(' · ') || t('κανείς δεν μιλάει'));
+}
+
 // ── fall alert ──────────────────────────────────────────────────────────────
 // Dismissing hides the banner but does NOT clear the robot's state: the person
 // is still on the floor until fall_monitor_node says otherwise. If a NEW alert
