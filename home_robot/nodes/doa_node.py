@@ -166,14 +166,13 @@ class DoaNode(Node):
 
         self._angle_pub   = self.create_publisher(Float32, 'doa/angle', 10)
         self._wake_pub    = self.create_publisher(Float32, 'doa/wake',  10)
-        # ‼️ cmd_vel_safe, NOT cmd_vel. /cmd_vel has several publishers and ZERO
-        # subscribers on this graph: roomba_driver listens on cmd_vel_safe alone,
-        # and Nav2 reaches it through its own chain. Published on cmd_vel, every
-        # "turn toward the speaker" went nowhere and the feature looked simply
-        # broken — the same mistake person_follower_node made, and the fifth
-        # time it has been made in this package. Check with
-        # `ros2 topic info -v /cmd_vel_safe` before changing this.
-        self._cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel_safe', 10)
+        # ‼️ RELATIVE 'cmd_vel'; bringup remaps it to cmd_vel_safe when
+        # obstacle_safety_node is not up to relay it. Left on the absolute
+        # /cmd_vel — which has ZERO subscribers, measured live 2026-08-03 —
+        # every "turn toward the speaker" went nowhere and the feature just
+        # looked broken. Check with `ros2 topic info -v /cmd_vel_safe` before
+        # changing this.
+        self._cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
         # Hardware voice-activity flag, straight off the XVF3800 DSP. It comes
         # back with every DoA read at no extra cost, and nothing was publishing
         # it: STT gates on an energy threshold instead, which is why a fan spike

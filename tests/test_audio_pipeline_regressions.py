@@ -46,6 +46,12 @@ def stt(monkeypatch):
                       spin=lambda *a, **k: None, ok=lambda: True,
                       try_shutdown=lambda *a, **k: None),
         'rclpy.node': _mod('rclpy.node', Node=_BaseNode),
+        # stt_node subscribes to /voice_activity with transient_local QoS to
+        # match doa_node's latched publisher.
+        'rclpy.qos': _mod('rclpy.qos',
+                          QoSProfile=lambda **kw: _ns(**kw),
+                          QoSDurabilityPolicy=_ns(TRANSIENT_LOCAL=1, VOLATILE=2),
+                          QoSReliabilityPolicy=_ns(RELIABLE=1, BEST_EFFORT=2)),
         'rcl_interfaces': _mod('rcl_interfaces'),
         'rcl_interfaces.msg': _mod(
             'rcl_interfaces.msg',

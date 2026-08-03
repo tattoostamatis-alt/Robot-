@@ -6,7 +6,8 @@ from launch.actions import (DeclareLaunchArgument, IncludeLaunchDescription, Gro
 from launch.conditions import IfCondition
 from launch.events import matches_action
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import AndSubstitution, LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import (AndSubstitution, LaunchConfiguration,
+                                  PathJoinSubstitution, PythonExpression)
 from launch_ros.actions import Node, LifecycleNode, SetParameter
 from launch_ros.event_handlers import OnStateTransition
 from launch_ros.events.lifecycle import ChangeState
@@ -131,6 +132,29 @@ def generate_launch_description():
         output='screen',
         condition=IfCondition(use_obstacle_safety),
     )
+
+    # ‼️ Where "raw" velocity publishers (llm_bridge's `move` tool, the mission
+    # executor's final approach, doa_node turning toward a speaker) actually
+    # land. This has to follow use_obstacle_safety, and hardcoding either end
+    # breaks the other configuration:
+    #
+    #   safety ON  -> /cmd_vel, so obstacle_safety_node can zero the forward
+    #                 component when the camera sees something ahead. Its
+    #                 docstring names llm_bridge_node as the reason it exists;
+    #                 publishing past it would silently remove that layer.
+    #   safety OFF -> /cmd_vel_safe, straight at roomba_driver. Nothing relays
+    #                 /cmd_vel then, and it has ZERO subscribers (measured live
+    #                 2026-08-03), so those nodes were computing correct twists
+    #                 and publishing them into nothing — spoken movement
+    #                 commands did not move the robot at all.
+    #
+    # localize.launch.py runs with safety OFF, because obstacle_safety_node's
+    # own fail-safe blocks forward motion when object_detector is not
+    # publishing, and localize has no perception by default. roomba_driver
+    # still has the bumper and cliff stops either way.
+    voice_cmd_vel = PythonExpression(
+        ["'cmd_vel' if '", use_obstacle_safety, "' == 'true' else 'cmd_vel_safe'"])
+    voice_cmd_vel_remap = [('cmd_vel', voice_cmd_vel)]
 
     # odom -> base_link is published dynamically by ekf_node (below). The
     # EKF runs UNCONDITIONALLY (no launch condition) — it is required in
@@ -723,6 +747,7 @@ def generate_launch_description():
         # fetch delivery: 'start_pose' (return to where the command was given) or
         # 'follow' (home in on the user's current position via person detections).
         parameters=[{'delivery_mode': LaunchConfiguration('delivery_mode', default='start_pose')}],
+        remappings=voice_cmd_vel_remap,
         condition=IfCondition(use_mission),
     )
 
@@ -838,6 +863,7 @@ def generate_launch_description():
         name='doa_node',
         output='screen',
         condition=IfCondition(use_doa),
+        remappings=voice_cmd_vel_remap,
         parameters=[{
             'rotate_on_wake': doa_rotate_on_wake,
             'rotate_speed':   doa_rotate_speed,
@@ -863,6 +889,7 @@ def generate_launch_description():
         parameters=[{'backend': llm_backend, 'memory_enabled': use_memory,
                      'lemonade_url': llm_url, 'lemonade_model': llm_model}],
         output='screen',
+        remappings=voice_cmd_vel_remap,
         condition=IfCondition(use_llm),
     )
 

@@ -81,56 +81,90 @@ def test_features_localize_decides_on_are_forwarded_not_inherited():
 
 # ── bug 2: the dead topic ───────────────────────────────────────────────────
 
-def test_doa_turns_the_base_on_the_topic_the_roomba_reads():
-    src = open(DOA).read()
-    m = re.search(r"_cmd_vel_pub\s*=\s*self\.create_publisher\(\s*Twist,\s*'([^']+)'",
-                  src)
-    assert m, 'the velocity publisher is gone or changed shape'
-    assert m.group(1).lstrip('/') == 'cmd_vel_safe', (
-        f'publishing to {m.group(1)!r} — the Roomba will never see it, and '
-        '"turn toward the speaker" will look broken while computing perfectly '
-        'correct twists')
+def _twist_publishers(path):
+    """[(lineno, topic)] for every create_publisher(Twist, '...') in a file."""
+    out = []
+    try:
+        tree = ast.parse(open(path).read())
+    except SyntaxError:
+        return out
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == 'create_publisher'):
+            continue
+        if len(node.args) < 2:
+            continue
+        typ, topic = node.args[0], node.args[1]
+        if not (isinstance(typ, ast.Name) and typ.id == 'Twist'):
+            continue
+        if isinstance(topic, ast.Constant):
+            out.append((node.lineno, topic.value))
+    return out
 
 
-def test_no_node_publishes_twists_to_the_dead_cmd_vel_topic():
-    """Scan every node, because this keeps arriving in new files.
+def test_doa_turns_the_base_through_the_remappable_name():
+    """Relative 'cmd_vel', so the launch file can route it.
 
-    /cmd_vel has zero subscribers on this graph. A Twist publisher aimed at it
-    is a feature that will silently do nothing. Nodes that are *remapped* in
-    the launch file are the documented exception and are listed here.
+    Not hardcoded either way on purpose: with use_obstacle_safety:=true the
+    twist must pass THROUGH obstacle_safety_node (which zeroes forward motion
+    when the camera sees something), and with it false nothing relays /cmd_vel
+    at all so it must go straight to cmd_vel_safe. bringup picks per config.
     """
-    # Remapped to cmd_vel_safe in bringup.launch.py, so publishing to the
-    # relative name is correct for these.
-    remapped = {'teleop_twist_keyboard', 'teleop_node'}
+    pubs = dict((t, ln) for ln, t in _twist_publishers(DOA))
+    assert pubs, 'the velocity publisher is gone or changed shape'
+    assert 'cmd_vel' in pubs, (
+        f'expected a relative cmd_vel publisher, found {sorted(pubs)} — an '
+        'absolute /cmd_vel cannot be remapped by the launch file, and a '
+        'hardcoded cmd_vel_safe walks straight past the safety net')
+
+
+def test_raw_velocity_publishers_are_remapped_by_the_launch_file():
+    """Every node that publishes a bare 'cmd_vel' must be routed in bringup.
+
+    /cmd_vel has ZERO subscribers unless obstacle_safety_node is running to
+    relay it, and localize.launch.py leaves that off. A Twist publisher on
+    'cmd_vel' with no remapping is therefore a feature that silently does
+    nothing — which is how spoken movement commands, the mission executor's
+    final approach and doa_node's turn-to-speaker were all dead at once.
+    """
+    bring = open(BRINGUP).read()
     offenders = []
     for fn in sorted(os.listdir(NODES_DIR)):
         if not fn.endswith('.py'):
             continue
-        if fn[:-3] in remapped:
+        topics = [t for _, t in _twist_publishers(os.path.join(NODES_DIR, fn))]
+        if not any(t.lstrip('/') == 'cmd_vel' for t in topics):
             continue
-        src = open(os.path.join(NODES_DIR, fn)).read()
-        try:
-            tree = ast.parse(src)
-        except SyntaxError:
+        # obstacle_safety_node is the relay itself: it SUBSCRIBES to cmd_vel
+        # and publishes cmd_vel_safe, so it is never remapped.
+        if fn == 'obstacle_safety_node.py':
             continue
-        for node in ast.walk(tree):
-            if not (isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == 'create_publisher'):
-                continue
-            if len(node.args) < 2:
-                continue
-            typ, topic = node.args[0], node.args[1]
-            if not (isinstance(typ, ast.Name) and typ.id == 'Twist'):
-                continue
-            if not isinstance(topic, ast.Constant):
-                continue
-            if topic.value.lstrip('/') == 'cmd_vel':
-                offenders.append(f'{fn}:{node.lineno}')
+        # Find the node's block in bringup and check it carries a remapping.
+        m = re.search(rf"executable='{re.escape(fn)}'(.*?)\n    \)", bring, re.S)
+        if not m:
+            offenders.append(f'{fn} (not launched by bringup at all)')
+        elif 'remappings' not in m.group(1):
+            offenders.append(f'{fn} (no remappings= in bringup)')
     assert not offenders, (
-        '/cmd_vel is a dead topic here (zero subscribers — roomba_driver reads '
-        'cmd_vel_safe). These publishers will never move the robot: '
-        + ', '.join(offenders))
+        'these publish raw Twists to cmd_vel but bringup never routes them, '
+        'so they will move nothing whenever obstacle_safety_node is off '
+        '(which is the default under `robot max`): ' + ', '.join(offenders))
+
+
+def test_an_absolute_cmd_vel_is_never_used():
+    """'/cmd_vel' with a leading slash ignores the node's namespace and reads
+    as deliberate, which is exactly the wrong signal for a topic that only
+    works when something happens to be relaying it."""
+    offenders = []
+    for fn in sorted(os.listdir(NODES_DIR)):
+        if not fn.endswith('.py'):
+            continue
+        for ln, topic in _twist_publishers(os.path.join(NODES_DIR, fn)):
+            if topic == '/cmd_vel':
+                offenders.append(f'{fn}:{ln}')
+    assert not offenders, (
+        'absolute /cmd_vel publishers: ' + ', '.join(offenders))
 
 
 # ── the hardware VAD ────────────────────────────────────────────────────────

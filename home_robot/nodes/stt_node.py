@@ -20,6 +20,7 @@ import time
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 from rcl_interfaces.msg import SetParametersResult
 from std_msgs.msg import Bool, String, Int16MultiArray
 
@@ -60,6 +61,29 @@ class STTNode(Node):
         # Don't treat the robot's own TTS as user speech (barge-in / self-echo).
         self.declare_parameter('suppress_on_tts', True)
         self.declare_parameter('tts_release_tail', 0.3)
+        # ── hardware VAD (XVF3800, via doa_node's /voice_activity) ──────────
+        # The energy threshold alone cannot tell a voice from a fan spike: both
+        # are "loud". The DSP's speech flag can, so it is used as a SECOND
+        # opinion for starting a recording — never as a replacement.
+        #
+        # It is deliberately one-directional:
+        #   * to START recording, energy AND the VAD must agree (fewer false
+        #     starts from fans, doors, the robot's own motors);
+        #   * to KEEP recording, the VAD can only extend, never cut. A VAD that
+        #     says "no speech" mid-sentence must not truncate the user.
+        #
+        # ‼️ And it fails OPEN. If /voice_activity has never arrived, or has
+        # gone stale (doa_node crashed, ReSpeaker unplugged, use_doa:=false),
+        # the gate is dropped entirely and behaviour returns to energy-only.
+        # A stale `False` latched into this gate would make the robot silently
+        # deaf, which is the single worst failure this pipeline has — see the
+        # busy-lock bug that did exactly that.
+        self.declare_parameter('use_hw_vad', True)
+        self.declare_parameter('vad_stale_s', 3.0)
+        # The flag is edge-triggered at 10 Hz, and the DSP drops it between
+        # words. Hold it open briefly so a normal pause mid-utterance does not
+        # re-close the start gate.
+        self.declare_parameter('vad_hold_s', 0.8)
 
         model_size            = self.get_parameter('model_size').value
         self.lang             = self.get_parameter('language').value
@@ -77,6 +101,15 @@ class STTNode(Node):
         self._max_chunks            = max(1, int(max_record_seconds * SAMPLE_RATE / CHUNK_SIZE))
         preroll_chunks              = max(1, int(preroll_seconds * SAMPLE_RATE / CHUNK_SIZE))
         self._flush_chunks          = max(1, int(flush_ms / 1000 * SAMPLE_RATE / CHUNK_SIZE))
+
+        self.use_hw_vad  = self.get_parameter('use_hw_vad').value
+        self.vad_stale_s = self.get_parameter('vad_stale_s').value
+        self.vad_hold_s  = self.get_parameter('vad_hold_s').value
+        self._vad_on     = False
+        self._vad_at     = 0.0      # last message (any value)
+        self._vad_true_at = 0.0     # last time it said "speech"
+        self._vad_seen   = False    # has the topic EVER produced a message?
+        self._vad_logged = False    # one-shot "gate active" log
 
         self._preroll    = collections.deque(maxlen=preroll_chunks)
         self._state      = 'idle'   # idle | flushing | waiting_speech | recording
@@ -142,6 +175,16 @@ class STTNode(Node):
         self.create_subscription(String,         'wake_word', self._on_wake_word, 10)
         self.create_subscription(Int16MultiArray, 'mic/audio', self._on_audio,    200)
         self.create_subscription(Bool,           SPEAKING_TOPIC, self._on_tts_speaking, 10)
+        # transient_local to match doa_node's publisher: it is latched state,
+        # published only on transitions. With plain volatile QoS the
+        # subscription would not even connect (incompatible durability is a
+        # silent no-match in DDS), and the gate would sit disabled for ever
+        # while looking wired up.
+        self.create_subscription(
+            Bool, 'voice_activity', self._on_voice_activity,
+            QoSProfile(depth=1,
+                       durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+                       reliability=QoSReliabilityPolicy.RELIABLE))
 
         self.get_logger().info('STT node started — waiting for wake_word')
 
@@ -278,6 +321,42 @@ class STTNode(Node):
             self._sil_count  = 0
         self.get_logger().info('Wake word received — listening for speech')
 
+    def _on_voice_activity(self, msg: Bool):
+        now = time.monotonic()
+        self._vad_at = now
+        self._vad_on = bool(msg.data)
+        if msg.data:
+            self._vad_true_at = now
+        if not self._vad_seen:
+            self._vad_seen = True
+            self.get_logger().info(
+                'Hardware VAD connected — speech onset now needs the DSP to '
+                'agree, not just loudness')
+
+    def _vad_gate_open(self) -> bool:
+        """May a recording START right now, as far as the hardware VAD knows?
+
+        Returns True whenever the VAD cannot be trusted, so a missing, disabled
+        or crashed doa_node leaves the old energy-only behaviour intact instead
+        of making the robot deaf.
+        """
+        if not self.use_hw_vad or not self._vad_seen:
+            return True                      # never arrived: not our gate
+        now = time.monotonic()
+        if now - self._vad_at > self.vad_stale_s:
+            # Publisher died mid-session. Say so once per stall, then get out
+            # of the way — a latched False here would silently swallow every
+            # command from now on.
+            if not self._vad_logged:
+                self._vad_logged = True
+                self.get_logger().warn(
+                    'Hardware VAD went stale — falling back to the energy '
+                    'threshold. Is doa_node still running?')
+            return True
+        self._vad_logged = False
+        # Held briefly after the flag drops: the DSP releases it between words.
+        return self._vad_on or (now - self._vad_true_at) < self.vad_hold_s
+
     def _on_audio(self, msg: Int16MultiArray):
         chunk = np.array(msg.data, dtype=np.int16).astype(np.float32) / 32768.0
         self._last_audio = time.monotonic()
@@ -301,7 +380,9 @@ class STTNode(Node):
 
             if self._state == 'waiting_speech':
                 self._wait_count += 1
-                if energy > self.energy_thresh:
+                # Loud AND actually a voice. The second half is what a fan
+                # spike, a door or the base's own motors fail.
+                if energy > self.energy_thresh and self._vad_gate_open():
                     self._state      = 'recording'
                     self._record_buf = list(self._preroll) + [chunk]
                     self._sil_count  = 0
@@ -316,6 +397,15 @@ class STTNode(Node):
                 if energy < self.energy_thresh:
                     self._sil_count += 1
                 else:
+                    self._sil_count = 0
+                # One-directional on purpose: the VAD may only EXTEND a
+                # recording, never end one. If the DSP still hears speech while
+                # the energy dipped (a quiet syllable, the user turning away),
+                # keep the window open. The reverse — letting it cut — would
+                # truncate people mid-sentence, and the energy threshold plus
+                # max_record_seconds already bound the recording.
+                if (self.use_hw_vad and self._vad_seen and self._vad_on
+                        and time.monotonic() - self._vad_at <= self.vad_stale_s):
                     self._sil_count = 0
 
                 if (self._sil_count  >= self._silence_limit_chunks or
