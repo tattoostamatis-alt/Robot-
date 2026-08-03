@@ -80,6 +80,13 @@ _GROUPS = [
     (['remember'],
      r'θυμ\w*|σημειωσ\w*|κρατα|μαθε'),
 
+    # "πήγαινε να ΔΕΙΣ αν έκλεισα το παράθυρο", "τσέκαρε την κουζίνα".
+    # 'δες'/'δει' deliberately narrow: 'δειχν\w*' is "δείξε μου", a different
+    # thing, and bare 'δ' stems would swallow half the language.
+    (['check'],
+     r'τσεκαρ\w*|ελεγξ\w*|ελεγχ\w*|\bδες\b|\bδει\b|\bδεις\b|επιβεβαιωσ\w*|'
+     r'παραθυρ\w*|πορτ\w*|φως|φωτα|κλειστ\w*|ανοιχτ\w*|ξεχασ\w*'),
+
     # "πόσο μακριά είναι;" / "πόση απόσταση έχει ο άνθρωπος;". 'κοντα' is left
     # out on purpose: "έλα κοντά μου" is a movement command, not a measurement.
     (['distance_to'],

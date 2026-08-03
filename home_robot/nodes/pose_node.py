@@ -145,7 +145,13 @@ class PoseNode(Node):
                 m.color.a = 1.0; m.color.g = 1.0
                 markers.markers.append(m)
 
-        self.poses_pub.publish(String(data=json.dumps(persons)))
+        # Dict, not a bare list: consumers need the frame size. The dashboard
+        # had to guess it from whatever image its own callback was holding, and
+        # fall detection cannot work at all without knowing where the floor is
+        # in the frame. `persons` is kept as a key so a reader can accept both
+        # shapes during a rolling restart.
+        self.poses_pub.publish(String(data=json.dumps(
+            {'persons': persons, 'width': img_w, 'height': img_h})))
         self.markers_pub.publish(markers)
 
 

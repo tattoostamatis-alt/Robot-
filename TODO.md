@@ -30,7 +30,8 @@ camera + detector + tracker + dynamic-obstacle layers + object memory).
       in camera frame so robot ego-motion isn't compensated — verify predictions while the
       base is moving, may need to gate on robot stationary or subtract odom twist.
 - [ ] **Pick-place visual servoing** (257798b). Closed-loop XY refine before grasp. Needs
-      `use_arm:=true`. FIRST calibrate `tf_base_arm` (servo can't fix a calibration bias).
+      `use_arm:=true`. (`tf_base_arm` WAS measured on 2026-07-21 for the 879 chassis,
+      9957842 — the older "calibrate it first" note was stale and is dropped.)
       Verify slowly/by hand: watch the "Servo nudge/converged" logs, confirm it settles over
       the object before descending. Tune `servo_tolerance` / `servo_max_iters`.
       **2026-07-09 hardened (desk):** the eye-to-hand "servo" is really multi-frame target
@@ -38,7 +39,7 @@ camera + detector + tracker + dynamic-obstacle layers + object memory).
       → descend into the table / grasp air. Now collects the relock estimates and grasps at
       their component-wise **median** (rejects a lone outlier frame), with convergence judged
       by the spread of recent frames. Extracted to `home_robot/servo_filter.py`, unit-tested
-      (7/7). Still needs the tf_base_arm calibration + HW grasp test.
+      (7/7). Still needs the HW grasp test.
 - [ ] **Voice barge-in** (c24dd1c). Say "Ρομπότ Μαξ" while Max is talking → he stops and
       listens. `allow_barge_in` defaults true (XVF3800 ch4 AEC). Verify he doesn't interrupt
       *himself* (self-echo); if he does, the AEC beam isn't clean → set false or raise threshold.
@@ -50,8 +51,8 @@ camera + detector + tracker + dynamic-obstacle layers + object memory).
       HW, raise `barge_in_threshold` toward 0.8–0.9 before disabling barge-in.
 - [ ] **Fetch mission ("φέρε μου το X").** `fetch:<label>` in mission_executor composes object
       memory → nav → pick(hold) → carry → place; LLM `fetch` tool. Needs `use_perception` +
-      `use_arm` + `use_mission` + nav. **Prereqs: calibrate tf_base_arm; object memory must have
-      seen the object.** Verify each stage (resolve/approach/verify/pick/deliver) via mission/status
+      `use_arm` + `use_mission` + nav. **Prereq: object memory must have seen the
+      object.** (tf_base_arm was measured 2026-07-21, 9957842 — not an open item.) Verify each stage (resolve/approach/verify/pick/deliver) via mission/status
       + pick_result/place_result. RISK: arm holding an object while the base drives — check RoArm-M3
       stability, may need a "carry pose". Design: `docs/PLAN_fetch_mission.md`.
       Delivery: default returns to where you stood (`delivery_mode:=start_pose`); try

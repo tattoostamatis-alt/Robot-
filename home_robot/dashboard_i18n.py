@@ -311,6 +311,27 @@ TRANSLATIONS = {
     # ── room colours (map pane) ───────────────────────────────────────────
     'Χρώματα':           ('Colours', 'Farben'),
 
+    # ── fall alert ────────────────────────────────────────────────────────
+    'Κάποιος μπορεί να έπεσε': ('Someone may have fallen',
+                                'Jemand ist möglicherweise gestürzt'),
+    'Το είδα':           ('Dismiss', 'Gesehen'),
+    'κλίση':             ('tilt', 'Neigung'),
+
+    # ── check mission ("πήγαινε να δεις") ─────────────────────────────────
+    '🔎 Πήγαινε να δεις': ('🔎 Go and look', '🔎 Nachsehen'),
+    'Έλεγξε':            ('Check', 'Prüfen'),
+    'π.χ. είναι κλειστό το παράθυρο;':
+        ('e.g. is the window closed?', 'z.B. ist das Fenster zu?'),
+    'Ξεκίνησε…':         ('Started…', 'Gestartet…'),
+    'Ακυρώθηκε.':        ('Cancelled.', 'Abgebrochen.'),
+    'σε αναμονή':        ('idle', 'bereit'),
+    'πηγαίνει…':         ('driving…', 'fährt…'),
+    'κοιτάζει…':         ('looking…', 'schaut…'),
+    'γυρίζει…':          ('returning…', 'kommt zurück…'),
+    'ολοκληρώθηκε':      ('done', 'fertig'),
+    'απέτυχε':           ('failed', 'fehlgeschlagen'),
+    'ακυρώθηκε':         ('cancelled', 'abgebrochen'),
+
     # ── speed sliders (map pane) ──────────────────────────────────────────
     '🚀 Ταχύτητα':       ('🚀 Speed', '🚀 Geschwindigkeit'),
     '🔄 Στροφή':         ('🔄 Turn rate', '🔄 Drehrate'),

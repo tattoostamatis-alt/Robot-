@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """Pick-and-place — bridges object_detector.py detections to arm_driver.py.
 
-NOT YET HW-VERIFIED end-to-end. The RoArm-M3 is now connected (use_arm:=true),
-but every motion still goes through arm_driver.py's documented unknowns (T:105
-feedback field names, T:210 torque semantics) plus this node's own: the
-base_link->arm_base TF (bringup.launch.py's tf_base_arm) is a guessed
-placeholder, not a measurement. Re-verify slowly/by hand and calibrate
-tf_base_arm before trusting a full grasp.
+NOT YET HW-VERIFIED end-to-end. The RoArm-M3 is connected (use_arm:=true), but
+every motion still goes through arm_driver.py's documented unknowns (T:105
+feedback field names, T:210 torque semantics). Re-verify slowly and by hand
+before trusting a full grasp.
+
+‼️ This paragraph used to add "and tf_base_arm is a guessed placeholder, not a
+measurement". That was written 2026-07-06 and went stale on 2026-07-21
+(9957842), when the transform WAS measured for the 879 chassis: 120 mm forward
+of the wheel axle, centred, 150 mm above it (+36 mm wheel radius = z 0.186).
+The stale line survived long enough to be read as a live blocker on
+2026-08-03 and stall pick/fetch planning. If the arm is ever remounted, remeasure
+it — but it is not an open item today.
 
 Two modes on `pick_command` (JSON): default {"label":"cup"} picks and drops at
 the drop pose; {"label":"cup","hold":true} grasps and lifts but keeps the object

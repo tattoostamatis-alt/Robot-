@@ -668,6 +668,22 @@ def generate_launch_description():
         condition=IfCondition(use_pose),
     )
 
+    # ── Fall monitoring (geometry over pose_node's skeletons) ─────
+    # Costs nothing extra on the GPU — it reads pose_detections. Gated on the
+    # same use_pose flag because without skeletons it can only sit silent, and
+    # a silent safety monitor is indistinguishable from a safe house.
+    fall_monitor_node = Node(
+        package='home_robot',
+        executable='fall_monitor_node.py',
+        name='fall_monitor_node',
+        output='screen',
+        parameters=[{
+            'hold_s': LaunchConfiguration('fall_hold_s', default='6.0'),
+            'speak':  LaunchConfiguration('fall_speak', default='true'),
+        }],
+        condition=IfCondition(use_pose),
+    )
+
     # ── Face detection (YuNet on NPU) ─────────────────────────────
     face_detection_node = Node(
         package='home_robot',
@@ -1173,6 +1189,7 @@ def generate_launch_description():
         detector_node,
         camera_watchdog_node,
         pose_node,
+        fall_monitor_node,
         face_detection_node,
         tracker_node,
         diarization_node_action,

@@ -36,6 +36,7 @@ install(PROGRAMS
   home_robot/nodes/diarization_node.py
   home_robot/nodes/recovery_manager_node.py
   home_robot/nodes/obstacle_prediction_node.py
+  home_robot/nodes/fall_monitor_node.py
   home_robot/nodes/situational_awareness_node.py
   home_robot/nodes/mission_executor_node.py
   home_robot/nodes/semantic_costmap_node.py

@@ -189,6 +189,21 @@ TOOLS = [
         'parameters': {'type': 'object', 'properties': {}},
     }},
     {'type': 'function', 'function': {
+        # The mission behind this has existed since the mission executor was
+        # written and was unreachable by voice — there was no tool for it, so
+        # "πήγαινε να δεις αν έκλεισα το παράθυρο" could only be triggered by
+        # publishing to mission/start by hand.
+        'name': 'check',
+        'description': ('Πήγαινε σε ΑΛΛΟ δωμάτιο, κοίτα, γύρνα πίσω και πες τι '
+                        'είδες. Για "δες αν...", "τσέκαρε αν...". ΟΧΙ για το '
+                        'δωμάτιο που είναι ήδη.'),
+        'parameters': {'type': 'object', 'properties': {
+            'room': {'type': 'string', 'description': 'greeklish όνομα δωματίου'},
+            'question': {'type': 'string',
+                         'description': 'τι να ελέγξει, π.χ. "είναι κλειστό το παράθυρο;"'},
+        }, 'required': ['room']},
+    }},
+    {'type': 'function', 'function': {
         'name': 'remember',
         'description': 'Θυμήσου μόνιμα ένα γεγονός. Μόνο όταν το ζητά ρητά ο χρήστης.',
         'parameters': {'type': 'object', 'properties': {
@@ -1169,6 +1184,19 @@ class LLMBridgeNode(Node):
                 return {'status': 'error', 'reason': 'no object specified'}
             self.mission_pub.publish(String(data=f'fetch:{obj}'))
             return {'status': 'started', 'action': 'fetch', 'object': obj}
+
+        elif name == 'check':
+            room = (args.get('room') or '').strip().lower()
+            if room not in self.locations:
+                return {'status': 'error',
+                        'reason': f'unknown room: {room or "(none)"}'}
+            question = (args.get('question') or '').strip() or 'τι βλέπεις;'
+            # ':' separates the mission's own fields, so a question containing
+            # one would be parsed as a third field and silently truncated.
+            question = question.replace(':', ' ')
+            self.mission_pub.publish(String(data=f'check:{room}:{question}'))
+            return {'status': 'started', 'action': 'check',
+                    'room': room, 'question': question}
 
         elif name == 'goto_object':
             obj = (args.get('object') or '').strip().lower()

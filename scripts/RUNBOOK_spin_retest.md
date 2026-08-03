@@ -19,7 +19,7 @@
 **PART 3 — Νέα features 2026-07-06 (code-complete, HW-untested, δες κάτω):**
 - [ ] **#8 Semantic object memory** — θυμάται πού είναι αντικείμενα (map frame) + RAG recall
 - [ ] **#9 Dynamic obstacle layer** — άνθρωπος/κατοικίδιο στη διαδρομή → Nav2 παρακάμπτει
-- [ ] **#10 Pick visual servoing** — closed-loop XY πριν το grasp (θέλει use_arm + tf_base_arm calib)
+- [ ] **#10 Pick visual servoing** — closed-loop XY πριν το grasp (θέλει use_arm· το tf_base_arm ΜΕΤΡΗΘΗΚΕ 2026-07-21)
 - [ ] **#11 Voice barge-in** — "Έι ρομπότ" ενώ μιλάει → σταματά & ακούει
 
 **PART 4 — Fetch mission «φέρε μου το X» (code-complete, HW-untested, δες κάτω):**
@@ -219,9 +219,10 @@ ros2 topic echo /object_memory              # JSON: label/x/y/z(map)/room/last_s
 
 ### #10 Pick visual servoing (θέλει use_arm)
 
-⚠️ **ΠΡΩΤΑ βαθμονόμησε το `tf_base_arm`** — το servo καθαρίζει jitter, ΟΧΙ systematic
-calibration bias (η κάμερα δεν βλέπει το gripper). Δοκίμασε αργά / με το χέρι κοντά
-στο E-stop.
+ℹ️ Το `tf_base_arm` **ΜΕΤΡΗΘΗΚΕ** 2026-07-21 (9957842) για το σασί 879 — δεν είναι
+προαπαιτούμενο πια. Κράτα όμως υπόψη: το servo καθαρίζει jitter, **ΟΧΙ** systematic
+calibration bias (η κάμερα δεν βλέπει το gripper), άρα αν το grasp αστοχεί σταθερά
+κατά το ίδιο offset, ξαναμέτρα το TF. Δοκίμασε αργά / με το χέρι κοντά στο E-stop.
 
 ```bash
 ros2 topic pub --once pick_command std_msgs/String '{data: "{\"label\": \"cup\"}"}'
@@ -255,7 +256,7 @@ object memory → nav → pick(hold) → carry → place. Code-complete + 51 uni
 
 ### Προαπαιτούμενα (ΜΗΝ τα παραλείψεις)
 
-1. **Calibrate `tf_base_arm`** (κοινό με #10 — αλλιώς το grasp αστοχεί).
+1. ~~Calibrate `tf_base_arm`~~ — έγινε 2026-07-21 (9957842).
 2. **Το object memory (#8) να έχει ΔΕΙ το αντικείμενο** — γύρνα το robot να το
    καταγράψει πρώτα, αλλιώς το fetch πέφτει σε αργό room-by-room search.
 3. Όλα μαζί ζωντανά: perception + arm + mission + nav.

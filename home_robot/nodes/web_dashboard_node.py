@@ -327,6 +327,7 @@ class DashboardNode(Node):
         self._det_time  = 0.0
         self._det_poses: list = []
         self._pose_time = 0.0
+        self._pose_src_w = 0        # frame width poses were measured in
         self._overlay   = True        # toggled from the camera tab
 
         # ── Arm ─────────────────────────────────────────────────────────────
@@ -442,6 +443,18 @@ class DashboardNode(Node):
         self._dock_pub = self.create_publisher(Bool, '/dock', 10)
         self._follow_pub = self.create_publisher(Bool, '/follow_command', 10)
         self._nerf_pub = self.create_publisher(Bool, '/nerf/capture', 10)
+        # Same topic the llm_bridge `check` tool publishes, so the button and
+        # "πήγαινε να δεις αν…" take one code path.
+        self._mission_pub = self.create_publisher(String, '/mission/start', 10)
+        self.create_subscription(String, '/mission/status',
+                                 self._cb_mission, 10)
+        # Latched to match fall_monitor_node: a browser opened after the alert
+        # must see it, not a stale all-clear.
+        self.create_subscription(
+            Bool, '/fall_alert', self._cb_fall,
+            QoSProfile(depth=1, durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+                       reliability=QoSReliabilityPolicy.RELIABLE))
+        self.create_subscription(String, '/fall_event', self._cb_fall_event, 10)
         self.create_subscription(String, '/nerf/status', self._cb_nerf, 5)
         self._arm_cmd_pub = self.create_publisher(JointState, '/arm/joint_cmd', 10)
         self._gripper_pub = self.create_publisher(Float32, '/arm/gripper_cmd', 10)
@@ -912,6 +925,12 @@ class DashboardNode(Node):
             poses = json.loads(msg.data)
         except (ValueError, TypeError):
             return
+        # pose_node now sends {'persons': [...], 'width', 'height'}; it used to
+        # send a bare list. Both are accepted so the overlay survives a stale
+        # installed copy of either node.
+        if isinstance(poses, dict):
+            self._pose_src_w = poses.get('width') or 0
+            poses = poses.get('persons') or []
         if isinstance(poses, list):
             self._det_poses = [p for p in poses if isinstance(p, dict)]
             self._pose_time = time.monotonic()
@@ -1048,6 +1067,24 @@ class DashboardNode(Node):
             self._state.broadcast({'type': 'nerf', **json.loads(msg.data)})
         except (ValueError, TypeError):
             pass
+
+    def _cb_fall(self, msg: Bool):
+        # remember=True: replayed to a browser that connects later, which is
+        # the whole point of a safety alert nobody may be watching live.
+        self._state.broadcast({'type': 'fall', 'on': bool(msg.data)})
+
+    def _cb_fall_event(self, msg: String):
+        try:
+            detail = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        self._state.broadcast({'type': 'fall_event', **detail}, remember=False)
+
+    def _cb_mission(self, msg: String):
+        # Plain state name: idle / navigating / inspecting / done / failed /
+        # cancelled. The answer itself comes back as speech, which the browser
+        # already shows in the chat pane.
+        self._state.broadcast({'type': 'mission', 'state': msg.data})
 
     def _cb_dock(self, msg: String):
         self._state.broadcast({'type': 'dock', 'status': msg.data})
@@ -1392,6 +1429,17 @@ class DashboardNode(Node):
                     self._costmap_on.add(client)
                 else:
                     self._costmap_on.discard(client)
+        elif t == 'check_room':
+            room = str(msg.get('room', '')).strip()
+            question = str(msg.get('question', '')).strip() or 'τι βλέπεις;'
+            # ':' is the mission string's own separator — a question carrying
+            # one would be truncated. Same guard as the llm_bridge tool.
+            question = question.replace(':', ' ')
+            if room in self._locations:
+                self._mission_pub.publish(
+                    String(data=f'check:{room}:{question}'))
+        elif t == 'cancel_mission':
+            self._mission_pub.publish(String(data='cancel'))
         elif t == 'room_tint':
             self._rooms_tinted = bool(msg.get('on', True))
             # The map is only published when it changes — on a static map that
@@ -2176,6 +2224,14 @@ button{font:inherit;color:inherit}
   margin-top:3px}
 .tcell.warn{border-color:#7c2d12}.tcell.warn .tv{color:#fbbf24}
 .tcell.bad{border-color:#7f1d1d}.tcell.bad .tv{color:#f87171}
+/* ── fall alert banner ── */
+#fall-bar{display:flex;gap:11px;align-items:center;background:#450a0a;
+  border:1px solid #b91c1c;color:#fecaca;border-radius:11px;padding:11px 14px;
+  margin-bottom:10px;animation:fallpulse 1.6s ease-in-out infinite}
+@keyframes fallpulse{0%,100%{border-color:#b91c1c}50%{border-color:#f87171}}
+/* Respect the OS setting — a pulsing red bar is exactly the kind of motion
+   people turn animations off for. */
+@media (prefers-reduced-motion: reduce){#fall-bar{animation:none}}
 /* ── speed sliders (map tab) ── */
 .speedbox{margin-top:11px;padding-top:11px;border-top:1px solid #2c2c32}
 .srow{display:grid;grid-template-columns:96px 1fr 74px;gap:10px;align-items:center;
@@ -2298,6 +2354,17 @@ button{font:inherit;color:inherit}
   <div id="panes">
 
     <!-- ── Map ─────────────────────────────────────────────────── -->
+    <!-- Fall alert. Outside the panes on purpose: it must be visible whichever
+         tab is open, because nobody watches the map tab waiting for it. -->
+    <div id="fall-bar" style="display:none">
+      <span style="font-size:20px">🚨</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:600">Κάποιος μπορεί να έπεσε</div>
+        <div id="fall-detail" style="font-size:11.5px;opacity:.85"></div>
+      </div>
+      <button class="btn" id="fall-ack">Το είδα</button>
+    </div>
+
     <section class="pane active" id="p-map">
       <div id="map-wrap">
         <canvas id="map-canvas"></canvas>
@@ -2313,6 +2380,19 @@ button{font:inherit;color:inherit}
         </h3>
         <div class="row" id="rooms"></div>
         <div class="row" id="room-legend" style="margin-top:8px;gap:11px"></div>
+        <div class="speedbox">
+          <div class="row">
+            <span style="font-size:12.5px;color:#a1a1aa">🔎 Πήγαινε να δεις</span>
+            <select id="ck-room" class="btn" style="padding:6px 9px"></select>
+            <input id="ck-q" placeholder="π.χ. είναι κλειστό το παράθυρο;"
+              style="flex:1;min-width:140px;background:#232329;border:1px solid #2c2c32;
+              border-radius:8px;color:#e4e4e7;padding:7px 10px;font-size:12.5px"
+              autocomplete="off">
+            <button class="btn pri" id="ck-go">Έλεγξε</button>
+            <button class="btn" id="ck-stop">✕</button>
+          </div>
+          <div id="ck-msg" style="font-size:11.5px;color:#71717a;margin-top:6px"></div>
+        </div>
       </div>
       <div class="card">
         <div class="row" style="justify-content:space-between">
@@ -3112,6 +3192,9 @@ const HANDLERS = {
     $('s-nodes').textContent = m.nodes.join('\n');
   },
   llm_backend(m){ onBackend(m); },
+  mission(m){ onMission(m); },
+  fall(m){ onFall(m); },
+  fall_event(m){ onFallEvent(m); },
 };
 
 function connect(){
@@ -3170,6 +3253,44 @@ function roomLegend(rooms){
   }).join('');
 }
 $('b-tint').onchange = e => send({type:'room_tint', on: e.target.checked});
+
+// ── "πήγαινε να δεις" (check mission) ──────────────────────────────────────
+// The same mission the voice `check` tool starts: drive to the room, ask the
+// VLM, come back, say the answer. Wired here too because typing a question is
+// easier than saying it, and because the mission existed for months with no
+// way at all to trigger it.
+ROOMS.forEach(name => {
+  const o = document.createElement('option');
+  o.value = name; o.textContent = name;
+  $('ck-room').appendChild(o);
+});
+$('ck-go').onclick = () => {
+  const room = $('ck-room').value;
+  if (!room) return;
+  send({type:'check_room', room, question: $('ck-q').value});
+  $('ck-msg').textContent = t('Ξεκίνησε…');
+};
+$('ck-stop').onclick = () => {
+  send({type:'cancel_mission'});
+  $('ck-msg').textContent = t('Ακυρώθηκε.');
+};
+// Sending on Enter, because a phone keyboard has no comfortable way to reach
+// the button once the field is focused.
+$('ck-q').addEventListener('keydown', e => {
+  if (e.key === 'Enter') $('ck-go').click();
+});
+
+const MISSION_EL = {
+  idle:'σε αναμονή', navigating:'πηγαίνει…', inspecting:'κοιτάζει…',
+  returning:'γυρίζει…', done:'ολοκληρώθηκε', failed:'απέτυχε',
+  cancelled:'ακυρώθηκε',
+};
+function onMission(m){
+  const s = (m.state || '').toLowerCase();
+  $('ck-msg').textContent = t(MISSION_EL[s] || s);
+  $('ck-msg').style.color = s === 'failed' ? '#f87171'
+                          : s === 'done'   ? '#4ade80' : '#71717a';
+}
 
 // ── drive controls ─────────────────────────────────────────────────────────
 function startDrive(v,w){
@@ -3649,6 +3770,30 @@ async function mapSave(){
 // (no CDN) and 4000 points sorted back-to-front is about a millisecond, so the
 // extra machinery would buy nothing. Points arrive as int16 millimetres +
 // RGB, in the camera optical frame: +x right, +y DOWN, +z forward.
+// ── fall alert ──────────────────────────────────────────────────────────────
+// Dismissing hides the banner but does NOT clear the robot's state: the person
+// is still on the floor until fall_monitor_node says otherwise. If a NEW alert
+// arrives after dismissal it shows again, which is why the flag is keyed to the
+// event rather than to a global "muted".
+let fallSeen = false;
+function onFall(m){
+  if (!m.on){ fallSeen = false; $('fall-bar').style.display = 'none'; return; }
+  if (fallSeen) return;
+  $('fall-bar').style.display = 'flex';
+}
+function onFallEvent(m){
+  fallSeen = false;
+  $('fall-bar').style.display = 'flex';
+  const when = m.at ? new Date(m.at * 1000).toLocaleTimeString() : '';
+  const ang = (m.torso_angle === null || m.torso_angle === undefined)
+              ? '' : ' · ' + t('κλίση') + ' ' + m.torso_angle + '°';
+  $('fall-detail').textContent = when + ang;
+}
+$('fall-ack').onclick = () => {
+  fallSeen = true;
+  $('fall-bar').style.display = 'none';
+};
+
 // ── LLM backend switch ──────────────────────────────────────────────────────
 // Switching to the NPU model can take a minute (FastFlowLM has to load 4.7 GB
 // of weights), so the buttons lock until the server answers rather than
