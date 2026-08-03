@@ -76,6 +76,11 @@ GUI_SESSION_SH = os.path.join(SHARE, 'scripts', 'gui_session.sh')
 # in src/, and `robot stop` kills anything running out of install/ — including,
 # if we ran it from there, the very script doing the restart.
 SRC_HOME = os.path.expanduser('~/robot_ws/src/home_robot')
+# Prefer the source tree so a rebuilt arm model shows up without a colcon
+# install, falling back to the installed share dir.
+SRC_CONFIG_DIR = (os.path.join(SRC_HOME, 'config')
+                  if os.path.isdir(os.path.join(SRC_HOME, 'config'))
+                  else os.path.join(SHARE, 'config'))
 SRC_MAPS_DIR = (os.path.join(SRC_HOME, 'maps')
                 if os.path.isdir(os.path.join(SRC_HOME, 'maps'))
                 else os.path.join(SHARE, 'maps'))
@@ -1610,6 +1615,26 @@ _CAM_KEEPALIVE_S = 2.0
 _CAM_STALE_REPEAT_S = 10.0
 
 
+@app.get('/arm_model.json')
+async def arm_model(request: Request, t: str = ''):
+    """The RoArm-M3's simplified geometry, built by scripts/build_arm_model.py.
+
+    Served rather than inlined: the page is already ~120 kB and this is another
+    170: inlining it would slow every page load for a tab most visits never
+    open. Cached hard because it only changes when the arm is remodelled.
+    """
+    if not _authorised(t, request.cookies):
+        return Response('Unauthorized', status_code=401)
+    path = os.path.join(SRC_CONFIG_DIR, 'arm_model.json')
+    if not os.path.exists(path):
+        return JSONResponse(
+            {'error': 'arm_model.json missing — run scripts/build_arm_model.py'},
+            status_code=404)
+    with open(path, 'rb') as f:
+        return Response(f.read(), media_type='application/json',
+                        headers={'Cache-Control': 'public, max-age=86400'})
+
+
 @app.get('/camera.mjpeg')
 async def camera(request: Request, t: str = ''):
     if not _authorised(t, request.cookies):
@@ -2493,6 +2518,16 @@ button{font:inherit;color:inherit}
     <!-- ── Arm ─────────────────────────────────────────────────── -->
     <section class="pane" id="p-arm">
       <div class="card">
+        <h3>3D <span class="badge" id="arm3d-info">—</span>
+          <button class="btn" id="b-arm3d-reset" style="float:right">Επαναφορά όψης</button>
+        </h3>
+        <canvas id="arm3d" style="width:100%;height:300px;background:#0a0a0b;
+          border-radius:8px;touch-action:none;cursor:grab;display:block"></canvas>
+        <div style="color:#71717a;font-size:11.5px;margin-top:6px">
+          Σύρε για περιστροφή · ροδέλα για ζουμ · κινείται με τις αρθρώσεις από κάτω
+        </div>
+      </div>
+      <div class="card">
         <h3>Αρθρώσεις</h3>
         <div id="joints"></div>
       </div>
@@ -2820,6 +2855,9 @@ function showTab(id){
   costSetActive(id === 'cost');
   if (id === 'cost') buildCostLegend();
   if (id === 'set') mapsRefresh();
+  // 170 kB of geometry, fetched the first time the tab is opened rather than
+  // on every page load — most visits never look at the arm.
+  if (id === 'arm'){ armLoad(); armDraw(); }
 }
 // NB: the initial showTab() call lives at the bottom of the script — calling it
 // here would touch VNC_APPS before its `const` is initialised (temporal dead
@@ -3152,6 +3190,10 @@ const HANDLERS = {
       if(sl && !sl.dataset.dragging) sl.value=m.pos[i];
       if(v) v.textContent=(m.pos[i]*180/Math.PI).toFixed(0)+'°';
     });
+    // Feed the 3D view from the REAL joint states, so what is on screen is
+    // where the arm is — not where a slider was last dragged.
+    armAngles = Object.assign({}, armPos);
+    armDraw();
     if('hand' in armPos){
       const g=$('grip'), gv=$('grip-v');
       if(g && !g.dataset.dragging) g.value=armPos.hand;
@@ -3631,6 +3673,11 @@ ARM_JOINTS.forEach(name=>{
   ['mouseup','touchend','touchcancel'].forEach(e=>sl.addEventListener(e,release));
   sl.addEventListener('input',()=>{
     $('jv-'+name).textContent=(sl.value*180/Math.PI).toFixed(0)+'°';
+    // Move the 3D view immediately on the slider, not on the joint_states
+    // echo: the arm lags the command and a preview that waits for hardware
+    // feels broken. The next real state message corrects it either way.
+    armAngles[name] = parseFloat(sl.value);
+    armDraw();
     send({type:'arm_joint',joint:name,pos:parseFloat(sl.value)});
   });
 });
@@ -3639,6 +3686,8 @@ const grip=$('grip');
 ['mouseup','touchend','touchcancel'].forEach(e=>grip.addEventListener(e,()=>delete grip.dataset.dragging));
 grip.addEventListener('input',()=>{
   $('grip-v').textContent=(grip.value*180/Math.PI).toFixed(0)+'°';
+  armAngles.hand = parseFloat(grip.value);
+  armDraw();
   send({type:'gripper',pos:parseFloat(grip.value)});
 });
 $('b-grip-open').onclick  = ()=>send({type:'gripper',pos:ARM_LIMITS.hand[1]});
@@ -3803,6 +3852,195 @@ async function mapSave(){
 // (no CDN) and 4000 points sorted back-to-front is about a millisecond, so the
 // extra machinery would buy nothing. Points arrive as int16 millimetres +
 // RGB, in the camera optical frame: +x right, +y DOWN, +z forward.
+// ── 3D arm ──────────────────────────────────────────────────────────────────
+// Painter's-algorithm triangle rendering on a 2D canvas. No three.js and no
+// WebGL: the page has to stay self-contained (no CDN) and this is ~3000
+// triangles, which a 2D context sorts and fills comfortably. Same reasoning as
+// the point-cloud tab.
+//
+// Geometry comes from /arm_model.json (scripts/build_arm_model.py), which
+// carries the real URDF joint chain — origins, axes and limits — so what is
+// drawn matches where the arm actually is, not an artist's impression.
+let armModel = null, armYaw = -0.9, armPitch = -0.35, armZoom = 1;
+let armAngles = {};          // joint name -> radians, live from /joint_states
+let armLoading = false;
+
+// URDF joint name -> the short name arm_driver/ARM_JOINTS uses.
+const ARM_JOINT_MAP = {
+  base_link_to_link1: 'base',
+  link1_to_link2:     'shoulder',
+  link2_to_link3:     'elbow',
+  link3_to_link4:     'wrist',
+  link4_to_link5:     'roll',
+  link5_to_gripper_link: 'hand',
+};
+
+// ── tiny 4x4 matrix helpers (column-major, like everything else in graphics) ──
+function m4id(){ return [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]; }
+function m4mul(a,b){
+  const o = new Array(16);
+  for(let c=0;c<4;c++) for(let r=0;r<4;r++){
+    let s=0; for(let k=0;k<4;k++) s += a[k*4+r]*b[c*4+k];
+    o[c*4+r]=s;
+  }
+  return o;
+}
+function m4trans(x,y,z){ const m=m4id(); m[12]=x; m[13]=y; m[14]=z; return m; }
+function m4rot(axis, ang){
+  // Rodrigues. The URDF gives an arbitrary axis per joint, not always Z.
+  const [x,y,z] = axis, c=Math.cos(ang), s=Math.sin(ang), t=1-c;
+  const n = Math.hypot(x,y,z) || 1, ax=x/n, ay=y/n, az=z/n;
+  return [
+    t*ax*ax+c,      t*ax*ay+s*az,  t*ax*az-s*ay, 0,
+    t*ax*ay-s*az,   t*ay*ay+c,     t*ay*az+s*ax, 0,
+    t*ax*az+s*ay,   t*ay*az-s*ax,  t*az*az+c,    0,
+    0,0,0,1];
+}
+function m4rpy(r,p,y){
+  return m4mul(m4rot([0,0,1],y), m4mul(m4rot([0,1,0],p), m4rot([1,0,0],r)));
+}
+function m4apply(m, v){
+  return [m[0]*v[0]+m[4]*v[1]+m[8]*v[2]+m[12],
+          m[1]*v[0]+m[5]*v[1]+m[9]*v[2]+m[13],
+          m[2]*v[0]+m[6]*v[1]+m[10]*v[2]+m[14]];
+}
+
+function armLoad(){
+  if (armModel || armLoading) return;
+  armLoading = true;
+  $('arm3d-info').textContent = t('φόρτωση…');
+  fetch('/arm_model.json' + TOKEN_QS)
+    .then(r => r.ok ? r.json() : Promise.reject(r.status))
+    .then(m => {
+      armModel = m;
+      const n = Object.values(m.links).reduce((a,v)=>a+v.length/9, 0);
+      $('arm3d-info').textContent = Math.round(n) + ' ' + t('τρίγωνα');
+      armDraw();
+    })
+    .catch(e => {
+      armLoading = false;
+      $('arm3d-info').textContent = t('δεν φορτώθηκε');
+      $('arm3d').getContext('2d').fillText?.('', 0, 0);
+    });
+}
+
+// Walk the joint chain, accumulating each link's world transform.
+function armLinkTransforms(){
+  const out = {world: m4id()};
+  for (const j of armModel.joints){
+    const parent = out[j.parent];
+    if (!parent) continue;
+    let m = m4mul(parent, m4mul(m4trans(j.xyz[0], j.xyz[1], j.xyz[2]),
+                                m4rpy(j.rpy[0], j.rpy[1], j.rpy[2])));
+    if (j.type !== 'fixed'){
+      const short = ARM_JOINT_MAP[j.name];
+      let a = short !== undefined && armAngles[short] !== undefined
+              ? armAngles[short] : 0;
+      if (j.limit) a = Math.max(j.limit[0], Math.min(j.limit[1], a));
+      m = m4mul(m, m4rot(j.axis, a));
+    }
+    out[j.child] = m;
+  }
+  return out;
+}
+
+function armDraw(){
+  const cv = $('arm3d'); if (!cv) return;
+  const ctx = cv.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== w*dpr || cv.height !== h*dpr){
+    cv.width = w*dpr; cv.height = h*dpr;
+  }
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,w,h);
+  if (!armModel){ return; }
+
+  const tf = armLinkTransforms();
+  // Camera: orbit yaw/pitch, orthographic. Arm is ~400 mm tall.
+  const cy = Math.cos(armYaw), sy = Math.sin(armYaw);
+  const cp = Math.cos(armPitch), sp = Math.sin(armPitch);
+  const scale = Math.min(w, h) / 520 * armZoom * 1.35;
+  const ox = w/2, oy = h*0.72;
+
+  const faces = [];
+  for (const [link, flat] of Object.entries(armModel.links)){
+    const m = tf[link]; if (!m) continue;
+    for (let i=0;i<flat.length;i+=9){
+      const p = [];
+      let depth = 0;
+      for (let k=0;k<3;k++){
+        // mm -> m, into world, then into view space.
+        const v = m4apply(m, [flat[i+k*3]/1000, flat[i+k*3+1]/1000, flat[i+k*3+2]/1000]);
+        const xr =  v[0]*cy + v[1]*sy;
+        const yr = -v[0]*sy + v[1]*cy;
+        const zr =  v[2];
+        const ys = yr*sp + zr*cp;
+        depth += yr*cp - zr*sp;
+        p.push([ox + xr*scale, oy - ys*scale]);
+      }
+      faces.push([depth/3, p, link]);
+    }
+  }
+  // Painter's algorithm: far to near. With a convex-ish arm this is enough,
+  // and it costs one sort instead of a depth buffer.
+  faces.sort((a,b) => a[0]-b[0]);
+
+  const zs = faces.length ? [faces[0][0], faces[faces.length-1][0]] : [0,1];
+  const span = (zs[1]-zs[0]) || 1;
+  for (const [d, p, link] of faces){
+    // Cheap depth shading — nearer is brighter. Real lighting would need
+    // normals through the transform; this reads as solid and costs nothing.
+    const tshade = (d - zs[0]) / span;
+    const base = link.startsWith('gripper') ? [90,150,230] : [150,155,165];
+    const f = 0.45 + 0.55*tshade;
+    ctx.fillStyle = `rgb(${base[0]*f|0},${base[1]*f|0},${base[2]*f|0})`;
+    ctx.beginPath();
+    ctx.moveTo(p[0][0], p[0][1]);
+    ctx.lineTo(p[1][0], p[1][1]);
+    ctx.lineTo(p[2][0], p[2][1]);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // Ground line, so the arm does not float in nothing.
+  ctx.strokeStyle = '#27272e'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, oy); ctx.lineTo(w, oy); ctx.stroke();
+}
+
+(function armWireInteraction(){
+  const cv = $('arm3d'); if (!cv) return;
+  let drag = null;
+  const pos = e => e.touches ? [e.touches[0].clientX, e.touches[0].clientY]
+                             : [e.clientX, e.clientY];
+  const down = e => { drag = pos(e); cv.style.cursor='grabbing'; };
+  const move = e => {
+    if (!drag) return;
+    const [x,y] = pos(e);
+    armYaw   += (x - drag[0]) * 0.01;
+    armPitch += (y - drag[1]) * 0.01;
+    armPitch = Math.max(-1.4, Math.min(1.4, armPitch));
+    drag = [x,y];
+    e.preventDefault();
+    armDraw();
+  };
+  const up = () => { drag = null; cv.style.cursor='grab'; };
+  cv.addEventListener('mousedown', down);
+  cv.addEventListener('touchstart', down, {passive:true});
+  window.addEventListener('mousemove', move);
+  cv.addEventListener('touchmove', move, {passive:false});
+  window.addEventListener('mouseup', up);
+  cv.addEventListener('touchend', up);
+  cv.addEventListener('wheel', e => {
+    e.preventDefault();
+    armZoom = Math.max(0.4, Math.min(3, armZoom * (e.deltaY > 0 ? 0.9 : 1.1)));
+    armDraw();
+  }, {passive:false});
+  $('b-arm3d-reset').onclick = () => {
+    armYaw=-0.9; armPitch=-0.35; armZoom=1; armDraw();
+  };
+})();
+
 // ── who is speaking ─────────────────────────────────────────────────────────
 // Deliberately shows what it does NOT know: a name with no matched face reads
 // differently from a confident identification, and the badge should not imply

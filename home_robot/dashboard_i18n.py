@@ -311,6 +311,14 @@ TRANSLATIONS = {
     # ── room colours (map pane) ───────────────────────────────────────────
     'Χρώματα':           ('Colours', 'Farben'),
 
+    # ── 3D arm view ───────────────────────────────────────────────────────
+    'Σύρε για περιστροφή · ροδέλα για ζουμ · κινείται με τις αρθρώσεις από κάτω':
+        ('Drag to rotate · wheel to zoom · follows the joints below',
+         'Ziehen zum Drehen · Rad zum Zoomen · folgt den Gelenken unten'),
+    'φόρτωση…':          ('loading…', 'lädt…'),
+    'τρίγωνα':           ('triangles', 'Dreiecke'),
+    'δεν φορτώθηκε':     ('failed to load', 'nicht geladen'),
+
     # ── who is speaking ───────────────────────────────────────────────────
     'Ποιος μιλάει':      ('Who is speaking', 'Wer spricht'),
     'Θέλει use_diarization (ποιος), DoA (από πού), use_face_detection '
