@@ -15,7 +15,7 @@ import os
 import pytest
 
 from home_robot.voice_gate import (
-    TOPIC, STOP_TOPIC, SpeakingGate,
+    TOPIC, STOP_TOPIC, SpeakingGate, utterance_is_risky,
     wake_decision, IGNORE, SUPPRESS, BARGE_IN, WAKE,
 )
 
@@ -196,3 +196,85 @@ def test_wake_word_publishes_barge_in_only_while_speaking():
     assert 'STOP_TOPIC' in src, 'wake_word_node must publish tts/stop'
     # Barge-in keys off actual speaking, not the reverb tail.
     assert '_gate.speaking' in src
+
+
+# ── self-echo: the reply that says the wake word ────────────────────────────
+# Barge-in was switched off wholesale on 2026-07-24 because the robot's own
+# replies self-fired the detector at ~1.00 and it interrupted every answer. The
+# hardware AEC does not remove self-speech from the wake channel, so no
+# threshold can separate the two — but the robot KNOWS what it is about to say,
+# and only replies containing the wake word are dangerous. Those are refused
+# outright; the rest keep barge-in available.
+
+def test_a_reply_naming_the_robot_is_flagged_risky():
+    assert utterance_is_risky('Είμαι ρομπότ καθαρισμού')
+    assert utterance_is_risky('ΡΟΜΠΟΤ')                  # case
+    assert utterance_is_risky('Το ρομπότ πηγαίνει')      # accents stripped
+    assert utterance_is_risky('I am a robot')            # latin spelling
+
+
+def test_an_ordinary_reply_is_not_flagged():
+    assert not utterance_is_risky('Πηγαίνω στην κουζίνα')
+    assert not utterance_is_risky('Η ώρα είναι 10:30')
+    assert not utterance_is_risky('')
+    assert not utterance_is_risky(None)
+
+
+def _decide(score, **kw):
+    opts = dict(suppressed=True, speaking=True, suppress_on_tts=True,
+                allow_barge_in=True, barge_in_threshold=0.70)
+    opts.update(kw)
+    return wake_decision(score, 0.50, **opts)
+
+
+def test_barge_in_is_refused_while_the_robot_says_the_wake_word():
+    """‼️ The exact case that made it interrupt itself every few seconds.
+
+    A high score here is far more likely to be the robot's own voice than a
+    person, so no threshold is trusted — it is suppressed outright.
+    """
+    assert _decide(0.99, risky_utterance=True) == SUPPRESS
+    assert _decide(1.00, risky_utterance=True) == SUPPRESS
+
+
+def test_barge_in_still_works_on_an_ordinary_reply():
+    """The other 95% of replies, which is the point of not disabling it."""
+    assert _decide(0.85, risky_utterance=False) == BARGE_IN
+
+
+def test_the_risky_flag_does_not_leak_into_normal_wakes():
+    """Not speaking at all: the flag must not suppress a genuine wake word."""
+    assert wake_decision(0.85, 0.50, suppressed=False, speaking=False,
+                         suppress_on_tts=True, allow_barge_in=True,
+                         barge_in_threshold=0.70,
+                         risky_utterance=True) == WAKE
+
+
+def test_the_stricter_threshold_still_applies_on_safe_replies():
+    assert _decide(0.60, risky_utterance=False) == SUPPRESS   # under 0.70
+    assert _decide(0.75, risky_utterance=False) == BARGE_IN
+
+
+def test_the_default_keeps_old_behaviour():
+    """risky_utterance is optional — existing callers must be unaffected."""
+    assert wake_decision(0.85, 0.50, suppressed=True, speaking=True,
+                         suppress_on_tts=True, allow_barge_in=True,
+                         barge_in_threshold=0.70) == BARGE_IN
+
+
+# ── wiring ──────────────────────────────────────────────────────────────────
+
+def test_wake_word_node_learns_what_the_robot_is_about_to_say():
+    src = open(f'{NODES}/wake_word_node.py').read()
+    assert "'speech_response'" in src, (
+        'wake_word_node must subscribe to speech_response — without the text '
+        'it cannot tell a dangerous reply from a safe one')
+    assert 'risky_utterance=self._risky_utterance' in src, \
+        'the flag is computed but never passed to wake_decision()'
+
+
+def test_the_risk_flag_is_cleared_when_playback_ends():
+    """Otherwise one reply naming the robot disables barge-in for ever."""
+    src = open(f'{NODES}/wake_word_node.py').read()
+    assert '_risky_utterance = False' in src, \
+        'nothing ever clears the flag'

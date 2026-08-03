@@ -74,10 +74,38 @@ BARGE_IN = 'barge_in'    # user interrupted active TTS — abort TTS, start a tu
 WAKE = 'wake'            # normal wake — start a turn
 
 
+# Words that, coming out of the robot's own mouth, can be mistaken for the wake
+# phrase by the detector. "Έι ρομπότ" is the phrase, but the model fires on the
+# "ρομπότ" half often enough that any reply containing it is a self-echo risk.
+# Accent-free: compared against strip_accents() output.
+_SELF_WAKE_WORDS = ('ρομποτ', 'robot')
+
+
+def utterance_is_risky(text: str) -> bool:
+    """Is the robot about to say something that could wake itself?
+
+    Barge-in's whole difficulty is that the hardware AEC does not fully remove
+    the robot's own voice from the wake-word channel, so a reply is judged on
+    the same audio as a real interruption. But most replies are harmless — the
+    detector only false-fires on the ones that actually contain the wake word.
+
+    Knowing WHICH utterance is dangerous costs nothing (the text is already in
+    hand before playback) and lets barge-in stay permissive for the other 95%
+    of replies instead of being switched off wholesale, which is what it had
+    been since 2026-07-24.
+    """
+    if not text:
+        return False
+    from .stop_command import strip_accents
+    flat = strip_accents(text)
+    return any(w in flat for w in _SELF_WAKE_WORDS)
+
+
 def wake_decision(score: float, threshold: float, *,
                   suppressed: bool, speaking: bool,
                   suppress_on_tts: bool, allow_barge_in: bool,
-                  barge_in_threshold: float) -> str:
+                  barge_in_threshold: float,
+                  risky_utterance: bool = False) -> str:
     """Classify a wake-word detection.
 
     The subtlety is telling a real interruption apart from the robot's own voice
@@ -86,11 +114,19 @@ def wake_decision(score: float, threshold: float, *,
     false positives tend to be brief marginal spikes, whereas a person saying the
     whole "Έι ρομπότ" scores high and sustained. Anything during the reverb tail
     (suppressed but no longer speaking) is always dropped.
+
+    `risky_utterance` says the reply now playing contains the wake word itself
+    (see :func:`utterance_is_risky`). Then no score is trustworthy — the robot
+    is literally saying the thing the detector listens for — so barge-in is
+    refused outright for the duration rather than gambling on a threshold. This
+    is what makes it safe to leave barge-in ON in general: the case that made it
+    interrupt itself every few seconds is exactly this one.
     """
     if score < threshold:
         return IGNORE
     if suppress_on_tts and suppressed:
-        if allow_barge_in and speaking and score >= barge_in_threshold:
+        if (allow_barge_in and speaking and not risky_utterance
+                and score >= barge_in_threshold):
             return BARGE_IN
         return SUPPRESS
     return WAKE

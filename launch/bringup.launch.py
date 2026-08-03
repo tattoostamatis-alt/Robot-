@@ -820,13 +820,24 @@ def generate_launch_description():
             # so the two are split rather than switched.
             'stt_channel': LaunchConfiguration('stt_channel', default='0'),
             # Barge-in: saying "Έι ρομπότ" while the robot is talking aborts the
-            # TTS and starts a new turn. DEFAULT false since 2026-07-24, when the
-            # robot's own replies (it named itself "Max") self-fired the detector
-            # at ~1.00 and it interrupted every answer; the ch4 AEC does not
-            # remove self-speech. The new phrase makes that less likely — the
-            # robot says "ρομπότ" but rarely "έι ρομπότ" — so this is worth
-            # retrying: pass allow_barge_in:=true and listen for self-interrupts.
-            'allow_barge_in': LaunchConfiguration('allow_barge_in', default='false'),
+            # TTS and starts a new turn.
+            #
+            # Was false from 2026-07-24, when the robot's own replies self-fired
+            # the detector at ~1.00 and it interrupted every answer. The cause is
+            # that the ch4 AEC does not remove self-speech, so a reply and a real
+            # interruption arrive as the same kind of audio and NO threshold can
+            # separate them.
+            #
+            # 2026-08-03: default true. Not because the threshold got better, but
+            # because the robot now checks WHAT it is about to say — a reply
+            # containing the wake word disables barge-in for its duration
+            # (utterance_is_risky in voice_gate.py), which is exactly the case
+            # that used to fire. Ordinary replies, the large majority, keep it.
+            # ‼️ HW-untested. If it still interrupts itself, pass
+            # allow_barge_in:=false and say so — the next lever is routing TTS
+            # through the ReSpeaker so the AEC finally has a reference signal
+            # (tts_node's device_name parameter).
+            'allow_barge_in': LaunchConfiguration('allow_barge_in', default='true'),
             # Wake acknowledgement ON again 2026-07-25: without any cue you
             # cannot tell whether the robot heard you, which the user asked for
             # explicitly ("like Hey Siri"). It was switched off because the old
@@ -1079,7 +1090,11 @@ def generate_launch_description():
         DeclareLaunchArgument('pick_approach_height', default_value='0.10'),
         DeclareLaunchArgument('use_wake_word', default_value='false'),
         DeclareLaunchArgument('use_stt',       default_value='false'),
-        DeclareLaunchArgument('allow_barge_in', default_value='false'),
+        # ‼️ The DECLARED default is the one that wins — the LaunchConfiguration
+        # default above is only a fallback for when this line does not exist.
+        # Leaving this at 'false' would have silently kept barge-in off, the
+        # same trap that kept use_doa dark for weeks.
+        DeclareLaunchArgument('allow_barge_in', default_value='true'),
         DeclareLaunchArgument('beep_on_wake',  default_value='true'),
         DeclareLaunchArgument('mic_channel',   default_value='4'),
         DeclareLaunchArgument('stt_channel',   default_value='0'),

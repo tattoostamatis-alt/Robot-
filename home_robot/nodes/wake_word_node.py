@@ -84,7 +84,7 @@ from ament_index_python.packages import get_package_share_directory
 
 from home_robot.voice_gate import (
     SpeakingGate, TOPIC as SPEAKING_TOPIC, STOP_TOPIC,
-    wake_decision, IGNORE, SUPPRESS, BARGE_IN,
+    wake_decision, utterance_is_risky, IGNORE, SUPPRESS, BARGE_IN,
 )
 
 
@@ -200,6 +200,9 @@ class WakeWordNode(Node):
         self.barge_in_threshold = self.get_parameter('barge_in_threshold').value
         self._gate = SpeakingGate(
             release_tail=self.get_parameter('tts_release_tail').value)
+        # True while the reply being spoken contains the wake word itself.
+        # Set from speech_response, cleared when playback ends.
+        self._risky_utterance = False
 
         # Stateful high-pass filter for the mic channel (see highpass_hz above).
         # lfilter_zi seeds the filter state so the very first chunks aren't a
@@ -235,6 +238,10 @@ class WakeWordNode(Node):
         self.stop_pub = self.create_publisher(Bool, STOP_TOPIC, 10)
         self.audio_pub = self.create_publisher(Int16MultiArray, 'mic/audio', 200)
         self.create_subscription(Bool, SPEAKING_TOPIC, self._on_tts_speaking, 10)
+        # The same text tts_node is about to speak, so a reply containing the
+        # wake word can disable barge-in for its duration.
+        self.create_subscription(String, 'speech_response',
+                                 self._on_speech_response, 10)
 
         # ‼️ BOUNDED. This was an unbounded Queue fed from the realtime audio
         # callback and drained by the model. Whenever prediction fell behind
@@ -352,6 +359,25 @@ class WakeWordNode(Node):
 
     def _on_tts_speaking(self, msg: Bool):
         self._gate.set_speaking(msg.data)
+        if not msg.data:
+            # Playback finished — the risk belonged to that utterance only.
+            # Cleared on the falling edge rather than when the next reply
+            # arrives, so a long silence cannot leave the gate clamped shut.
+            self._risky_utterance = False
+
+    def _on_speech_response(self, msg: String):
+        """The text the robot is about to say, straight from llm_bridge.
+
+        Arrives before tts/speaking goes True (the TTS node has to synthesise
+        first), so the flag is set by the time playback starts. Knowing the
+        text is what lets barge-in stay on: only replies that actually contain
+        the wake word are dangerous, and those are refused outright instead of
+        being trusted to a threshold.
+        """
+        self._risky_utterance = utterance_is_risky(msg.data)
+        if self._risky_utterance:
+            self.get_logger().debug(
+                'Reply contains the wake word — barge-in disabled for it')
 
     def _detect_loop(self):
         while rclpy.ok():
@@ -365,7 +391,8 @@ class WakeWordNode(Node):
                     speaking=self._gate.speaking,
                     suppress_on_tts=self.suppress_on_tts,
                     allow_barge_in=self.allow_barge_in,
-                    barge_in_threshold=self.barge_in_threshold)
+                    barge_in_threshold=self.barge_in_threshold,
+                    risky_utterance=self._risky_utterance)
 
                 if decision == IGNORE:
                     continue

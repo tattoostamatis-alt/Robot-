@@ -46,6 +46,25 @@ class TTSNode(Node):
         self.declare_parameter('rate', '+0%')
         self.declare_parameter('volume', '+0%')
         self.declare_parameter('device_index', 7)  # pulse — works with any PulseAudio output
+        # ‼️ Where the voice comes OUT decides whether echo cancellation can
+        # work at all, and on THIS robot it cannot.
+        #
+        # The XVF3800 cancels the robot's own voice by subtracting what it is
+        # playing — a reference it only has for audio sent through ITS output.
+        # Here the sound goes to the motherboard's headphone jack (confirmed
+        # with the user 2026-08-03: nothing is plugged into the ReSpeaker's own
+        # 3.5 mm jack), so the DSP never sees the reference, cannot cancel
+        # anything, and the robot hears itself say the wake word.
+        #
+        # THAT is why barge-in kept firing on the robot's own replies — not a
+        # badly tuned threshold. No amount of threshold work fixes it, because
+        # a reply and a real interruption reach the detector as the same audio.
+        # The software answer is in voice_gate.utterance_is_risky(): refuse
+        # barge-in for replies that contain the wake word.
+        #
+        # If a speaker is ever wired to the ReSpeaker, set this to 'XVF3800'
+        # and the AEC loop closes for real. Empty keeps device_index.
+        self.declare_parameter('device_name', '')
         # Hold `tts/speaking` True this long after playback ends so the listeners
         # ride out the room-reverb tail before re-arming (see voice_gate.py).
         self.declare_parameter('speaking_tail', 0.3)
@@ -81,6 +100,9 @@ class TTSNode(Node):
         self.rate = self.get_parameter('rate').value
         self.volume = self.get_parameter('volume').value
         self.device_index = self.get_parameter('device_index').value
+        name_hint = (self.get_parameter('device_name').value or '').strip()
+        if name_hint:
+            self.device_index = self._find_output(name_hint)
         self.speaking_tail = self.get_parameter('speaking_tail').value
         self.synth_timeout = self.get_parameter('synth_timeout').value
         self.synth_attempts = max(1, int(self.get_parameter('synth_attempts').value))
@@ -115,6 +137,27 @@ class TTSNode(Node):
         self.create_subscription(Bool, STOP_TOPIC, self._on_stop, 10)
 
         self.get_logger().info(f'TTS node started — voice={self.voice}')
+
+    def _find_output(self, hint: str) -> int:
+        """Index of the first output device whose name contains `hint`.
+
+        Falls back to the configured device_index — and says so — rather than
+        raising: a mute robot is a worse failure than one whose echo
+        cancellation is not closed.
+        """
+        try:
+            for i, dev in enumerate(sd.query_devices()):
+                if dev['max_output_channels'] > 0 and hint.lower() in dev['name'].lower():
+                    self.get_logger().info(
+                        f"Speaking through '{dev['name']}' (index {i})")
+                    return i
+        except Exception as e:
+            self.get_logger().warn(f'could not enumerate audio outputs: {e}')
+        self.get_logger().warn(
+            f"no output device matching '{hint}' — falling back to index "
+            f'{self.device_index}. Echo cancellation will NOT work if that is '
+            'not the ReSpeaker.')
+        return self.device_index
 
     def _set_speaking(self, speaking: bool):
         # Publish on every call so late joiners get the current state, but only
