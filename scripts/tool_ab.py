@@ -18,10 +18,25 @@ NODE = pathlib.Path.home() / 'robot_ws/src/home_robot/home_robot/nodes/llm_bridg
 WANT = {'SYSTEM_PROMPT', '_ROOMS', '_APPS', 'TOOLS'}
 
 
+def _preseed():
+    """Node-level names the extracted assignments read but don't define.
+
+    SYSTEM_PROMPT is assigned twice: the literal, then a .replace() that spells
+    the room list out of ROOM_NAMES_EL (imported, not assigned). Executing the
+    second assignment with a bare namespace died with `NameError:
+    ROOM_NAMES_EL`, which took every bench down with it -- the room list landed
+    in the prompt on 2026-08-01 and nothing has run since. status_query is pure
+    Python, so importing it here still costs no rclpy.
+    """
+    sys.path.insert(0, str(NODE.parents[2]))
+    from home_robot.status_query import ROOM_NAMES_EL
+    return {'ROOM_NAMES_EL': ROOM_NAMES_EL}
+
+
 def extract(names):
     """Pull top-level constants out of the node without importing ROS."""
     tree = ast.parse(NODE.read_text(encoding='utf-8'))
-    ns = {}
+    ns = _preseed()
     for node in tree.body:
         if isinstance(node, ast.Assign) and len(node.targets) == 1:
             t = node.targets[0]
