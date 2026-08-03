@@ -20,6 +20,36 @@ import threading
 import queue
 from collections import deque
 
+# ‼️ Hide `coverage` from numba, BEFORE anything imports it.
+#
+# resemblyzer -> librosa -> numba, and numba/misc/coverage_support.py does
+#     class NumbaTracer(coverage.types.Tracer)
+# at import time. The apt-installed coverage here is 7.4.4, which has no
+# `types.Tracer` (added later), so every embedding raised
+#     AttributeError: module 'coverage.types' has no attribute 'Tracer'
+# and the node ran happily while never identifying a single speaker.
+#
+# numba guards that import with try/ImportError and sets coverage_available =
+# False, so making the import fail is enough. Upgrading coverage is not an
+# option: it is a system apt package and pip refuses under PEP 668.
+#
+# find_SPEC, not find_module — Python 3.12 ignores the old hook silently, which
+# looks exactly like the hook not working.
+#
+# Scope: this process only, and coverage is a test tool no ROS node needs.
+import sys as _sys
+
+
+class _HideCoverage:
+    def find_spec(self, name, path=None, target=None):
+        if name == 'coverage' or name.startswith('coverage.'):
+            raise ImportError('coverage hidden for numba compatibility')
+        return None
+
+
+if 'coverage' not in _sys.modules:
+    _sys.meta_path.insert(0, _HideCoverage())
+
 # VitisAI EP setup before onnxruntime import.
 _VENV_SITE = '/home/dimi/ryzenai_venv/lib/python3.12/site-packages'
 if os.path.isdir(_VENV_SITE):
@@ -29,12 +59,14 @@ os.environ.setdefault('RYZEN_AI_INSTALLATION_PATH', '/home/dimi/ryzenai_venv')
 
 import numpy as np
 import onnxruntime as ort
-import sounddevice as sd
+# sounddevice no longer needed: audio comes from the mic/audio topic, since
+# wake_word_node owns the device. Left out deliberately — importing it here
+# once cost a confusing "device busy" at startup.
 from resemblyzer import VoiceEncoder, preprocess_wav
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import String
+from std_msgs.msg import Int16MultiArray, String
 
 SAMPLE_RATE    = 16000
 FRAME_MS       = 30
@@ -50,12 +82,31 @@ class SileroVAD:
         opts = ort.SessionOptions()
         opts.inter_op_num_threads = 1
         opts.intra_op_num_threads = 1
-        if os.path.isfile(_VAIP_CONFIG):
-            self._sess = ort.InferenceSession(
-                _SILERO_MODEL, sess_options=opts,
-                providers=['VitisAIExecutionProvider', 'CPUExecutionProvider'],
-                provider_options=[{'config_file': _VAIP_CONFIG}, {}])
-        else:
+        # ‼️ CPU, deliberately — NOT the NPU.
+        #
+        # With VitisAIExecutionProvider this node died on startup, every time:
+        #   check failure: status.IsOK() This is an invalid model.
+        #   Error: Duplicate definition of name (631)
+        # and the process aborted (SIGABRT), so use_diarization:=true brought up
+        # nothing and "who is speaking" never had a name. Measured 2026-08-03:
+        # the same file loads clean on CPUExecutionProvider, so the model is
+        # fine and it is the VitisAI compiler that rejects it.
+        #
+        # Nothing is lost by staying on CPU. Silero is 1.8 MB and runs on 30 ms
+        # frames — well under a millisecond — while the NPU is wanted for the
+        # LLM. Set HOME_ROBOT_VAD_NPU=1 to try the NPU again after a Ryzen AI
+        # upgrade; it falls back to CPU rather than taking the node down.
+        want_npu = os.environ.get('HOME_ROBOT_VAD_NPU') == '1'
+        self._sess = None
+        if want_npu and os.path.isfile(_VAIP_CONFIG):
+            try:
+                self._sess = ort.InferenceSession(
+                    _SILERO_MODEL, sess_options=opts,
+                    providers=['VitisAIExecutionProvider', 'CPUExecutionProvider'],
+                    provider_options=[{'config_file': _VAIP_CONFIG}, {}])
+            except Exception:
+                self._sess = None
+        if self._sess is None:
             self._sess = ort.InferenceSession(
                 _SILERO_MODEL, sess_options=opts,
                 providers=['CPUExecutionProvider'])
@@ -128,7 +179,11 @@ class DiarizationNode(Node):
 
         self._audio_q: queue.Queue[np.ndarray] = queue.Queue(maxsize=200)
         self._running = True
-        threading.Thread(target=self._capture_loop, daemon=True).start()
+        # Audio arrives on a topic, not from our own device — wake_word_node
+        # owns the microphone. Deep queue: this is the realtime path and the
+        # embedding step is slow enough to fall behind on a busy machine.
+        self.create_subscription(Int16MultiArray, 'mic/audio',
+                                 self._on_mic_audio, 200)
         threading.Thread(target=self._process_loop, daemon=True).start()
 
         names = ', '.join(self._profiles) or '(none)'
@@ -177,23 +232,30 @@ class DiarizationNode(Node):
 
     # ── Audio capture ────────────────────────────────────────────────
 
-    def _capture_loop(self):
-        dev = None if self._dev_idx == -1 else self._dev_idx
-        try:
-            with sd.InputStream(
-                device=dev, samplerate=SAMPLE_RATE,
-                channels=self._n_ch, dtype='int16',
-                blocksize=FRAME_SAMPLES,
-            ) as stream:
-                while self._running:
-                    data, _ = stream.read(FRAME_SAMPLES)
-                    mono = data[:, min(self._ch, self._n_ch - 1)]
-                    try:
-                        self._audio_q.put_nowait(mono.copy())
-                    except queue.Full:
-                        pass  # drop oldest indirectly; queue drains in process_loop
-        except Exception as e:
-            self.get_logger().error(f'Audio capture failed: {e}')
+    def _on_mic_audio(self, msg):
+        """Audio from wake_word_node's `mic/audio`, not our own stream.
+
+        ‼️ Opening a second InputStream cannot work here: wake_word_node holds
+        the XVF3800 EXCLUSIVELY (ALSA reports "Υποσυσκευές: 0/1" while it
+        runs), so this node's capture thread either failed outright or grabbed
+        the wrong device, and diarization heard nothing at all — silently,
+        with the node alive and "Diarization ready" in the log.
+
+        The topic is also the BETTER source: it carries the stt_channel, which
+        is the XVF3800's processed/beamformed output (39.5 dB SNR measured
+        2026-07-26) rather than a raw capsule. Same audio Whisper transcribes,
+        so the speaker embedded here is the speaker that was understood.
+        """
+        if not msg.data:
+            return
+        mono = np.asarray(msg.data, dtype=np.int16)
+        # Split into the VAD's fixed frame size; Silero needs exact lengths and
+        # the publisher's chunk size is not ours to assume.
+        for i in range(0, len(mono) - FRAME_SAMPLES + 1, FRAME_SAMPLES):
+            try:
+                self._audio_q.put_nowait(mono[i:i + FRAME_SAMPLES].copy())
+            except queue.Full:
+                pass
 
     # ── VAD + segment detection ──────────────────────────────────────
 
