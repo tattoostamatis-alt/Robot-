@@ -118,7 +118,12 @@ _ROOMS = list(ROOM_NAMES_EL)
 TOOLS = [
     {'type': 'function', 'function': {
         'name': 'tidy',
-        'description': 'Τακτοποίησε/καθάρισε ένα δωμάτιο',
+        # ‼️ Said "Τακτοποίησε/καθάρισε ένα δωμάτιο", which collides head-on
+        # with `sort` — "τακτοποίησε το σπίτι" went here and the robot drove
+        # around reporting clutter instead of picking any of it up. This node
+        # SWEEPS; it does not touch anything with the arm.
+        'description': 'Σκούπισε/καθάρισε ένα δωμάτιο με τη σκούπα. ΟΧΙ πιάσιμο '
+                       'αντικειμένων — γι\' αυτό είναι το sort.',
         'parameters': {'type': 'object', 'properties': {
             'room': {'type': 'string', 'enum': _ROOMS + ['all']},
         }, 'required': ['room']},
@@ -187,6 +192,19 @@ TOOLS = [
         'name': 'report_clutter',
         'description': 'Λίστα σκόρπιων αντικειμένων (clutter) από το YOLO. ΟΧΙ για "τι βλέπεις".',
         'parameters': {'type': 'object', 'properties': {}},
+    }},
+    {'type': 'function', 'function': {
+        # Distinct from `tidy`, which only drives around reporting clutter.
+        # This one actually picks things up and carries them.
+        'name': 'sort',
+        'description': ('ΠΙΑΣΕ σκόρπια αντικείμενα με τον βραχίονα και βάλ\' τα '
+                        'στη θέση τους. Για "μάζεψε τα παιχνίδια", "τακτοποίησε '
+                        'το σπίτι", "βάλ\' τα στη θέση τους".'),
+        'parameters': {'type': 'object', 'properties': {
+            'destination': {'type': 'string',
+                            'description': 'προαιρετικό: μόνο ό,τι πάει σε αυτό '
+                                           'το δωμάτιο (greeklish)'},
+        }},
     }},
     {'type': 'function', 'function': {
         # The mission behind this has existed since the mission executor was
@@ -1184,6 +1202,15 @@ class LLMBridgeNode(Node):
                 return {'status': 'error', 'reason': 'no object specified'}
             self.mission_pub.publish(String(data=f'fetch:{obj}'))
             return {'status': 'started', 'action': 'fetch', 'object': obj}
+
+        elif name == 'sort':
+            group = (args.get('destination') or '').strip().lower()
+            if group and group not in self.locations:
+                return {'status': 'error', 'reason': f'unknown room: {group}'}
+            self.mission_pub.publish(
+                String(data=f'sort:{group}' if group else 'sort'))
+            return {'status': 'started', 'action': 'sort',
+                    'destination': group or 'all'}
 
         elif name == 'check':
             room = (args.get('room') or '').strip().lower()

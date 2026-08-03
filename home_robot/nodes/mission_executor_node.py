@@ -54,6 +54,7 @@ from std_msgs.msg import Bool, String
 from std_srvs.srv import Empty
 
 from home_robot import dock_geometry
+from home_robot.sort_planner import SortProgress, SortRules, plan_order
 from home_robot.fetch_planner import (approach_pose, memory_target,
                                       nearest_detection, homing_twist)
 from home_robot.status_query import ROOM_NAMES_EL, rooms_from_locations
@@ -78,6 +79,22 @@ def _load_locations() -> dict:
             return yaml.safe_load(f) or {}
     except Exception:
         return {}
+
+
+def _load_sort_rules():
+    """config/sort_rules.yaml — where each object label belongs.
+
+    Missing or unreadable is not fatal: every other mission still works, and
+    the sort mission says so rather than the node refusing to start.
+    """
+    try:
+        path = os.path.join(
+            get_package_share_directory('home_robot'), 'config', 'sort_rules.yaml'
+        )
+        with open(path) as f:
+            return SortRules.from_yaml(yaml.safe_load(f))
+    except Exception:
+        return None
 
 
 # The room names come from status_query so speech is identical wherever it is
@@ -114,6 +131,10 @@ class MissionExecutorNode(Node):
         # died mid-goal). Deliberately far longer than any real room-to-room
         # drive: this is about not hanging forever, not about pacing Nav2.
         self.declare_parameter('nav_timeout', 300.0)         # s
+        # sorting ("μάζεψε τα παιχνίδια")
+        self.declare_parameter('sort_max_items', 20)     # hard stop on one run
+        self.declare_parameter('sort_max_attempts', 2)   # per object, then give up
+        self.declare_parameter('sort_max_reach', 6.0)    # m — leave the far side for later
         self._fetch_approach_dist = self.get_parameter('fetch_approach_dist').value
         self._fetch_grasp_range   = self.get_parameter('fetch_grasp_range').value
         self._memory_max_age      = self.get_parameter('memory_max_age').value
@@ -129,12 +150,17 @@ class MissionExecutorNode(Node):
         self._dock_settle         = self.get_parameter('dock_settle').value
         self._aim_timeout         = self.get_parameter('aim_timeout').value
         self._nav_timeout         = self.get_parameter('nav_timeout').value
+        self._sort_max_items      = self.get_parameter('sort_max_items').value
+        self._sort_max_attempts   = self.get_parameter('sort_max_attempts').value
+        self._sort_max_reach      = self.get_parameter('sort_max_reach').value
 
         self._locations  = _load_locations()
         self._state      = State.IDLE
         self._cancel_flag = threading.Event()
         self._lock       = threading.Lock()
         self._latest_objects: list = []
+        self._object_memory: list = []      # confirmed set, for sorting
+        self._sort_rules = _load_sort_rules()
         self._tracked_rx = 0.0    # last tracked_objects arrival (see _on_detected)
 
         self._nav_ac = ActionClient(self, NavigateToPose, 'navigate_to_pose')
@@ -160,6 +186,8 @@ class MissionExecutorNode(Node):
         self.create_subscription(String, 'tracked_objects',   self._on_tracked,         10)
         self.create_subscription(String, 'detected_objects',  self._on_detected,        10)
         self.create_subscription(String, 'object_memory/answer', self._on_mem_answer,   10)
+        # Whole confirmed set, for the sort mission (query answers one label).
+        self.create_subscription(String, 'object_memory', self._on_object_memory, 10)
         self.create_subscription(String, 'pick_result',       self._on_pick_result,     10)
         self.create_subscription(String, 'place_result',      self._on_place_result,    10)
         self.create_subscription(String, 'vision/answer',     self._on_vision_answer,    10)
@@ -318,6 +346,11 @@ class MissionExecutorNode(Node):
             self._mission_goto_object(label)
         elif cmd == 'dock':
             self._mission_dock()
+        elif cmd.startswith('sort'):
+            # "sort" = everything with a rule; "sort:<destination>" = only the
+            # things that belong there ("μάζεψε τα παιχνίδια").
+            group = cmd[5:].strip() or None if cmd.startswith('sort:') else None
+            self._mission_sort(group)
         elif cmd == 'check_rooms':
             self._mission_check_rooms()
         elif cmd.startswith('check:'):
@@ -775,6 +808,99 @@ class MissionExecutorNode(Node):
             self._finish(State.DONE, 'Ολοκλήρωσα έλεγχο δωματίων.')
 
     # ── Mission: check ("πήγαινε δες X και πες μου") ─────────────────
+
+    def _mission_sort(self, group=None):
+        """Tidy up: pick each known object and carry it where it belongs.
+
+        Fetch in a loop, with two differences that matter over a run lasting
+        minutes: the plan is REBUILT after every pick (the robot has moved and
+        object_memory may have been updated), and a failure moves on to the
+        next object instead of ending the mission. An object that keeps failing
+        is abandoned after MAX_ATTEMPTS — otherwise the robot loops on the one
+        thing it cannot grasp while the rest of the floor stays untidied.
+        """
+        if self._sort_rules is None or not self._sort_rules.known_labels:
+            self._finish(State.FAILED,
+                         'Δεν ξέρω πού πάει τι. Λείπει το sort_rules.yaml.')
+            return
+        if group is not None and not self._sort_rules.labels_for(group):
+            self._finish(State.FAILED, f'Δεν ξέρω τι πάει στο {group}.')
+            return
+
+        self.get_logger().info(f'Mission: sort group={group!r}')
+        self._speak('Ξεκινάω να μαζεύω.' if group is None
+                    else f'Μαζεύω ό,τι πάει {LOCATION_NAMES_EL.get(group, group)}.')
+        progress = SortProgress(max_attempts=self._sort_max_attempts)
+
+        for _ in range(self._sort_max_items):
+            if self._cancel_flag.is_set():
+                break
+
+            # Re-plan every round: the robot has moved, so "nearest" changed,
+            # and object_memory may have seen or lost things meanwhile.
+            objects = self._sort_candidates()
+            here = self._lookup_base_pose()
+            robot_xy = (here[0], here[1]) if here else (0.0, 0.0)
+            ordered = plan_order(objects, robot_xy, self._sort_rules,
+                                 group=group, max_reach=self._sort_max_reach)
+            target = progress.next_target(ordered)
+            if target is None:
+                break
+
+            ok = self._sort_one(target)
+            progress.record(target, ok)
+
+        if self._cancel_flag.is_set():
+            self._finish(State.CANCELLED, 'Σταμάτησα το μάζεμα.')
+            return
+        self._finish(State.DONE, progress.summary_el())
+
+    def _sort_one(self, target) -> bool:
+        """Approach, grasp, carry to the destination, release. False on any
+        failure — the caller decides whether to retry or move on."""
+        label = target['label']
+        dest = target['destination']
+        self._set_state(State.NAVIGATING)
+
+        here = self._lookup_base_pose()
+        robot_xy = (here[0], here[1]) if here else (0.0, 0.0)
+        ax, ay, ayaw = approach_pose(robot_xy, (target['x'], target['y']),
+                                     dist=self._fetch_approach_dist)
+        if not self._navigate_to_xy(ax, ay, ayaw):
+            return False
+        if self._cancel_flag.is_set():
+            return False
+
+        # hold=True: keep it in the gripper for the drive, same as fetch.
+        self._set_state(State.INSPECTING)
+        if not self._do_pick(label, hold=True):
+            return False
+
+        self._set_state(State.NAVIGATING)
+        if not self._navigate_to(dest):
+            # Already holding the object. Put it down where we are rather than
+            # driving around with it indefinitely — a known place beats a
+            # gripper that never opens.
+            self._do_place()
+            return False
+        return self._do_place()
+
+    def _on_object_memory(self, msg: String):
+        """Whole confirmed set, republished by object_memory_node at ~1 Hz.
+
+        Subscribed rather than queried: sorting needs EVERYTHING it knows
+        about, and object_memory/query answers one label at a time.
+        """
+        try:
+            items = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        if isinstance(items, list):
+            self._object_memory = items
+
+    def _sort_candidates(self):
+        """Everything object_memory currently knows about, as plain dicts."""
+        return list(self._object_memory)
 
     def _mission_check(self, room: str, question: str):
         """Go to <room>, ask the VLM <question> about what the camera sees

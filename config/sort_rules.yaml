@@ -1,0 +1,46 @@
+# Where each thing belongs — used by the `sort` mission ("μάζεψε τα παιχνίδια").
+#
+# Destination-first on purpose. Written label-first, adding a room means
+# touching every label that belongs to it; this way a room is one line, a label
+# appears exactly once, and a label listed twice is a visible duplicate rather
+# than a silent last-one-wins. sort_planner.SortRules reports duplicates.
+#
+# Destinations are keys from config/locations.yaml — the robot navigates to
+# them, so a destination that is not a taught location cannot be reached.
+# Labels are English COCO classes, because that is what object_detector emits.
+#
+# ‼️ Only these labels get picked up. An object with no rule is LEFT ALONE
+# rather than moved somewhere invented — see `default` at the bottom.
+
+rules:
+  # The living room is where the toys end up.
+  saloni:
+    - sports ball
+    - teddy bear
+    - frisbee
+    - kite
+
+  kouzina:
+    - cup
+    - bottle
+    - bowl
+    - fork
+    - knife
+    - spoon
+    - wine glass
+    - banana
+    - apple
+    - orange
+
+  domatio tou max:
+    - book
+    - backpack
+    - laptop
+    - mouse
+    - keyboard
+    - cell phone
+
+# Where anything with no rule goes. Leave empty (null) to skip unknown objects
+# entirely, which is the safe default: a robot that carries off something it
+# was never told about is worse than one that leaves the floor untidy.
+default: null

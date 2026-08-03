@@ -327,6 +327,10 @@ TRANSLATIONS = {
     'ταυτοποιημένος':    ('identified', 'identifiziert'),
     'κανείς δεν μιλάει': ('nobody speaking', 'niemand spricht'),
 
+    '🧺 Μάζεψε':         ('🧺 Tidy up', '🧺 Aufräumen'),
+    'Μαζεύει αντικείμενα με τον βραχίονα':
+        ('Picks objects up with the arm', 'Hebt Gegenstände mit dem Arm auf'),
+
     # ── fall alert ────────────────────────────────────────────────────────
     'Κάποιος μπορεί να έπεσε': ('Someone may have fallen',
                                 'Jemand ist möglicherweise gestürzt'),

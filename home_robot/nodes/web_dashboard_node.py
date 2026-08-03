@@ -1454,6 +1454,10 @@ class DashboardNode(Node):
             if room in self._locations:
                 self._mission_pub.publish(
                     String(data=f'check:{room}:{question}'))
+        elif t == 'sort':
+            room = str(msg.get('room', '')).strip()
+            self._mission_pub.publish(String(
+                data=f'sort:{room}' if room and room in self._locations else 'sort'))
         elif t == 'cancel_mission':
             self._mission_pub.publish(String(data='cancel'))
         elif t == 'room_tint':
@@ -2406,6 +2410,7 @@ button{font:inherit;color:inherit}
               autocomplete="off">
             <button class="btn pri" id="ck-go">Έλεγξε</button>
             <button class="btn" id="ck-stop">✕</button>
+            <button class="btn" id="sort-go" title="Μαζεύει αντικείμενα με τον βραχίονα">🧺 Μάζεψε</button>
           </div>
           <div id="ck-msg" style="font-size:11.5px;color:#71717a;margin-top:6px"></div>
         </div>
@@ -3291,6 +3296,11 @@ $('ck-go').onclick = () => {
   const room = $('ck-room').value;
   if (!room) return;
   send({type:'check_room', room, question: $('ck-q').value});
+  $('ck-msg').textContent = t('Ξεκίνησε…');
+};
+// Sorting reuses the room picker: empty-ish selection means "everything".
+$('sort-go').onclick = () => {
+  send({type:'sort', room: $('ck-room').value});
   $('ck-msg').textContent = t('Ξεκίνησε…');
 };
 $('ck-stop').onclick = () => {

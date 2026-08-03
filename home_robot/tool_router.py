@@ -72,6 +72,12 @@ _GROUPS = [
      r'κατασταση|καταστασ\w*|μπαταρι\w*|cpu|επεξεργαστ\w*|μνημη|ram|'
      r'δισκ\w*|θερμοκρασ\w*|βαθμ\w*|uptime|ζεστα\w*|φορτι\w*'),
 
+    # 'μαζεψ/μαζευ/τακτοποι/συγυρ' also appear in the goto/tidy group above, so
+    # both reach the model and it picks — `tidy` drives and reports, `sort`
+    # actually carries things. Only the model can tell which the user meant.
+    (['sort'],
+     r'μαζεψ\w*|μαζευ\w*|τακτοποι\w*|συγυρ\w*|παιχνιδ\w*|στη\s+θεση'),
+
     (['report_clutter', 'pick', 'fetch'],
      r'σκορπι\w*|ακαταστασ\w*|clutter|αντικειμεν\w*|πιασ\w*|φερ\w*|'
      r'μαζεψ\w*|μαζευ\w*|σηκωσ\w*|κουπ\w*|μπουκαλ\w*|βιβλι\w*|ποτηρ\w*|'
