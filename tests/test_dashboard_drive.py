@@ -56,27 +56,69 @@ def test_the_estop_still_zeroes_the_same_topic_it_drives():
 # ── bug 2: a turn rate the wheels cannot execute ────────────────────────────
 
 def _consts():
-    m = re.search(r'const LIN = ([\d.]+), ANG = ([\d.]+);', _SRC)
-    assert m, 'the LIN/ANG constants are gone'
-    return float(m.group(1)), float(m.group(2))
+    """The speed defaults. These are sliders now, so also grab their bounds."""
+    out = {}
+    for name in ('LIN_DEF', 'ANG_DEF', 'LIN_MIN', 'LIN_MAX', 'ANG_MIN', 'ANG_MAX'):
+        m = re.search(r'\b%s\s*=\s*([\d.]+)' % name, _SRC)
+        assert m, f'the {name} constant is gone'
+        out[name] = float(m.group(1))
+    return out
 
 
 def test_the_turn_rate_clears_the_rotation_floor():
-    _, ang = _consts()
-    assert ang > ROTATION_FLOOR, (
-        f'ANG={ang} rad/s is at or below the 879\'s {ROTATION_FLOOR} rad/s '
-        'rotation floor — the wheels will not move and the turn buttons look dead')
+    c = _consts()
+    assert c['ANG_DEF'] > ROTATION_FLOOR, (
+        f"ANG_DEF={c['ANG_DEF']} rad/s is at or below the 879's {ROTATION_FLOOR} "
+        'rad/s rotation floor — the wheels will not move and the turn buttons '
+        'look dead')
     # Some margin, not just a hair over: the floor is approximate and the driver
     # ramps into it through max_angular_accel.
-    assert ang >= 0.35, f'ANG={ang} leaves no margin above the floor'
+    assert c['ANG_DEF'] >= 0.35, 'ANG_DEF leaves no margin above the floor'
+
+
+def test_the_turn_slider_cannot_be_dragged_below_the_floor():
+    """The whole point of a floor is that the UI cannot cross it.
+
+    A slider that reaches 0.10 rad/s lets the user set a turn rate the base
+    silently swallows, and the robot reads as broken — the exact bug the ANG
+    default was raised to fix, reintroduced through a control instead.
+    """
+    c = _consts()
+    assert c['ANG_MIN'] > ROTATION_FLOOR, (
+        f"ANG_MIN={c['ANG_MIN']} lets the slider reach the dead band at or "
+        f'below {ROTATION_FLOOR} rad/s')
+    assert c['ANG_MIN'] >= 0.35, 'ANG_MIN leaves no margin above the floor'
+    # And the HTML control must agree with the constant, or the clamp is the
+    # only thing standing between the user and a dead-looking robot.
+    m = re.search(r'id="sp-ang"[^>]*min="([\d.]+)"[^>]*max="([\d.]+)"', _SRC)
+    assert m, 'the turn slider is gone'
+    assert float(m.group(1)) >= c['ANG_MIN'], 'slider min is under ANG_MIN'
+    assert float(m.group(2)) <= c['ANG_MAX'], 'slider max is over ANG_MAX'
 
 
 def test_the_drive_speed_stays_gentle_indoors():
     """Nothing here should turn into a flat-out sprint by accident: this is a
     phone D-pad with no analogue control and a network in the loop."""
-    lin, ang = _consts()
-    assert 0 < lin <= 0.25, f'LIN={lin} m/s is too fast for tap-to-nudge driving'
-    assert ang <= 1.20, f'ANG={ang} exceeds the joystick\'s own 1.20 rad/s'
+    c = _consts()
+    assert 0 < c['LIN_DEF'] <= 0.25, 'LIN_DEF is too fast for tap-to-nudge driving'
+    assert c['LIN_MAX'] <= 0.30, 'the speed slider tops out too fast for indoors'
+    assert c['ANG_DEF'] <= 1.20, "ANG_DEF exceeds the joystick's own 1.20 rad/s"
+    assert c['ANG_MAX'] <= 1.20, "the turn slider exceeds the joystick's 1.20 rad/s"
+
+
+def test_the_dpad_multiplies_speed_at_press_time():
+    """bindDrive must take signs, not speeds.
+
+    Passing LIN/ANG in captures whatever they were when the page wired itself
+    up, so the sliders would move a number nothing reads — the control would
+    look functional and do nothing.
+    """
+    assert re.search(r"bindDrive\('bf',\s*1,\s*0\)", _SRC), \
+        'the D-pad is bound to speeds, not signs — the sliders will not work'
+    assert re.search(r'startDrive\(sv\*LIN,\s*sw\*ANG\)', _SRC), \
+        'bindDrive does not multiply by the current speed'
+    assert re.search(r'startDrive\(k\[0\]\*LIN,\s*k\[1\]\*ANG\)', _SRC), \
+        'the keyboard does not multiply by the current speed'
 
 
 # ── the keyboard ────────────────────────────────────────────────────────────

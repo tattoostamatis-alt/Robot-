@@ -299,9 +299,37 @@ TRANSLATIONS = {
 
     # ── system pane ───────────────────────────────────────────────────────
     'Υπολογιστής':       ('Computer', 'Rechner'),
-    'Μνήμη':             ('Memory', 'Speicher'),
-    'Θερμοκρασία':       ('Temperature', 'Temperatur'),
+    # 'CPU' and 'RAM' are deliberately absent: identical in all three
+    # languages, and t() passes anything it does not know through unchanged.
+    'Θερμοκρασίες':      ('Temperatures', 'Temperaturen'),
+    'Δίσκοι':            ('Disks', 'Datenträger'),
+    'Φόρτος':            ('Load', 'Last'),
+    'νήματα':            ('threads', 'Threads'),
+    'GB ελεύθερα':       ('GB free', 'GB frei'),
     'Κόμβοι ROS (':      ('ROS nodes (', 'ROS-Knoten ('),
+
+    # ── room colours (map pane) ───────────────────────────────────────────
+    'Χρώματα':           ('Colours', 'Farben'),
+
+    # ── speed sliders (map pane) ──────────────────────────────────────────
+    '🚀 Ταχύτητα':       ('🚀 Speed', '🚀 Geschwindigkeit'),
+    '🔄 Στροφή':         ('🔄 Turn rate', '🔄 Drehrate'),
+    '🐢 Αργά':           ('🐢 Slow', '🐢 Langsam'),
+    'Προεπιλογή':        ('Default', 'Standard'),
+    '🐇 Γρήγορα':        ('🐇 Fast', '🐇 Schnell'),
+
+    # ── LLM backend switch ────────────────────────────────────────────────
+    'Ποιος απαντά':      ('Who answers', 'Wer antwortet'),
+    'Αλλαγή…':           ('Switching…', 'Wechsel…'),
+    'Το Gemini απαντά σε ~0.5s και δεν πιάνει μνήμη. Το Qwen τρέχει τοπικά '
+    'στο NPU — δεν χρειάζεται ίντερνετ, αλλά αργεί ~6s και κρατά 4.7 GB RAM. '
+    'Η αλλαγή σβήνει τις τελευταίες ατάκες της κουβέντας.':
+        ('Gemini answers in ~0.5s and uses no memory. Qwen runs locally on the '
+         'NPU — no internet needed, but it takes ~6s and holds 4.7 GB of RAM. '
+         'Switching clears the last few lines of the conversation.',
+         'Gemini antwortet in ~0.5s und braucht keinen Speicher. Qwen läuft '
+         'lokal auf der NPU — ohne Internet, aber ~6s langsam und belegt '
+         '4,7 GB RAM. Der Wechsel löscht die letzten Gesprächszeilen.'),
 
     # ── 3D pane ───────────────────────────────────────────────────────────
     '3D κάμερα (D435)':  ('3D camera (D435)', '3D-Kamera (D435)'),

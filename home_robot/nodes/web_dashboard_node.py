@@ -63,7 +63,9 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-PORT = 8080
+# Overridable so a second instance can be brought up beside the live one for
+# testing without taking the robot's dashboard off 8080.
+PORT = int(os.environ.get('HOME_ROBOT_DASHBOARD_PORT', '8080'))
 SHARE = get_package_share_directory('home_robot')
 # Resolve via the installed share dir — a path relative to __file__ breaks
 # under `ros2 run` (lib/home_robot/../config does not exist).
@@ -190,7 +192,16 @@ class State:
         self._clients: Set[WebSocket] = set()
         self.map_png:   Optional[bytes] = None
         self.map_info:  Optional[dict]  = None
+        # Room legend + tint state, replayed with the map on connect.
+        self.map_rooms: dict = {}
+        self.map_tinted: bool = True
         self.camera_jpg: Optional[bytes] = None
+        # When that frame arrived, and how many have arrived in total. The
+        # stream needs both: the age decides whether the picture is still
+        # live, and the counter lets it send each frame ONCE instead of
+        # re-sending whatever is in the buffer 25 times a second.
+        self.camera_at: float = 0.0
+        self.camera_seq: int = 0
         # Replayed to every browser that connects, so a tab opened an hour into
         # a session is populated immediately instead of waiting for the next
         # message on each topic. Keyed by message type.
@@ -339,6 +350,12 @@ class DashboardNode(Node):
             SetParameters, '/camera/camera/set_parameters')
         self._map_cache = None          # (fetched_at, name); see active_map()
         self._backend_cache = None      # (fetched_at, backend); see llm_backend()
+        self._cam_err_at = 0.0          # throttles the decode-failure warning
+        self._room_mask = (None, None, None)   # see _load_room_mask()
+        self._room_mask_at = None              # mtime the cache was built from
+        self._room_size_warned = False
+        self._rooms_tinted = True              # toggled from the map tab
+        self._last_map = None                  # so the toggle can redraw
         self.create_subscription(
             PointCloud2, '/camera/camera/depth/color/points', self._cb_cloud,
             QoSProfile(depth=1,
@@ -446,6 +463,7 @@ class DashboardNode(Node):
     # ── ROS callbacks ────────────────────────────────────────────────────────
 
     def _cb_map(self, msg: OccupancyGrid):
+        self._last_map = msg          # kept so the room-tint toggle can redraw
         grid = np.array(msg.data, dtype=np.int8).reshape(
             msg.info.height, msg.info.width)
         img = np.full((msg.info.height, msg.info.width, 3), 180, dtype=np.uint8)
@@ -453,6 +471,11 @@ class DashboardNode(Node):
         img[grid == 100] = [50,  50,  50]
         img[grid == -1]  = [160, 160, 160]
         img = cv2.flip(img, 0)
+        # Tint the free space with each room's colour, so "πήγαινε στην κουζίνα"
+        # can be checked against something visible instead of a uniform grey
+        # field. Only free cells are tinted: walls stay black or the map stops
+        # reading as a floor plan.
+        img = self._tint_rooms(img, cv2.flip(grid, 0))
         _, png = cv2.imencode('.png', img)
         self._state.map_png = png.tobytes()
         info = {
@@ -463,11 +486,86 @@ class DashboardNode(Node):
                            msg.info.origin.position.y],
         }
         self._state.map_info = info
+        # Drives the legend. Stashed on State rather than only broadcast, so
+        # the replay a newly-connected browser gets carries it too — sent only
+        # here, every fresh tab showed an empty legend and an unchecked
+        # "Χρώματα" box over a map that was in fact tinted.
+        _, _, names = self._load_room_mask()
+        self._state.map_rooms = {n: list(c) for n, c in (names or {}).items()}
+        self._state.map_tinted = self._rooms_tinted
         self._state.broadcast({
             'type':  'map',
             **info,
             'image': base64.b64encode(self._state.map_png).decode(),
+            'rooms': self._state.map_rooms,
+            'tinted': self._state.map_tinted,
         }, remember=False)   # replayed from map_png on connect, not from latest
+
+    # How strongly the room colour is mixed into the floor. Low on purpose: the
+    # map has to stay readable as a map — obstacles, the plan and the laser are
+    # all drawn over it — so this is a wash, not a fill.
+    ROOM_TINT = 0.38
+
+    def _load_room_mask(self):
+        """maps/room_mask.png as BGR + its per-room alpha, cached.
+
+        Returns (bgr, alpha, names) or (None, None, None). The mask is the same
+        one situational_awareness and room_markers read, so what the dashboard
+        paints and what the robot calls the room can never disagree.
+
+        Reloaded when the file changes on disk, so regenerating it after a
+        remap shows up without restarting the dashboard.
+        """
+        path = os.path.join(SRC_MAPS_DIR, 'room_mask.png')
+        try:
+            stamp = os.path.getmtime(path)
+        except OSError:
+            self._room_mask = (None, None, None)
+            return self._room_mask
+        if self._room_mask_at == stamp:
+            return self._room_mask
+        try:
+            from PIL import Image
+            arr = np.array(Image.open(path).convert('RGBA'))
+            names = {}
+            colours_path = os.path.join(SRC_MAPS_DIR, 'room_colors.yaml')
+            if os.path.exists(colours_path):
+                with open(colours_path) as f:
+                    names = yaml.safe_load(f) or {}
+            rgb = arr[:, :, :3].astype(np.float32)
+            bgr = rgb[:, :, ::-1]
+            alpha = (arr[:, :, 3] > 50)
+            self._room_mask = (bgr, alpha, names)
+        except Exception as e:
+            self.get_logger().warn(f'room_mask unusable: {e}')
+            self._room_mask = (None, None, None)
+        self._room_mask_at = stamp
+        return self._room_mask
+
+    def _tint_rooms(self, img, grid):
+        """Blend the room mask into the free cells of an already-drawn map."""
+        if not self._rooms_tinted:
+            return img
+        bgr, alpha, _ = self._load_room_mask()
+        if bgr is None:
+            return img
+        if bgr.shape[:2] != img.shape[:2]:
+            # A mask from a different map would paint rooms in the wrong place,
+            # which is worse than no colour at all. test_smoke checks this too.
+            if not self._room_size_warned:
+                self._room_size_warned = True
+                self.get_logger().warn(
+                    f'room_mask.png is {bgr.shape[1]}x{bgr.shape[0]} but the map '
+                    f'is {img.shape[1]}x{img.shape[0]} — not tinting. '
+                    'Regenerate with scripts/make_room_mask.py')
+            return img
+        paint = alpha & (grid == 0)          # free cells only
+        if not paint.any():
+            return img
+        out = img.astype(np.float32)
+        out[paint] = (out[paint] * (1 - self.ROOM_TINT)
+                      + bgr[paint] * self.ROOM_TINT)
+        return out.astype(np.uint8)
 
     def _cb_semantic(self, msg: PointCloud2):
         """Obstacles the DETECTOR put into the costmap, not the LiDAR.
@@ -712,8 +810,17 @@ class DashboardNode(Node):
                 self._draw_overlay(bgr, src_w)
             _, jpg = cv2.imencode('.jpg', bgr, [cv2.IMWRITE_JPEG_QUALITY, 75])
             self._state.camera_jpg = jpg.tobytes()
-        except Exception:
-            pass
+            self._state.camera_at = time.monotonic()
+            self._state.camera_seq += 1
+        except Exception as e:
+            # Was a bare `pass`. A frame this callback cannot decode stops the
+            # picture updating for ever, and the silence made that look like a
+            # dead camera rather than a dashboard bug. Throttled because a bad
+            # encoding repeats at the full frame rate.
+            now = time.monotonic()
+            if now - self._cam_err_at > 10.0:
+                self._cam_err_at = now
+                self.get_logger().warn(f'camera frame dropped: {e}')
 
     # COCO-17 skeleton, the same edge list pose_node.py uses. Duplicated rather
     # than imported: pose_node pulls in torch and ultralytics at import time,
@@ -965,29 +1072,117 @@ class DashboardNode(Node):
 
     # ── System panel ─────────────────────────────────────────────────────────
 
-    def _publish_system(self):
-        temp = None
+    # Which hwmon chip is which piece of hardware, and what to call it in the
+    # UI. Measured on this Krackan mini PC (`sensors`): k10temp/Tctl is the CPU
+    # package, amdgpu/edge the integrated GPU, nvme/Composite the SSD, spd5118
+    # the two RAM modules, acpitz the board. Anything not listed still shows up
+    # under its raw chip name rather than being dropped — a sensor that appears
+    # after a kernel upgrade should be visible, not silently missing.
+    _TEMP_LABELS = {
+        'k10temp':  ('CPU',      '🔥'),
+        'amdgpu':   ('iGPU',     '🎮'),
+        'nvme':     ('SSD',      '💾'),
+        'spd5118':  ('RAM',      '🧠'),
+        'acpitz':   ('Μητρική',  '🖥️'),
+    }
+    # Above this a temperature is drawn as a warning. The NPU box throttles well
+    # before anything is damaged, so these are "look at me", not "shut down".
+    _TEMP_WARN = {'CPU': 85.0, 'iGPU': 85.0, 'SSD': 70.0, 'RAM': 60.0,
+                  'Μητρική': 80.0}
+
+    def _temperatures(self):
+        """Every temperature the box exposes, newest reading, as a flat list.
+
+        One entry per sensor, not per chip: the NVMe reports Composite plus two
+        internal sensors and both RAM modules report separately, and collapsing
+        them to "the first one" (what this used to do) threw away the hottest
+        reading — which is the only one worth looking at.
+        """
+        out = []
         try:
-            for name, entries in (psutil.sensors_temperatures() or {}).items():
-                if entries and name in ('k10temp', 'acpitz', 'coretemp'):
-                    temp = round(entries[0].current, 1)
-                    break
+            chips = psutil.sensors_temperatures() or {}
         except Exception:
-            pass
+            return out
+        for chip, entries in sorted(chips.items()):
+            name, icon = self._TEMP_LABELS.get(chip, (chip, '🌡️'))
+            multi = len(entries) > 1
+            for i, e in enumerate(entries):
+                # "SSD" when there is one reading, "SSD Composite" / "RAM 2"
+                # when the chip reports several.
+                label = name
+                if multi:
+                    label = f'{name} {e.label}' if e.label else f'{name} {i + 1}'
+                out.append({
+                    'name': label, 'icon': icon,
+                    'c': round(e.current, 1),
+                    'warn': self._TEMP_WARN.get(name),
+                    'high': round(e.high, 1) if e.high else None,
+                })
+        return out
+
+    @staticmethod
+    def _disks():
+        """Real filesystems only.
+
+        psutil lists every squashfs snap mount — 30+ of them here, all 100%
+        full by definition — which would bury the one number that matters (how
+        much room is left on the SSD) under pages of noise.
+        """
+        out = []
+        seen = set()
+        for p in psutil.disk_partitions():
+            if p.fstype in ('squashfs', 'tmpfs', 'devtmpfs', 'overlay'):
+                continue
+            if p.device in seen:
+                continue          # same device bind-mounted twice
+            try:
+                u = psutil.disk_usage(p.mountpoint)
+            except Exception:
+                continue
+            seen.add(p.device)
+            out.append({
+                'mount': p.mountpoint,
+                'pct':   round(u.percent, 1),
+                'free':  round(u.free / 2**30, 1),
+                'total': round(u.total / 2**30, 1),
+            })
+        return out
+
+    def _publish_system(self):
         vm = psutil.virtual_memory()
+        sw = psutil.swap_memory()
         # get_node_names() reads the local graph cache — unlike `ros2 node
         # list` it costs nothing and cannot hang when the daemon is stale.
         try:
             nodes = sorted({n for n, _ in self.get_node_names_and_namespaces()})
         except Exception:
             nodes = []
+        temps = self._temperatures()
+        load = os.getloadavg()
+        cores = psutil.cpu_count() or 1
         self._state.broadcast({
             'type':  'sys',
             'cpu':   psutil.cpu_percent(),
+            'cpu_cores': cores,
+            # Per-core, so a pegged single thread is visible as one full bar
+            # instead of a calm-looking average.
+            'cpu_each': [round(p) for p in psutil.cpu_percent(percpu=True)],
             'mem':   round(vm.percent, 1),
             'mem_gb': round(vm.used / 2**30, 1),
-            'temp':  temp,
-            'load':  round(os.getloadavg()[0], 2),
+            'mem_free_gb': round(vm.available / 2**30, 1),
+            'mem_total_gb': round(vm.total / 2**30, 1),
+            'swap_gb': round(sw.used / 2**30, 1),
+            'swap_total_gb': round(sw.total / 2**30, 1),
+            # The first temperature is what the old single-value UI showed;
+            # keep it so anything still reading `temp` does not break.
+            'temp':  temps[0]['c'] if temps else None,
+            'temps': temps,
+            'disks': self._disks(),
+            'load':  round(load[0], 2),
+            'load15': [round(x, 2) for x in load],
+            # Load is only meaningful against the core count — 8.0 is idle on a
+            # 16-thread box and on fire on a 4-thread one.
+            'load_pct': round(100 * load[0] / cores),
             'nodes': nodes,
         })
 
@@ -1036,6 +1231,85 @@ class DashboardNode(Node):
             pass
         self._backend_cache = (now, value)
         return value
+
+    # ── LLM backend switching ────────────────────────────────────────────────
+    # Two halves that must happen in the right order. `robot max` leaves
+    # FastFlowLM stopped whenever the backend is gemini (it holds 4.7 GB for a
+    # server nothing talks to), so switching TO the local model means starting
+    # it and WAITING for it to listen before llm_bridge is told to use it —
+    # otherwise the first thing said to the robot hits a closed port.
+    FLM_PORT = 52625
+    FLM_MODEL = 'qwen3.5:4b'
+    FLM_KEEPALIVE = os.path.expanduser('~/bin/flm_keepalive.sh')
+    FLM_STOPFILE = '/tmp/flm_keepalive.stop'
+    FLM_BOOT_TIMEOUT = 90.0
+
+    def _flm_listening(self) -> bool:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.4)
+            return s.connect_ex(('127.0.0.1', self.FLM_PORT)) == 0
+
+    def _backend_msg(self, state: str, text: str, backend=None):
+        self._state.broadcast({'type': 'llm_backend', 'state': state,
+                               'text': text, 'backend': backend}, remember=False)
+
+    def _switch_backend(self, backend: str):
+        """Start/stop FastFlowLM as needed, then repoint llm_bridge at it."""
+        if backend not in ('gemini', 'lemonade'):
+            self._backend_msg('err', f'Άγνωστο backend: {backend}')
+            return
+        self._backend_cache = None          # force a re-read afterwards
+        try:
+            if backend == 'lemonade':
+                if not self._flm_listening():
+                    self._backend_msg('busy', 'Ξεκινά το FastFlowLM (NPU)… '
+                                              'μπορεί να πάρει ~60 δευτερόλεπτα')
+                    try:
+                        os.remove(self.FLM_STOPFILE)
+                    except OSError:
+                        pass
+                    if not os.path.exists(self.FLM_KEEPALIVE):
+                        self._backend_msg('err', f'Λείπει το {self.FLM_KEEPALIVE}')
+                        return
+                    subprocess.Popen(
+                        ['setsid', 'nohup', self.FLM_KEEPALIVE, self.FLM_MODEL],
+                        stdout=open('/tmp/flm_serve.log', 'ab'),
+                        stderr=subprocess.STDOUT, start_new_session=True)
+                    deadline = time.time() + self.FLM_BOOT_TIMEOUT
+                    while time.time() < deadline:
+                        if self._flm_listening():
+                            break
+                        time.sleep(1.0)
+                    else:
+                        self._backend_msg(
+                            'err', 'Το FastFlowLM δεν σήκωσε τη θύρα 52625 — '
+                                   'δες το /tmp/flm_serve.log')
+                        return
+                self._backend_msg('busy', 'Το FastFlowLM ακούει· αλλαγή backend…')
+            else:
+                self._backend_msg('busy', 'Αλλαγή σε Gemini…')
+
+            r = subprocess.run(
+                ['ros2', 'param', 'set', '/llm_bridge_node', 'backend', backend],
+                capture_output=True, text=True, timeout=30)
+            out = (r.stdout or '') + (r.stderr or '')
+            if 'Set parameter successful' not in out:
+                self._backend_msg('err', f'Απέτυχε: {out.strip()[:200]}')
+                return
+
+            # Only now is it safe to reclaim the 4.7 GB: llm_bridge is no
+            # longer pointed at the local server.
+            if backend == 'gemini':
+                open(self.FLM_STOPFILE, 'a').close()
+                subprocess.run(['pkill', '-f', 'flm_keepalive'],
+                               capture_output=True)
+                subprocess.run(['pkill', '-x', 'flm'], capture_output=True)
+
+            self._backend_cache = None
+            label = 'Gemini (cloud)' if backend == 'gemini' else 'Qwen3.5 (NPU)'
+            self._backend_msg('ok', f'Ενεργό: {label}', backend)
+        except Exception as e:
+            self._backend_msg('err', f'Σφάλμα: {e}')
 
     def active_map(self):
         if self.is_mapping():
@@ -1118,6 +1392,17 @@ class DashboardNode(Node):
                     self._costmap_on.add(client)
                 else:
                     self._costmap_on.discard(client)
+        elif t == 'room_tint':
+            self._rooms_tinted = bool(msg.get('on', True))
+            # The map is only published when it changes — on a static map that
+            # is once, at startup — so without a redraw the toggle would do
+            # nothing until the next remap.
+            if self._last_map is not None:
+                self._cb_map(self._last_map)
+        elif t == 'set_backend':
+            threading.Thread(target=self._switch_backend,
+                             args=(str(msg.get('backend', '')),),
+                             daemon=True).start()
         elif t == 'nerf_capture':
             self._nerf_pub.publish(Bool(data=bool(msg.get('on'))))
         elif t == 'overlay':
@@ -1222,19 +1507,102 @@ async def index(request: Request, t: str = ''):
     return resp
 
 
+def _placeholder_jpg(text: str, sub: str = '') -> bytes:
+    """A black 640x360 frame carrying a message, as JPEG.
+
+    Sent instead of nothing when the camera has gone quiet. The point is that
+    the multipart stream must never stall: see the comment in camera().
+    """
+    img = np.zeros((360, 640, 3), np.uint8)
+    cv2.putText(img, text, (28, 172), cv2.FONT_HERSHEY_SIMPLEX, 0.72,
+                (210, 210, 210), 2, cv2.LINE_AA)
+    if sub:
+        cv2.putText(img, sub, (28, 208), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                    (140, 140, 140), 1, cv2.LINE_AA)
+    ok, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    return buf.tobytes() if ok else b''
+
+
+# Latin-1 only: cv2.putText cannot render Greek glyphs — it draws '?' boxes,
+# which is precisely the symbol this bug is about.
+_CAM_STALE_MSG = ('No camera frames', 'RealSense stopped publishing - check'
+                                      ' /camera/camera/color/image_raw')
+_CAM_WAIT_MSG = ('Waiting for the camera...', '')
+
+# How long without a frame before the picture is declared stale. Comfortably
+# longer than a slow detector cycle, far shorter than a browser's patience.
+_CAM_STALE_S = 3.0
+# Nothing is sent while the frame is unchanged, so this is the heartbeat that
+# keeps the connection alive. Must stay well under the ~2-5 min a browser will
+# wait on a stalled response before giving up and drawing a broken image.
+_CAM_KEEPALIVE_S = 2.0
+# Once the "no frames" placeholder has been sent there is no point redrawing it
+# at the keep-alive rate; this is how often it is repeated to hold the
+# connection open. Also well under the browser's patience.
+_CAM_STALE_REPEAT_S = 10.0
+
+
 @app.get('/camera.mjpeg')
 async def camera(request: Request, t: str = ''):
     if not _authorised(t, request.cookies):
         return Response('Unauthorized', status_code=401)
+
     async def stream():
+        """Never stall, never repeat.
+
+        The old loop sent a frame only `if jpg:` and slept otherwise, which
+        gave two bugs at once:
+
+          * when the camera stopped publishing, the response went completely
+            silent. The browser waits a few minutes on a stalled stream and
+            then aborts it — the '?' after ~3 minutes with the 3D tab (a
+            different topic) still working perfectly.
+          * while it WAS publishing, it re-sent the same buffer 25x a second
+            regardless of whether a new frame had arrived, so a 5 fps camera
+            still pushed ~1.2 MB/s per viewer over wifi.
+
+        Now: send a frame when the sequence number moves, otherwise send the
+        current picture every couple of seconds as a keep-alive, and swap in a
+        placeholder that says what is wrong once frames stop arriving.
+        """
+        last_seq = -1
+        last_send = 0.0
+        stale_sent = False
         while True:
+            # A browser that closed the tab (or navigated away) leaves this
+            # generator running for ever otherwise — one leaked encode loop per
+            # tab switch, all of them still touching state.
+            if await request.is_disconnected():
+                return
+
+            now = time.monotonic()
             jpg = state.camera_jpg
-            if jpg:
+            seq = state.camera_seq
+            fresh = jpg is not None and (now - state.camera_at) < _CAM_STALE_S
+
+            if fresh and seq != last_seq:
+                last_seq, last_send, stale_sent = seq, now, False
                 yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n'
                        + jpg + b'\r\n')
+            elif now - last_send >= _CAM_KEEPALIVE_S:
+                if fresh:
+                    payload = jpg                      # unchanged but alive
+                elif not stale_sent or now - last_send >= _CAM_STALE_REPEAT_S:
+                    payload = _placeholder_jpg(
+                        *(_CAM_STALE_MSG if jpg is not None else _CAM_WAIT_MSG))
+                    stale_sent = True
+                else:
+                    payload = None
+                if payload:
+                    last_send = now
+                    yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n'
+                           + payload + b'\r\n')
+
             await asyncio.sleep(0.04)   # ~25 fps cap
-    return StreamingResponse(stream(),
-                             media_type='multipart/x-mixed-replace; boundary=frame')
+
+    return StreamingResponse(
+        stream(), media_type='multipart/x-mixed-replace; boundary=frame',
+        headers={'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no'})
 
 
 # ── GUI sessions (RViz / MoveIt / Gazebo) ─────────────────────────────────────
@@ -1661,6 +2029,8 @@ async def ws_endpoint(ws: WebSocket, t: str = ''):
                 'type':  'map',
                 **state.map_info,
                 'image': base64.b64encode(state.map_png).decode(),
+                'rooms': state.map_rooms,
+                'tinted': state.map_tinted,
             }))
         for msg in list(state.latest.values()):
             await ws.send_text(json.dumps(msg))
@@ -1668,6 +2038,16 @@ async def ws_endpoint(ws: WebSocket, t: str = ''):
             await ws.send_text(json.dumps({'type': 'chat', **entry}))
         for entry in list(state.logs)[-150:]:
             await ws.send_text(json.dumps({'type': 'log', **entry}))
+        # Which LLM is answering. Off the event loop: it shells out to `ros2
+        # param get`, which takes a second or two on a cold cache and would
+        # otherwise stall every other socket while this one connects.
+        backend = await asyncio.to_thread(ros_node.llm_backend)
+        await ws.send_text(json.dumps({
+            'type': 'llm_backend', 'state': 'ok' if backend else 'err',
+            'backend': backend,
+            'text': {'gemini': 'Ενεργό: Gemini (cloud)',
+                     'lemonade': 'Ενεργό: Qwen3.5 (NPU)'}.get(
+                         backend, 'Το llm_bridge δεν τρέχει')}))
     except Exception:
         state.remove_client(ws)
         return
@@ -1771,6 +2151,45 @@ button{font:inherit;color:inherit}
   background:#27272e;color:#a1a1aa}
 .pill.ok{background:#052e1a;color:#4ade80}
 .pill.bad{background:#450a0a;color:#f87171}
+/* ── System tab: bars, temperatures, disks ── */
+.mrow{display:grid;grid-template-columns:64px 1fr auto;gap:10px;align-items:center;
+  margin-bottom:9px;font-size:12.5px}
+.mrow .lbl{color:#71717a}
+.mrow .val{font-family:ui-monospace,Menlo,monospace;color:#d4d4d8;text-align:right;
+  white-space:nowrap;font-size:12px}
+.bar{height:8px;background:#27272e;border-radius:5px;overflow:hidden}
+.bar>i{display:block;height:100%;border-radius:5px;background:#3b82f6;
+  transition:width .35s ease,background .35s ease}
+.bar>i.warn{background:#f59e0b}
+.bar>i.bad{background:#ef4444}
+/* One cell per core. Fixed 7px columns so 16 threads fit a phone without
+   wrapping into something that looks like a second CPU. */
+.cores{display:flex;gap:2px;margin:2px 0 11px}
+.cores>i{flex:1;min-width:3px;height:14px;background:#27272e;border-radius:2px;
+  position:relative;overflow:hidden}
+.cores>i>b{position:absolute;bottom:0;left:0;right:0;background:#3b82f6;
+  transition:height .35s ease}
+.tempgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:8px}
+.tcell{background:#232329;border:1px solid #2c2c32;border-radius:9px;padding:8px 10px}
+.tcell .tn{color:#71717a;font-size:11px;display:flex;gap:5px;align-items:center}
+.tcell .tv{font-family:ui-monospace,Menlo,monospace;font-size:17px;color:#e4e4e7;
+  margin-top:3px}
+.tcell.warn{border-color:#7c2d12}.tcell.warn .tv{color:#fbbf24}
+.tcell.bad{border-color:#7f1d1d}.tcell.bad .tv{color:#f87171}
+/* ── speed sliders (map tab) ── */
+.speedbox{margin-top:11px;padding-top:11px;border-top:1px solid #2c2c32}
+.srow{display:grid;grid-template-columns:96px 1fr 74px;gap:10px;align-items:center;
+  margin-bottom:8px;font-size:12.5px}
+.srow .lbl{color:#a1a1aa}
+.srow .val{font-family:ui-monospace,Menlo,monospace;color:#d4d4d8;text-align:right;
+  font-size:12px}
+.srow input[type=range]{-webkit-appearance:none;appearance:none;height:6px;
+  border-radius:4px;background:#3f3f46;outline:none}
+.srow input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;
+  width:20px;height:20px;border-radius:50%;background:#3b82f6;cursor:pointer;
+  border:2px solid #18181b}
+.srow input[type=range]::-moz-range-thumb{width:20px;height:20px;border-radius:50%;
+  background:#3b82f6;cursor:pointer;border:2px solid #18181b}
 .pill.warn{background:#422006;color:#fbbf24}
 /* ── Map ── */
 #map-wrap{position:relative;background:#0c0c0e;border:1px solid #2c2c32;
@@ -1885,8 +2304,15 @@ button{font:inherit;color:inherit}
         <div class="ovl">ΧΑΡΤΗΣ · κλικ για πλοήγηση</div>
       </div>
       <div class="card">
-        <h3>Δωμάτια</h3>
+        <h3>Δωμάτια
+          <label style="float:right;font-size:11.5px;color:#a1a1aa;font-weight:400;
+            cursor:pointer;user-select:none">
+            <input type="checkbox" id="b-tint" checked style="vertical-align:-2px">
+            Χρώματα
+          </label>
+        </h3>
         <div class="row" id="rooms"></div>
+        <div class="row" id="room-legend" style="margin-top:8px;gap:11px"></div>
       </div>
       <div class="card">
         <div class="row" style="justify-content:space-between">
@@ -1904,6 +2330,24 @@ button{font:inherit;color:inherit}
           <div class="row" style="flex-direction:column;align-items:stretch">
             <button class="btn pri" id="b-loc">🔍 Εντοπισμός</button>
             <button class="btn" id="b-xnav">✕ Ακύρωση στόχου</button>
+          </div>
+        </div>
+        <div class="speedbox">
+          <div class="srow">
+            <span class="lbl">🚀 Ταχύτητα</span>
+            <input type="range" id="sp-lin" min="0.05" max="0.30" step="0.01">
+            <span class="val" id="sp-linv">—</span>
+          </div>
+          <div class="srow">
+            <span class="lbl">🔄 Στροφή</span>
+            <input type="range" id="sp-ang" min="0.35" max="1.20" step="0.05">
+            <span class="val" id="sp-angv">—</span>
+          </div>
+          <div class="row" style="margin-top:2px">
+            <button class="btn" id="sp-slow">🐢 Αργά</button>
+            <button class="btn" id="sp-def">Προεπιλογή</button>
+            <button class="btn" id="sp-fast">🐇 Γρήγορα</button>
+            <span id="sp-note" style="font-size:11px;color:#71717a"></span>
           </div>
         </div>
         <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
@@ -2092,6 +2536,20 @@ button{font:inherit;color:inherit}
 
     <!-- ── Voice / LLM ─────────────────────────────────────────── -->
     <section class="pane" id="p-llm">
+      <div class="card" style="margin-bottom:9px">
+        <h3>Ποιος απαντά <span class="badge" id="be-badge">—</span></h3>
+        <div class="row">
+          <button class="btn" id="be-gemini">🌩️ Gemini (cloud)</button>
+          <button class="btn" id="be-lemonade">🧠 Qwen3.5 (NPU)</button>
+        </div>
+        <div id="be-msg" style="font-size:11.5px;color:#71717a;margin-top:8px;
+          line-height:1.55"></div>
+        <div style="font-size:11px;color:#52525b;margin-top:6px;line-height:1.5">
+          Το Gemini απαντά σε ~0.5s και δεν πιάνει μνήμη. Το Qwen τρέχει τοπικά
+          στο NPU — δεν χρειάζεται ίντερνετ, αλλά αργεί ~6s και κρατά 4.7 GB RAM.
+          Η αλλαγή σβήνει τις τελευταίες ατάκες της κουβέντας.
+        </div>
+      </div>
       <div id="chat"></div>
       <div id="chat-in">
         <input id="chat-text" placeholder="Γράψε στο ρομπότ…" autocomplete="off">
@@ -2104,12 +2562,15 @@ button{font:inherit;color:inherit}
     <section class="pane" id="p-sys">
       <div class="card">
         <h3>Υπολογιστής</h3>
-        <div class="grid2">
-          <span class="k">CPU</span><span class="v" id="s-cpu">—</span>
-          <span class="k">Μνήμη</span><span class="v" id="s-mem">—</span>
-          <span class="k">Θερμοκρασία</span><span class="v" id="s-temp">—</span>
-          <span class="k">Load</span><span class="v" id="s-load">—</span>
-        </div>
+        <div id="s-bars"></div>
+      </div>
+      <div class="card">
+        <h3>Θερμοκρασίες</h3>
+        <div id="s-temps" class="tempgrid">—</div>
+      </div>
+      <div class="card">
+        <h3>Δίσκοι</h3>
+        <div id="s-disks">—</div>
       </div>
       <div class="card" style="flex:1;overflow:auto">
         <h3>Κόμβοι ROS (<span id="s-nodecount">0</span>)</h3>
@@ -2180,7 +2641,22 @@ const HAS_NOVNC  = __HAS_NOVNC__;
 // swallowed in silence. 0.60 rad/s (~34 deg/s) is a deliberate half of the
 // PS5's 1.20: a phone has no analogue stick, so the web D-pad is for nudging
 // into position, not for crossing the room. See teleop_twist_joy_ps5.yaml.
-const LIN = 0.10, ANG = 0.60;
+//
+// Now adjustable from the map tab, so these are the DEFAULTS, not the values.
+// ANG_MIN is the important one: the slider is floored above the rotation floor
+// so it cannot be dragged into the dead band where the base silently ignores
+// every turn — that reads as "the robot broke", and has cost real debugging
+// time before. LIN_MAX stays modest for the same reason the default is: this
+// is a nudge control on a phone with no dead-man switch.
+const LIN_DEF = 0.10, ANG_DEF = 0.60;
+const LIN_MIN = 0.05, LIN_MAX = 0.30;
+const ANG_MIN = 0.35, ANG_MAX = 1.20;
+let LIN = LIN_DEF, ANG = ANG_DEF;
+try {
+  const s = JSON.parse(localStorage.getItem('hr_speed') || '{}');
+  if (s.lin) LIN = Math.min(LIN_MAX, Math.max(LIN_MIN, +s.lin));
+  if (s.ang) ANG = Math.min(ANG_MAX, Math.max(ANG_MIN, +s.ang));
+} catch(e) {}
 // ‼️ Must match bringup.launch.py's tf_base_laser: x=0, yaw=pi. This said 0.0
 // and drew every scan point mirrored through the robot, so the dots never
 // landed on the walls and the dashboard looked like a localization failure
@@ -2542,6 +3018,8 @@ const HANDLERS = {
   map(m){
     mapInfo={width:m.width,height:m.height,resolution:m.resolution,origin:m.origin};
     const i=new Image(); i.onload=()=>{mapImg=i;draw();}; i.src='data:image/png;base64,'+m.image;
+    if (m.rooms) roomLegend(m.rooms);
+    if (m.tinted !== undefined) $('b-tint').checked = m.tinted;
   },
   pose(m){
     pose=m;
@@ -2629,13 +3107,11 @@ const HANDLERS = {
   log(m){ addLog(m); },
   cloud(m){ onCloud(m); },
   sys(m){
-    $('s-cpu').textContent  = m.cpu.toFixed(0)+'%';
-    $('s-mem').textContent  = m.mem+'% ('+m.mem_gb+' GB)';
-    $('s-temp').textContent = m.temp!==null && m.temp!==undefined ? m.temp+'°C' : '—';
-    $('s-load').textContent = m.load;
+    renderSys(m);
     $('s-nodecount').textContent = m.nodes.length;
     $('s-nodes').textContent = m.nodes.join('\n');
   },
+  llm_backend(m){ onBackend(m); },
 };
 
 function connect(){
@@ -2677,6 +3153,24 @@ ROOMS.forEach(name=>{
   rdiv.appendChild(b);
 });
 
+// ── room colours ───────────────────────────────────────────────────────────
+// The swatches come from the same room_colors.yaml the server tints with, so
+// the legend cannot drift from the picture. Greek names are data (they come
+// from the map), so they are not routed through t().
+function roomLegend(rooms){
+  const el = $('room-legend');
+  const names = Object.keys(rooms);
+  if (!names.length){ el.innerHTML = ''; return; }
+  el.innerHTML = names.sort().map(n => {
+    const c = rooms[n];
+    return '<span style="display:inline-flex;align-items:center;gap:5px;' +
+           'font-size:11.5px;color:#a1a1aa">' +
+           '<i style="width:11px;height:11px;border-radius:3px;display:inline-block;' +
+           'background:rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')"></i>' + n + '</span>';
+  }).join('');
+}
+$('b-tint').onchange = e => send({type:'room_tint', on: e.target.checked});
+
 // ── drive controls ─────────────────────────────────────────────────────────
 function startDrive(v,w){
   vx=v; wz=w;
@@ -2687,16 +3181,50 @@ function stopDrive(){
   clearInterval(driveTimer); driveTimer=null; vx=0; wz=0;
   send({type:'cmd_vel',vx:0,wz:0});
 }
-function bindDrive(id,v,w){
+// ‼️ Signs, not speeds. Passing LIN/ANG here would capture whatever they were
+// when the page wired itself up, and the sliders would move a number nothing
+// reads. Multiply at press time instead.
+function bindDrive(id,sv,sw){
   const el=$(id);
-  const go=()=>startDrive(v,w), stop=()=>stopDrive();
+  const go=()=>startDrive(sv*LIN, sw*ANG), stop=()=>stopDrive();
   el.addEventListener('mousedown',go);
   el.addEventListener('touchstart',e=>{e.preventDefault();go();},{passive:false});
   ['mouseup','mouseleave'].forEach(ev=>el.addEventListener(ev,stop));
   ['touchend','touchcancel'].forEach(ev=>el.addEventListener(ev,stop));
 }
-bindDrive('bf', LIN, 0); bindDrive('bb',-LIN, 0);
-bindDrive('bl', 0, ANG); bindDrive('br', 0,-ANG);
+bindDrive('bf', 1, 0); bindDrive('bb',-1, 0);
+bindDrive('bl', 0, 1); bindDrive('br', 0,-1);
+
+// ── speed sliders ──────────────────────────────────────────────────────────
+// Local to the browser (localStorage), not a robot parameter: two people on
+// two phones should not fight over how fast the D-pad drives, and the value
+// only ever reaches the base as the twist a held button sends.
+function speedSave(){
+  try { localStorage.setItem('hr_speed', JSON.stringify({lin:LIN, ang:ANG})); } catch(e){}
+}
+function speedSync(){
+  $('sp-lin').value = LIN; $('sp-ang').value = ANG;
+  $('sp-linv').textContent = LIN.toFixed(2) + ' m/s';
+  $('sp-angv').textContent = ANG.toFixed(2) + ' rad/s';
+  // ~34°/s at the default. Degrees are what a person can picture; rad/s is
+  // what the twist carries, so show both.
+  $('sp-note').textContent = '≈ ' + Math.round(ANG * 57.3) + '°/s';
+  // A held button keeps sending the OLD speed until it is released, because
+  // the interval closes over the values startDrive was called with. Re-arm it
+  // so dragging a slider mid-drive takes effect immediately.
+  if (driveTimer) startDrive(Math.sign(vx)*LIN, Math.sign(wz)*ANG);
+}
+function speedSet(lin, ang){
+  LIN = Math.min(LIN_MAX, Math.max(LIN_MIN, lin));
+  ANG = Math.min(ANG_MAX, Math.max(ANG_MIN, ang));
+  speedSync(); speedSave();
+}
+$('sp-lin').addEventListener('input', e => speedSet(+e.target.value, ANG));
+$('sp-ang').addEventListener('input', e => speedSet(LIN, +e.target.value));
+$('sp-slow').onclick = () => speedSet(LIN_MIN, ANG_MIN);
+$('sp-def').onclick  = () => speedSet(LIN_DEF, ANG_DEF);
+$('sp-fast').onclick = () => speedSet(LIN_MAX, ANG_MAX);
+speedSync();
 
 // ── Costmap tab ────────────────────────────────────────────────────────────
 // The costmap arrives as a small PNG (60x60) plus the robot's cell position and
@@ -2859,10 +3387,12 @@ function onImu(m){
 // running, so e.repeat is ignored. Release (or losing focus, or the tab going
 // to the background) stops the robot — the driver's 0.25 s watchdog is the
 // backstop if even that is missed.
+// Signs here too, for the same reason bindDrive takes them: the speed is read
+// when the key goes down, so the sliders steer the keyboard as well.
 const KEYS = {
-  ArrowUp:[LIN,0], ArrowDown:[-LIN,0], ArrowLeft:[0,ANG], ArrowRight:[0,-ANG],
-  w:[LIN,0], s:[-LIN,0], a:[0,ANG], d:[0,-ANG],
-  W:[LIN,0], S:[-LIN,0], A:[0,ANG], D:[0,-ANG],
+  ArrowUp:[1,0], ArrowDown:[-1,0], ArrowLeft:[0,1], ArrowRight:[0,-1],
+  w:[1,0], s:[-1,0], a:[0,1], d:[0,-1],
+  W:[1,0], S:[-1,0], A:[0,1], D:[0,-1],
 };
 let keyHeld = null;
 // Typing "sad" into the chat box must not drive the robot across the room.
@@ -2880,7 +3410,7 @@ document.addEventListener('keydown', e=>{
   e.preventDefault();                      // arrows must not scroll the pane
   if(e.repeat && keyHeld === e.key) return;
   keyHeld = e.key;
-  startDrive(k[0], k[1]);
+  startDrive(k[0]*LIN, k[1]*ANG);
   const el = $({ArrowUp:'bf',w:'bf',W:'bf', ArrowDown:'bb',s:'bb',S:'bb',
                 ArrowLeft:'bl',a:'bl',A:'bl', ArrowRight:'br',d:'br',D:'br'}[e.key]);
   if(el) el.classList.add('lit');
@@ -3119,6 +3649,127 @@ async function mapSave(){
 // (no CDN) and 4000 points sorted back-to-front is about a millisecond, so the
 // extra machinery would buy nothing. Points arrive as int16 millimetres +
 // RGB, in the camera optical frame: +x right, +y DOWN, +z forward.
+// ── LLM backend switch ──────────────────────────────────────────────────────
+// Switching to the NPU model can take a minute (FastFlowLM has to load 4.7 GB
+// of weights), so the buttons lock until the server answers rather than
+// letting a second impatient click start a second one.
+let beBusy = false;
+function onBackend(m){
+  beBusy = m.state === 'busy';
+  $('be-msg').textContent = m.text || '';
+  $('be-msg').style.color = m.state === 'err' ? '#f87171'
+                          : m.state === 'busy' ? '#fbbf24' : '#71717a';
+  const b = m.backend;
+  $('be-badge').textContent = b === 'gemini' ? 'Gemini'
+                            : b === 'lemonade' ? 'Qwen3.5 (NPU)'
+                            : m.state === 'busy' ? '…' : '—';
+  ['gemini','lemonade'].forEach(k => {
+    const el = $('be-' + k);
+    el.classList.toggle('pri', b === k);
+    el.disabled = beBusy;
+    el.style.opacity = beBusy ? '.5' : '1';
+  });
+}
+function beSet(backend){
+  if (beBusy) return;
+  onBackend({state:'busy', text:'Αλλαγή…', backend:null});
+  send({type:'set_backend', backend});
+}
+$('be-gemini').onclick   = () => beSet('gemini');
+$('be-lemonade').onclick = () => beSet('lemonade');
+
+// ── System tab rendering ────────────────────────────────────────────────────
+// The DOM is built once per shape change and afterwards only widths/text are
+// touched: this runs every second, and rebuilding ~40 nodes each time made the
+// tab flicker and lost the CSS transitions that make a moving bar readable.
+let sysShape = '';
+
+function bar(pct, warn, bad){
+  const cls = pct >= (bad || 90) ? 'bad' : pct >= (warn || 75) ? 'warn' : '';
+  return '<div class="bar"><i class="' + cls + '" style="width:' +
+         Math.max(0, Math.min(100, pct)) + '%"></i></div>';
+}
+
+function renderSys(m){
+  // ── usage bars ──
+  const g = (m.mem_free_gb !== undefined);
+  const rows = [
+    ['CPU', m.cpu, m.cpu.toFixed(0) + '%' +
+       (m.cpu_cores ? ' · ' + m.cpu_cores + ' ' + t('νήματα') : '')],
+    ['RAM', m.mem, m.mem + '% · ' +
+       (g ? m.mem_free_gb + ' ' + t('GB ελεύθερα') : m.mem_gb + ' GB')],
+  ];
+  // Load is shown against the core count, because the raw number means nothing
+  // on its own: 8.0 is idle on 16 threads and on fire on 4.
+  if (m.load_pct !== undefined)
+    rows.push(['Φόρτος', m.load_pct, m.load + (m.load15 ? '  (' + m.load15.join(' · ') + ')' : '')]);
+  if (m.swap_total_gb)
+    rows.push(['Swap', 100 * m.swap_gb / m.swap_total_gb,
+               m.swap_gb + ' / ' + m.swap_total_gb + ' GB']);
+
+  const shape = 'b' + rows.length + '_' + (m.cpu_each ? m.cpu_each.length : 0) +
+                '_t' + (m.temps ? m.temps.length : 0) +
+                '_d' + (m.disks ? m.disks.length : 0);
+  const rebuild = shape !== sysShape;
+  if (rebuild) sysShape = shape;
+
+  const host = $('s-bars');
+  if (rebuild){
+    host.innerHTML =
+      rows.map((r, i) =>
+        '<div class="mrow"><span class="lbl">' + t(r[0]) + '</span>' +
+        '<span id="sb' + i + '"></span><span class="val" id="sv' + i + '"></span></div>'
+      ).join('') +
+      (m.cpu_each ? '<div class="cores" id="s-cores">' +
+        m.cpu_each.map(() => '<i><b></b></i>').join('') + '</div>' : '');
+  }
+  rows.forEach((r, i) => {
+    $('sb' + i).innerHTML = bar(r[1]);
+    $('sv' + i).textContent = r[2];
+  });
+  if (m.cpu_each){
+    const cells = $('s-cores').children;
+    for (let i = 0; i < m.cpu_each.length && i < cells.length; i++){
+      const b = cells[i].firstChild;
+      b.style.height = m.cpu_each[i] + '%';
+      b.style.background = m.cpu_each[i] >= 90 ? '#ef4444'
+                         : m.cpu_each[i] >= 70 ? '#f59e0b' : '#3b82f6';
+    }
+  }
+
+  // ── temperatures ──
+  if (m.temps){
+    const el = $('s-temps');
+    if (rebuild)
+      el.innerHTML = m.temps.map((s, i) =>
+        '<div class="tcell" id="tc' + i + '"><div class="tn">' + s.icon +
+        '<span>' + s.name + '</span></div><div class="tv" id="tt' + i + '"></div></div>'
+      ).join('') || '—';
+    m.temps.forEach((s, i) => {
+      const cell = $('tc' + i); if (!cell) return;
+      $('tt' + i).textContent = s.c + '°';
+      const w = s.warn || 85;
+      cell.className = 'tcell' + (s.c >= w ? ' bad' : s.c >= w - 12 ? ' warn' : '');
+    });
+  }
+
+  // ── disks ──
+  if (m.disks){
+    const el = $('s-disks');
+    if (rebuild)
+      el.innerHTML = m.disks.map((d, i) =>
+        '<div class="mrow"><span class="lbl">' + d.mount + '</span>' +
+        '<span id="db' + i + '"></span><span class="val" id="dv' + i + '"></span></div>'
+      ).join('') || '—';
+    m.disks.forEach((d, i) => {
+      if (!$('db' + i)) return;
+      $('db' + i).innerHTML = bar(d.pct, 80, 92);
+      $('dv' + i).textContent = d.free + ' ' + t('GB ελεύθερα') +
+                                ' / ' + d.total + ' GB';
+    });
+  }
+}
+
 let cloudPts = null, cloudRGB = null;
 let cloudYaw = 0, cloudPitch = -0.15, cloudZoom = 1, cloudOn = false;
 

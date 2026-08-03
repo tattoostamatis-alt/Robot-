@@ -321,17 +321,9 @@ class LLMBridgeNode(Node):
         self._gemini_client = None
         self._gemini_tool = None
         if self.backend == 'gemini':
-            from google import genai
-            key = api_keys.gemini_key()
-            if not key:
-                # Loud and actionable. os.environ['GEMINI_API_KEY'] used to
-                # raise a bare KeyError here, which named the variable but
-                # not what to do about it.
-                self.get_logger().error(api_keys.MISSING_MSG)
-                raise RuntimeError(api_keys.MISSING_MSG)
-            self.get_logger().info(f'Gemini key from {api_keys.describe()}')
-            self._gemini_client = genai.Client(api_key=key)
-            self._gemini_tool = _build_gemini_tool()
+            # A missing key at startup is fatal, as it always was: the node was
+            # explicitly launched to talk to Gemini and cannot.
+            self._init_gemini(fatal=True)
 
         locations_path = os.path.join(get_package_share_directory('home_robot'),
                                         'config', 'locations.yaml')
@@ -351,6 +343,14 @@ class LLMBridgeNode(Node):
         self.mission_pub = self.create_publisher(String, 'mission/start', 10)
 
         self._history = []
+        # Registered only now that _history exists: the callback clears it on a
+        # backend switch, and rclpy fires this on the very next parameter set.
+        #
+        # Lets the dashboard flip Gemini <-> the local NPU model without
+        # restarting the stack. A restart would drop every subscription and
+        # (via `robot max` defaults) risk bringing the backend back to
+        # something nobody asked for.
+        self.add_on_set_parameters_callback(self._on_set_parameters)
         self._busy = threading.Lock()
         # Kept on self (not just as a _navigate local) so _emergency_stop can
         # cancel the goal from the speech callback thread.
@@ -633,6 +633,58 @@ class LLMBridgeNode(Node):
             self._handle_text_inner(text)
         finally:
             self._busy.release()
+
+    def _init_gemini(self, fatal: bool = False) -> bool:
+        """Build the Gemini client and tool schema. False if there is no key."""
+        key = api_keys.gemini_key()
+        if not key:
+            # Loud and actionable. os.environ['GEMINI_API_KEY'] used to raise a
+            # bare KeyError here, which named the variable but not what to do
+            # about it.
+            self.get_logger().error(api_keys.MISSING_MSG)
+            if fatal:
+                raise RuntimeError(api_keys.MISSING_MSG)
+            return False
+        from google import genai
+        self.get_logger().info(f'Gemini key from {api_keys.describe()}')
+        self._gemini_client = genai.Client(api_key=key)
+        self._gemini_tool = _build_gemini_tool()
+        return True
+
+    def _on_set_parameters(self, params):
+        """Allow `backend` to be switched at runtime.
+
+        Only the backend is handled here; everything else is accepted and
+        stored so a `ros2 param set` does not silently do nothing.
+
+        ‼️ Switching TO lemonade does not start FastFlowLM — `robot max`
+        deliberately leaves it stopped when the backend is gemini, to keep its
+        4.7 GB free. The dashboard starts the server first and only then sets
+        this parameter; from the CLI you must start it yourself.
+        """
+        from rcl_interfaces.msg import SetParametersResult
+        for p in params:
+            if p.name != 'backend':
+                continue
+            new = p.value
+            if new not in ('gemini', 'lemonade', 'ollama'):
+                return SetParametersResult(
+                    successful=False,
+                    reason=f"unknown backend '{new}' "
+                           "(gemini | lemonade | ollama)")
+            if new == 'gemini' and self._gemini_client is None:
+                if not self._init_gemini():
+                    return SetParametersResult(
+                        successful=False, reason='no Gemini API key')
+            # The history is Gemini `types.Content` on one backend and OpenAI
+            # dicts on the other. Carrying it across would hand the new backend
+            # objects it cannot parse, so drop it: the cost is that the robot
+            # forgets the last few turns, which beats a backend that throws on
+            # the first thing you say to it.
+            self._history.clear()
+            self.backend = new
+            self.get_logger().info(f'LLM backend switched to {new}')
+        return SetParametersResult(successful=True)
 
     def _handle_text_inner(self, text):
         self.get_logger().info(f'Heard: {text}')
