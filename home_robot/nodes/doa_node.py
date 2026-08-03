@@ -5,8 +5,10 @@ Reads hardware DoA from the XVF3800 DSP and controls the onboard LED ring
 to give visual feedback about the robot's listening state.
 
 Topics published:
-  /doa/angle  (Float32) — angle [0-359°] when speech detected
-  /doa/wake   (Float32) — angle sampled at wake_word moment
+  /doa/angle       (Float32) — angle [0-359°] when speech detected
+  /doa/wake        (Float32) — angle sampled at wake_word moment
+  /voice_activity  (Bool)    — hardware VAD, on the DSP's own speech flag
+  /cmd_vel_safe    (Twist)   — turn toward the speaker (‼️ not /cmd_vel)
 
 Topics subscribed:
   /wake_word   (String)  — triggers LISTENING LED state + rotate toward speaker
@@ -29,7 +31,8 @@ import time
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float32, String
+from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
+from std_msgs.msg import Bool, Float32, String
 from geometry_msgs.msg import Twist
 import usb.core
 import usb.util
@@ -163,7 +166,34 @@ class DoaNode(Node):
 
         self._angle_pub   = self.create_publisher(Float32, 'doa/angle', 10)
         self._wake_pub    = self.create_publisher(Float32, 'doa/wake',  10)
-        self._cmd_vel_pub = self.create_publisher(Twist,  'cmd_vel',   10)
+        # ‼️ cmd_vel_safe, NOT cmd_vel. /cmd_vel has several publishers and ZERO
+        # subscribers on this graph: roomba_driver listens on cmd_vel_safe alone,
+        # and Nav2 reaches it through its own chain. Published on cmd_vel, every
+        # "turn toward the speaker" went nowhere and the feature looked simply
+        # broken — the same mistake person_follower_node made, and the fifth
+        # time it has been made in this package. Check with
+        # `ros2 topic info -v /cmd_vel_safe` before changing this.
+        self._cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel_safe', 10)
+        # Hardware voice-activity flag, straight off the XVF3800 DSP. It comes
+        # back with every DoA read at no extra cost, and nothing was publishing
+        # it: STT gates on an energy threshold instead, which is why a fan spike
+        # can open a recording. Published so anything that wants a real VAD has
+        # one to subscribe to.
+        #
+        # Latched, and only on transitions. This is STATE ("someone is
+        # speaking"), not an event stream: publishing all 10 polls a second
+        # would bury a bag in duplicates, but plain volatile QoS on top of that
+        # means a node that starts later hears nothing until the next time
+        # somebody happens to speak. transient_local gives it the last value on
+        # connect. ‼️ From the CLI that means
+        # `ros2 topic echo /voice_activity --qos-durability transient_local`;
+        # a plain echo shows nothing and looks dead (same trap as
+        # /emergency_stop).
+        self._vad_pub = self.create_publisher(
+            Bool, 'voice_activity',
+            QoSProfile(depth=1,
+                       durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+                       reliability=QoSReliabilityPolicy.RELIABLE))
 
         self.create_subscription(String, 'wake_word',   self._on_wake_word,   10)
         self.create_subscription(String, 'speech_text', self._on_speech_text, 10)
@@ -174,6 +204,7 @@ class DoaNode(Node):
 
         self._dev        = None
         self._last_angle = 0.0
+        self._last_speech = None      # so the first reading always publishes
         self._rotating   = False
         self._last_drive = 0.0        # monotonic time of the last non-zero drive cmd
         self._led_state  = self._STATE_IDLE
@@ -201,6 +232,12 @@ class DoaNode(Node):
                     self._last_angle = float(angle)
                 if speech:
                     self._angle_pub.publish(Float32(data=float(angle)))
+                # Edge-triggered: the flag is polled at 10 Hz but only the
+                # transitions are interesting, and publishing 10 identical
+                # messages a second would bury anything else in a bag.
+                if speech != self._last_speech:
+                    self._last_speech = speech
+                    self._vad_pub.publish(Bool(data=speech))
             except Exception as e:
                 self.get_logger().warn(f'DoA read error: {e}', throttle_duration_sec=5)
                 self._dev = None

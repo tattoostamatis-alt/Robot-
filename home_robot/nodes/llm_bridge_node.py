@@ -331,7 +331,17 @@ class LLMBridgeNode(Node):
             self.locations = yaml.safe_load(f)
 
         self.response_pub = self.create_publisher(String, 'speech_response', 10)
-        self.cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
+        # ‼️ cmd_vel_safe, NOT cmd_vel — this is what makes the `move` tool
+        # ("προχώρα μπροστά", "στρίψε δεξιά") actually turn the wheels.
+        # Measured on the live robot 2026-08-03: /cmd_vel had 3 publishers and
+        # ZERO subscribers, /cmd_vel_safe one (roomba_driver). The relay that
+        # was supposed to bridge them is obstacle_safety_node, and
+        # localize.launch.py — the file `robot max` runs — declares
+        # use_obstacle_safety default FALSE, so it is never up. teleop and
+        # person_follower were already moved for exactly this reason; the voice
+        # path was missed, so every spoken movement command computed a correct
+        # twist and published it into nothing.
+        self.cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel_safe', 10)
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
         self.tidy_pub = self.create_publisher(String, 'tidy_command', 10)
         self.patrol_pub = self.create_publisher(Bool, 'patrol_command', 10)

@@ -179,9 +179,14 @@ class MissionExecutorNode(Node):
         self._pick_pub    = self.create_publisher(String, 'pick_command', 10)
         self._place_pub   = self.create_publisher(String, 'place_command', 10)
         # For the follow-delivery final approach (Nav2 gets us to the area; this
-        # closes the last metre onto the user). obstacle_safety relays it to
-        # cmd_vel_safe, same as person_follower.
-        self._cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
+        # closes the last metre onto the user).
+        # ‼️ cmd_vel_safe, NOT cmd_vel. The comment here used to claim
+        # "obstacle_safety relays it to cmd_vel_safe, same as person_follower"
+        # and both halves were wrong: person_follower publishes to cmd_vel_safe
+        # directly, and obstacle_safety_node is not running — localize.launch.py
+        # declares use_obstacle_safety default false. Verified on the live robot
+        # 2026-08-03: /cmd_vel, zero subscribers.
+        self._cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel_safe', 10)
         # Hands the final approach to the driver's closed-loop IR homing.
         self._dock_pub = self.create_publisher(Bool, 'dock', 10)
 

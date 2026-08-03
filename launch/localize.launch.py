@@ -146,6 +146,13 @@ def _launch_setup(context, *args, **kwargs):
             # default and the robot kept thinking on the NPU. Nothing errored;
             # the only symptom was the 4.7 GB that never got freed.
             'llm_backend':         LaunchConfiguration('llm_backend', default='gemini'),
+            # Fourth instance of the same omission (use_situational, use_planner,
+            # llm_backend, now this): `use_doa` was never forwarded, and bringup
+            # declares it default false, so doa_node NEVER started under
+            # `robot max` — confirmed live 2026-08-03 on a fully running stack
+            # (every other voice node present, zero doa_node). The XVF3800's
+            # direction-of-arrival and its hardware VAD were simply unused.
+            'use_doa':             LaunchConfiguration('use_doa', default='true'),
             'use_recovery':        'true' if use_recovery else 'false',
             'use_obstacle_safety': 'true' if use_obstacle_safety else 'false',
             # Forwarded, not hardcoded: `robot max` decides. It was pinned to
@@ -337,5 +344,12 @@ def generate_launch_description():
                         "6.7 s, and it frees 4.7 GB; needs ~/.home_robot/gemini_api_key "
                         "and a network), 'lemonade' is FastFlowLM on the NPU "
                         "(offline, holds that 4.7 GB), 'ollama' a local GGUF server."),
+        DeclareLaunchArgument(
+            'use_doa', default_value='true',
+            description='Direction of Arrival from the reSpeaker XVF3800: the '
+                        'angle a voice came from (/doa/angle), the LED ring, an '
+                        'optional turn toward the speaker, and the DSP hardware '
+                        'VAD on /voice_activity. Harmless without the mic — the '
+                        'node just retries and logs.'),
         OpaqueFunction(function=_launch_setup),
     ])
