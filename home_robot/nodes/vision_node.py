@@ -21,6 +21,7 @@ import requests
 from cv_bridge import CvBridge
 from dotenv import load_dotenv
 from home_robot import api_keys
+from home_robot import llm_quota
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
@@ -175,13 +176,23 @@ class VisionNode(Node):
 
     def _query_gemini(self, jpg_bytes, question):
         from google.genai import types
-        resp = self._gemini_client.models.generate_content(
-            model=self.gemini_model,
-            contents=[
-                types.Part.from_bytes(data=jpg_bytes, mime_type='image/jpeg'),
-                PROMPT_TEMPLATE.format(question=question),
-            ],
-        )
+        # ‼️ Same free-tier bucket llm_bridge spends from — "τι βλέπεις;" costs
+        # a request exactly like a spoken command does, and a counter that only
+        # watched the conversation would read low all day. The count is shared
+        # through a file; see llm_quota.
+        try:
+            resp = self._gemini_client.models.generate_content(
+                model=self.gemini_model,
+                contents=[
+                    types.Part.from_bytes(data=jpg_bytes, mime_type='image/jpeg'),
+                    PROMPT_TEMPLATE.format(question=question),
+                ],
+            )
+        except Exception as e:
+            if llm_quota.note_rate_limit(e) is not None:
+                return llm_quota.describe()
+            raise
+        llm_quota.record()
         return (resp.text or '').strip()
 
 

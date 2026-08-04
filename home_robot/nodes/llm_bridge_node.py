@@ -44,6 +44,7 @@ from dotenv import load_dotenv
 from geometry_msgs.msg import Quaternion, Twist
 from home_robot import api_keys
 from home_robot import arm_motion
+from home_robot import llm_quota
 from home_robot.status_query import (ROOM_NAMES_EL, format_location,
                                      format_status, is_location_query,
                                      is_status_query, wants_battery)
@@ -421,6 +422,12 @@ class LLMBridgeNode(Node):
             self.locations = yaml.safe_load(f)
 
         self.response_pub = self.create_publisher(String, 'speech_response', 10)
+        # How much of today's cloud allowance is left. Latched, because it
+        # changes once every few minutes and a dashboard that connects in
+        # between must still see a number rather than a dash.
+        self.quota_pub = self.create_publisher(
+            String, '/llm_quota',
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         # ‼️ RELATIVE 'cmd_vel', and the launch file decides where it lands.
         #
         # Two configurations, and hardcoding either one breaks the other:
@@ -541,6 +548,15 @@ class LLMBridgeNode(Node):
         vision_path = ('Qwen3-VL on NPU (same call)' if self.backend == 'lemonade'
                        else 'Gemini Flash Lite')
         self.get_logger().info(f'LLM bridge started — backend={self.backend} model={active_model} | vision={vision_path}')
+
+        # Latch today's allowance right away. The stack restarts several times
+        # a day and the count does not reset with it, so the first thing the
+        # dashboard should see is where the day actually stands.
+        if self.backend == 'gemini':
+            view = self._publish_quota()
+            self.get_logger().info(
+                f'Gemini quota: {view["used"]}/{view["limit"]} used today '
+                f'({view["source"]} limit), resets in {view["resets_in"] // 3600}h')
 
         # Warm up the NPU model at boot so the first real voice command isn't a
         # ~cold-load stall (FastFlowLM loads the 4B from disk on first use; this
@@ -1245,6 +1261,38 @@ class LLMBridgeNode(Node):
 
     # ── gemini backend ─────────────────────────────────────────────────────
 
+    def _publish_quota(self, view=None):
+        """Put the current allowance on /llm_quota for the dashboard."""
+        view = view if view is not None else llm_quota.snapshot()
+        try:
+            self.quota_pub.publish(String(data=json.dumps(view)))
+        except Exception as e:            # never take the LLM down with it
+            self.get_logger().debug(f'quota publish failed: {e}')
+        return view
+
+    def _gemini_generate(self, **kwargs):
+        """The single door every Gemini request goes through, so it is counted.
+
+        ‼️ A rejected request is NOT counted — Google does not charge a 429
+        against the daily quota, and counting it here would make the number
+        drift further from the truth every time we ran out. The rejection is
+        worth more than a count anyway: it is the one place the real limit is
+        stated, so it retunes the counter instead of incrementing it.
+        """
+        try:
+            resp = self._gemini_client.models.generate_content(**kwargs)
+        except Exception as e:
+            view = llm_quota.note_rate_limit(e)
+            if view is not None:
+                self._publish_quota(view)
+                self.get_logger().error(
+                    f'Gemini refused: rate limit / quota. '
+                    f'{view["used"]}/{view["limit"]} today, resets in '
+                    f'{view["resets_in"] // 60} min')
+            raise
+        self._publish_quota(llm_quota.record())
+        return resp
+
     def _handle_text_gemini(self, text):
         from google.genai import types
 
@@ -1274,10 +1322,15 @@ class LLMBridgeNode(Node):
         turn = [history_user_msg]  # text-only in history
 
         try:
-            resp = self._gemini_client.models.generate_content(
+            resp = self._gemini_generate(
                 model=self.gemini_model, contents=contents, config=config)
         except Exception as e:
             self.get_logger().error(f'LLM call failed: {e}')
+            # ‼️ Out of quota is the one failure the person can act on, and
+            # silence is the worst way to report it — it looks exactly like
+            # the STT being deaf. Say it, once, in Greek.
+            if llm_quota.is_rate_limit(e):
+                self._publish_reply(llm_quota.describe())
             return
 
         out = resp.candidates[0].content
@@ -1302,7 +1355,7 @@ class LLMBridgeNode(Node):
             try:
                 followup_system = (f'{SYSTEM_PROMPT}\n\n{ACTION_STARTED_NOTE}'
                                    if started else SYSTEM_PROMPT)
-                resp2 = self._gemini_client.models.generate_content(
+                resp2 = self._gemini_generate(
                     model=self.gemini_model, contents=contents,
                     config=types.GenerateContentConfig(
                         system_instruction=followup_system, temperature=0.3))

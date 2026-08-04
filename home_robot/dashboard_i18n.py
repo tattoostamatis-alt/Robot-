@@ -377,6 +377,27 @@ TRANSLATIONS = {
          'lokal auf der NPU — ohne Internet, aber ~6s langsam und belegt '
          '4,7 GB RAM. Der Wechsel löscht die letzten Gesprächszeilen.'),
 
+    # ── how much Gemini is left today ─────────────────────────────────────
+    # Sentence fragments, because the numbers are formatted in the browser's
+    # locale and have to sit between them.
+    'Ερωτήσεις σήμερα':  ('Questions today', 'Fragen heute'),
+    ' από ':             (' of ', ' von '),
+    'τέλος για σήμερα':  ('none left today', 'heute aufgebraucht'),
+    ' ώρες':             (' hours', ' Stunden'),
+    ' λεπτά':            (' minutes', ' Minuten'),
+    'περίπου ':          ('about ', 'etwa '),
+    'Έχουν φύγει ':      ('Used ', 'Verbraucht: '),
+    ' ακόμη. Μηδενίζει σε ': (' left. Resets in ', ' übrig. Zurücksetzung in '),
+    '. Μία εντολή που κινεί το ρομπότ πιάνει δύο.':
+        ('. A command that moves the robot costs two.',
+         '. Ein Befehl, der den Roboter bewegt, kostet zwei.'),
+    'Το ημερήσιο όριο εξαντλήθηκε. Ξεκλειδώνει σε ':
+        ('The daily limit is used up. It unlocks in ',
+         'Das Tageslimit ist aufgebraucht. Es öffnet wieder in '),
+    ' — ως τότε γύρνα στο Qwen (NPU).':
+        (' — until then switch to Qwen (NPU).',
+         ' — bis dahin auf Qwen (NPU) wechseln.'),
+
     # ── 3D pane ───────────────────────────────────────────────────────────
     '3D κάμερα (D435)':  ('3D camera (D435)', '3D-Kamera (D435)'),
     'Επαναφορά όψης':    ('Reset view', 'Ansicht zurücksetzen'),

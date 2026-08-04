@@ -488,6 +488,7 @@ class DashboardNode(Node):
         self.create_subscription(String, '/arm/touch', self._cb_touch, latch)
         self.create_subscription(String, '/echo', self._cb_echo, latch)
         self.create_subscription(String, '/self_diagnosis', self._cb_diag, latch)
+        self.create_subscription(String, '/llm_quota', self._cb_quota, latch)
         self.create_subscription(String, '/sound_events', self._cb_sound, latch)
         # Both latched by their publishers, so a tab opened long after the fact
         # still paints a full timeline instead of an empty list.
@@ -1359,6 +1360,16 @@ class DashboardNode(Node):
         except json.JSONDecodeError:
             return
         self._state.broadcast({'type': 'timeline', **data})
+
+    def _cb_quota(self, msg: String):
+        """How many Gemini requests are left today. Latched by llm_bridge, so a
+        tab opened at any point gets the number rather than waiting for the next
+        thing the owner says."""
+        try:
+            data = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        self._state.broadcast({'type': 'quota', **data})
 
     def _cb_vocab(self, msg: String):
         try:
@@ -3542,6 +3553,22 @@ button{font:inherit;color:inherit}
         </div>
         <div id="be-msg" style="font-size:11.5px;color:#71717a;margin-top:8px;
           line-height:1.55"></div>
+        <!-- Today's cloud allowance. Hidden while the local model answers —
+             Qwen has no quota, and a leftover counter would be a lie. -->
+        <div id="q-box" style="display:none;margin-top:10px">
+          <div style="display:flex;justify-content:space-between;
+            align-items:baseline;font-size:12px;margin-bottom:5px">
+            <span style="color:#a1a1aa">Ερωτήσεις σήμερα</span>
+            <span id="q-left" style="font-weight:600">—</span>
+          </div>
+          <div style="height:6px;border-radius:3px;background:#27272a;
+            overflow:hidden">
+            <div id="q-bar" style="height:100%;width:0;border-radius:3px;
+              background:#34d399;transition:width .4s"></div>
+          </div>
+          <div id="q-note" style="font-size:11px;color:#52525b;margin-top:6px;
+            line-height:1.5"></div>
+        </div>
         <div style="font-size:11px;color:#52525b;margin-top:6px;line-height:1.5">
           Το Gemini απαντά σε ~0.5s και δεν πιάνει μνήμη. Το Qwen τρέχει τοπικά
           στο NPU — δεν χρειάζεται ίντερνετ, αλλά αργεί ~6s και κρατά 4.7 GB RAM.
@@ -4240,6 +4267,7 @@ const HANDLERS = {
     $('s-nodes').textContent = m.nodes.join('\n');
   },
   llm_backend(m){ onBackend(m); },
+  quota(m){ onQuota(m); },
   mission(m){ onMission(m); },
   fall(m){ onFall(m); },
   fall_event(m){ onFallEvent(m); },
@@ -6222,6 +6250,45 @@ function onBackend(m){
     el.disabled = beBusy;
     el.style.opacity = beBusy ? '.5' : '1';
   });
+  quotaVisibility(b);
+}
+// ── how many questions are left today ──────────────────────────────────────
+// The Gemini API tells nobody how much quota is left, so llm_bridge counts
+// every request it sends and publishes the total. What arrives here is already
+// subtracted; this only paints it.
+//
+// ‼️ The limit is an estimate until a real 429 corrects it, and the wording
+// says so ("περίπου"). A counter that quietly rounds itself into confidence is
+// worse than a dash — the whole point is to know when to stop asking.
+let quotaSeen = null;
+function onQuota(m){
+  quotaSeen = m;
+  const box = $('q-box');
+  const limit = m.limit || 0, left = Math.max(0, m.left || 0);
+  const used = m.used || 0;
+  const num = n => n.toLocaleString('el-GR');
+  box.style.display = 'block';
+  $('q-left').textContent = left > 0 ? num(left) + t(' από ') + num(limit)
+                                     : t('τέλος για σήμερα');
+  const pct = limit ? Math.min(100, Math.round(used * 100 / limit)) : 0;
+  const bar = $('q-bar');
+  bar.style.width = pct + '%';
+  bar.style.background = left <= 0 ? '#f87171'
+                       : left < limit * 0.1 ? '#fbbf24' : '#34d399';
+  const hours = Math.floor((m.resets_in || 0) / 3600);
+  const mins  = Math.round(((m.resets_in || 0) % 3600) / 60);
+  const when = hours >= 1 ? hours + t(' ώρες') : mins + t(' λεπτά');
+  const about = m.source === 'measured' ? '' : t('περίπου ');
+  $('q-note').textContent = left > 0
+    ? t('Έχουν φύγει ') + num(used) + ' — ' + about + num(left)
+      + t(' ακόμη. Μηδενίζει σε ') + when
+      + t('. Μία εντολή που κινεί το ρομπότ πιάνει δύο.')
+    : t('Το ημερήσιο όριο εξαντλήθηκε. Ξεκλειδώνει σε ') + when
+      + t(' — ως τότε γύρνα στο Qwen (NPU).');
+}
+function quotaVisibility(backend){
+  if (backend === 'lemonade' || backend === 'ollama') $('q-box').style.display = 'none';
+  else if (quotaSeen) onQuota(quotaSeen);
 }
 function beSet(backend){
   if (beBusy) return;
