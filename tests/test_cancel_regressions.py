@@ -226,10 +226,17 @@ def test_wake_word_does_not_turn_the_base_while_navigating(doa):
 
 
 def test_wake_word_turns_the_base_when_idle(doa):
-    """The feature still works when nothing else owns the base."""
+    """The feature still works when nothing else owns the base.
+
+    Armed by hand since 2026-08-04: the turn now ships disarmed and is switched
+    on from the dashboard. This test is about the "nothing else owns the base"
+    guard, not about the default — test_turning_toward_a_speaker_is_off_by_default
+    in test_doa_and_dead_cmd_vel.py owns that.
+    """
     import time as _t
     mod, node = doa
     turns = _record_turns(node)
+    node._rotate_on_wake = True
     node._last_angle = 90.0
     node._on_wake_word(_ns(data='hey robot'))
     _t.sleep(0.15)

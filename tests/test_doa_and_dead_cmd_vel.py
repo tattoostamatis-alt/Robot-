@@ -190,3 +190,146 @@ def test_voice_activity_is_edge_triggered():
         'the VAD publishes on every poll instead of on transitions')
     assert re.search(r'_last_speech\s*=\s*None', src), (
         '_last_speech must start as None so the first reading is published')
+
+
+# ── bug 3: the robot turned itself with no command given ────────────────────
+#
+# 2026-08-04, a plain `robot max` with nobody talking TO the robot. It started
+# turning on its own; the user saw a machine driving off unasked. doa_node's
+# log for those 100 s:
+#
+#   Wake word DoA: 205° / Rotating -155° toward speaker
+#   Wake word DoA: 205° / Rotating -155° toward speaker   (7 s later, again)
+#   Wake word DoA: 268° / Rotating  -92° toward speaker
+#   Wake word DoA: 268° / Rotating  -92° toward speaker   (4 s later, again)
+#   Wake word DoA: 202° / Rotating -158° toward speaker
+#
+# Two separate faults on one line of code:
+#   a) it was armed by default, so a wake word — which is NOT a command, and
+#      which the far-field mic picks up out of conversations nobody addressed
+#      to the robot — moved the base before anyone said what to do. Every
+#      other motion path got a yes/no confirmation after the "executes
+#      overheard conversation" bug; this one walked straight past it.
+#   b) no cooldown. The wake word re-fires every ~1.5 s while somebody keeps
+#      talking, and a turn already in flight has not changed the measured DoA
+#      yet, so each repeat started the SAME turn over again.
+
+DASH = os.path.join(NODES_DIR, 'web_dashboard_node.py')
+
+
+def _param_default(src, name):
+    """The default in a declare_parameter(name, default) call."""
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == 'declare_parameter'
+                and len(node.args) >= 2
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == name):
+            return ast.literal_eval(node.args[1])
+    raise AssertionError(f'{name} is not declared at all')
+
+
+def test_turning_toward_a_speaker_is_off_by_default():
+    """A wake word is not a command, so it may not move the base unasked."""
+    assert _param_default(open(DOA).read(), 'rotate_on_wake') is False, (
+        'rotate_on_wake defaults to True again — `robot max` will have the '
+        'robot turning itself at every wake word, including the ones it '
+        'overhears from conversations that are not addressed to it')
+
+
+def test_the_launch_files_do_not_arm_it_either():
+    """The node default is worthless if bringup passes true over the top."""
+    bring = open(BRINGUP).read()
+    m = re.search(r"DeclareLaunchArgument\('doa_rotate_on_wake',\s*"
+                  r"default_value='(\w+)'", bring)
+    assert m, 'doa_rotate_on_wake is no longer a declared bringup argument'
+    assert m.group(1) == 'false', (
+        'bringup arms turn-toward-speaker for every launch; it must be opt-in '
+        'from the dashboard')
+    m = re.search(r"LaunchConfiguration\('doa_rotate_on_wake',\s*"
+                  r"default='(\w+)'\)", bring)
+    assert m and m.group(1) == 'false', (
+        'the LaunchConfiguration default disagrees with the declared one — '
+        'whichever is true wins and the feature is armed again')
+    loc = open(LOCALIZE).read()
+    assert not re.search(r"'doa_rotate_on_wake'\s*:\s*'true'", loc), (
+        'localize.launch.py — the file `robot max` runs — arms it explicitly')
+
+
+def test_a_repeat_wake_word_does_not_restart_the_same_turn():
+    """One utterance, one turn. The wake word re-fires every ~1.5 s."""
+    src = open(DOA).read()
+    assert 'rotate_cooldown_s' in src, 'the repeat-wake-word cooldown is gone'
+    assert re.search(r'_last_rotate\)\s*<\s*self\._rotate_cooldown', src), (
+        'nothing checks the cooldown before starting a turn, so every repeat '
+        'wake word starts the same rotation over again')
+
+
+def test_the_turn_respects_the_e_stop():
+    """A latched e-stop means nobody may ask the base to move — including us.
+
+    The driver drops the wheel writes, so the robot did stay still, but this
+    node kept publishing a turn for the whole sweep and the leftover twist was
+    still in flight when the latch was released.
+    """
+    src = open(DOA).read()
+    assert re.search(r"create_subscription\(\s*\n?\s*Bool,\s*'/emergency_stop'", src), (
+        'doa_node does not subscribe to /emergency_stop')
+    assert re.search(r'if self\._estop', src), (
+        'the e-stop is subscribed but never consulted before turning')
+
+
+def test_the_e_stop_subscription_is_latched():
+    """Same trap as everywhere else: the e-stop is published TRANSIENT_LOCAL
+    and a volatile subscriber joining later never hears the stop at all."""
+    src = open(DOA).read()
+    m = re.search(r"create_subscription\(\s*\n?\s*Bool,\s*'/emergency_stop',\s*"
+                  r"self\._on_estop,\s*(\w+)\)", src)
+    assert m, 'the /emergency_stop subscription changed shape'
+    qos = m.group(1)
+    assert re.search(rf'{qos}\s*=\s*QoSProfile\([^)]*TRANSIENT_LOCAL', src, re.S), (
+        f'{qos} is not TRANSIENT_LOCAL — doa_node will miss an e-stop that was '
+        'latched before it started')
+
+
+# ── the switch the user actually asked for ──────────────────────────────────
+
+def test_the_dashboard_can_arm_and_disarm_it():
+    """Off by default is only usable if there is a way to turn it on."""
+    doa = open(DOA).read()
+    dash = open(DASH).read()
+    assert "'doa/rotate_enable'" in doa, 'doa_node has no enable topic'
+    assert "'/doa/rotate_enable'" in dash, 'the dashboard cannot arm it'
+    assert "'doa/rotate_state'" in doa, (
+        'doa_node never reports its state, so the dashboard checkbox can only '
+        'guess')
+    assert "'/doa/rotate_state'" in dash, 'the dashboard does not read the state'
+    assert "t == 'doa_rotate'" in dash, 'the websocket command is not dispatched'
+    assert "id=\"dr-rotate\"" in dash, 'there is no checkbox in the page'
+
+
+def test_the_switch_survives_a_restart():
+    """Arming it from the web must not have to be redone after `robot max`."""
+    src = open(DOA).read()
+    assert '_STATE_PATH' in src, 'the setting is not persisted anywhere'
+    assert re.search(r'def _load_enabled', src) and re.search(r'def _save_enabled', src), (
+        'the enable state is not loaded/saved')
+    assert re.search(r'os\.replace\(tmp, _STATE_PATH\)', src), (
+        'the state file is written in place — a crash mid-write leaves JSON '
+        'that cannot be parsed and the setting silently reverts')
+
+
+def test_the_state_topics_are_latched_on_both_ends():
+    """doa_node starts long before the dashboard; volatile QoS would leave the
+    checkbox showing OFF for a feature that is actually armed."""
+    for path, name in ((DOA, 'doa_node'), (DASH, 'web_dashboard_node')):
+        src = open(path).read()
+        # publisher: (Bool, 'doa/rotate_state', QOS)
+        # subscription: (Bool, '/doa/rotate_state', callback, QOS)
+        m = re.search(r"rotate_state',\s*(?:self\.\w+,\s*)?(\w+)\)", src)
+        assert m, f'{name}: the rotate_state publisher/subscription changed shape'
+        assert re.search(rf'{m.group(1)}\s*=\s*QoSProfile\([^)]*TRANSIENT_LOCAL',
+                         src, re.S), (
+            f'{name}: /doa/rotate_state is not latched')

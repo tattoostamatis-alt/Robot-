@@ -574,6 +574,20 @@ class DashboardNode(Node):
             Bool, '/emergency_stop',
             QoSProfile(depth=1, durability=QoSDurabilityPolicy.TRANSIENT_LOCAL))
 
+        # "Turn toward whoever spoke". It ships disarmed — a wake word is not a
+        # command, and armed-by-default had the robot turning itself during
+        # conversations nobody addressed to it. Both ends latched: doa_node
+        # remembers the setting across restarts, and this dashboard is normally
+        # started after it, so a volatile subscription would show an empty
+        # checkbox for a feature that is actually on.
+        _doa_qos = QoSProfile(depth=1,
+                              durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+                              reliability=QoSReliabilityPolicy.RELIABLE)
+        self._doa_rotate_pub = self.create_publisher(
+            Bool, '/doa/rotate_enable', _doa_qos)
+        self.create_subscription(
+            Bool, '/doa/rotate_state', self._cb_doa_rotate, _doa_qos)
+
         self._loc_client = self.create_client(Empty, '/localize_globally')
         # Created on first use: the services only exist while a mapping session
         # is running, and a client made against a missing service is harmless
@@ -1232,6 +1246,10 @@ class DashboardNode(Node):
         # remember=True: replayed to a browser that connects later, which is
         # the whole point of a safety alert nobody may be watching live.
         self._state.broadcast({'type': 'fall', 'on': bool(msg.data)})
+
+    def _cb_doa_rotate(self, msg: Bool):
+        # remembered, so the switch paints correctly on a tab opened later
+        self._state.broadcast({'type': 'doa_rotate', 'on': bool(msg.data)})
 
     def _cb_fall_event(self, msg: String):
         try:
@@ -1896,6 +1914,11 @@ class DashboardNode(Node):
                 payload['motion_enabled'] = bool(msg['motion_enabled'])
             if payload:
                 self._bind_pub.publish(String(data=json.dumps(payload)))
+        elif t == 'doa_rotate':
+            # doa_node echoes the new value back on /doa/rotate_state, which is
+            # what actually moves the checkbox — so a node that is not running
+            # leaves the switch where it was instead of pretending it took.
+            self._doa_rotate_pub.publish(Bool(data=bool(msg.get('on'))))
         elif t == 'face_enrol':
             name = str(msg.get('name', '')).strip()
             if name:
@@ -3580,6 +3603,27 @@ button{font:inherit;color:inherit}
 
     <section class="pane" id="p-set">
       <div class="card">
+        <h3>Αυτόνομη κίνηση <span class="badge" id="dr-badge">—</span></h3>
+        <label style="display:flex;align-items:center;gap:9px;font-size:12.5px;
+          cursor:pointer;user-select:none;padding:9px 11px;border-radius:10px;
+          background:#232329;border:1px solid #33333d">
+          <input type="checkbox" id="dr-rotate">
+          <span>Να στρίβει προς όποιον μιλάει (μετά το «Έι ρομπότ»)</span>
+        </label>
+        <div id="dr-msg" style="color:#71717a;font-size:11.5px;margin-top:8px"></div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          ‼️ Κλειστό από προεπιλογή. Ανοιχτό, το ρομπότ γυρίζει τη βάση του μόλις
+          ακούσει το wake word — ΠΡΙΝ πει κανείς εντολή και χωρίς να ρωτήσει.
+          Επειδή το «Έι ρομπότ» πιάνεται και μέσα από κουβέντες που δεν του
+          απευθύνονται, αυτό φαινόταν σαν να «φεύγει» μόνο του.
+        </p>
+        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+          Ο φωτεινός δακτύλιος δείχνει ΠΑΝΤΑ την κατεύθυνση της φωνής, ακόμη κι
+          όταν ο διακόπτης είναι κλειστός. Η ρύθμιση θυμάται μετά από
+          <code>robot max</code>.
+        </p>
+      </div>
+      <div class="card">
         <h3>Γλώσσα</h3>
         <div class="row" id="lang-buttons"></div>
         <div style="color:#71717a;font-size:11.5px;margin-top:8px">
@@ -4200,7 +4244,18 @@ const HANDLERS = {
   fall(m){ onFall(m); },
   fall_event(m){ onFallEvent(m); },
   speaker(m){ onSpeaker(m); },
+  doa_rotate(m){ onDoaRotate(m); },
 };
+
+// ── turn-toward-the-speaker switch ─────────────────────────────────────────
+// doa_node owns this bit; we only ever paint what it reports. Ticking the box
+// sends a request, and the box moves when the answer comes back — if doa_node
+// is not running the switch stays put instead of lying about a feature that is
+// not there to arm.
+function onDoaRotate(m){
+  $('dr-rotate').checked = !!m.on;
+  $('dr-badge').textContent = m.on ? t('ΕΝΕΡΓΗ') : t('κλειστή');
+}
 
 // ── touch ──────────────────────────────────────────────────────────────────
 function renderTouch(m){
@@ -5442,6 +5497,15 @@ $('b-pp-add').addEventListener('click', ()=>{
 });
 $('pp-name').addEventListener('keydown', e => {
   if(e.key === 'Enter') $('b-pp-add').click();
+});
+
+$('dr-rotate').addEventListener('change', e => {
+  send({type:'doa_rotate', on: e.target.checked});
+  // Not applied yet — /doa/rotate_state is what confirms it. Put the box back
+  // where it was so a doa_node that never answers cannot leave it showing ON.
+  e.target.checked = !e.target.checked;
+  $('dr-msg').textContent = t('Στάλθηκε…');
+  setTimeout(()=>{ $('dr-msg').textContent=''; }, 2500);
 });
 
 $('gb-motion').addEventListener('change', e => {

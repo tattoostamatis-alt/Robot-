@@ -9,10 +9,18 @@ Topics published:
   /doa/wake        (Float32) — angle sampled at wake_word moment
   /voice_activity  (Bool)    — hardware VAD, on the DSP's own speech flag
   /cmd_vel_safe    (Twist)   — turn toward the speaker (‼️ not /cmd_vel)
+  /doa/rotate_state (Bool)   — latched; is turning toward the speaker armed?
 
 Topics subscribed:
-  /wake_word   (String)  — triggers LISTENING LED state + rotate toward speaker
-  /speech_text (String)  — transitions LED back to IDLE
+  /wake_word    (String)  — triggers LISTENING LED state (+ turn, only if armed)
+  /speech_text  (String)  — transitions LED back to IDLE
+  /doa/rotate_enable (Bool) — the dashboard's switch; arms/disarms the turn
+  /emergency_stop    (Bool) — latched; never turn while it is set
+
+‼️ Turning the base toward whoever spoke is OFF unless armed, from the web
+dashboard (Ρυθμίσεις → «Στρίψε προς τη φωνή») or `rotate_on_wake:=true`. It is
+the one thing here that moves the robot with no command given, and a wake word
+is not a command.
 
 LED states:
   IDLE       — DoA mode (mode=4): 1 LED points toward detected speaker
@@ -24,7 +32,9 @@ DoA convention (XVF3800): 0° = front of device, increases clockwise.
 ROS angular.z positive = counter-clockwise — rotation is negated accordingly.
 """
 
+import json
 import math
+import os
 import struct
 import threading
 import time
@@ -36,6 +46,11 @@ from std_msgs.msg import Bool, Float32, String
 from geometry_msgs.msg import Twist
 import usb.core
 import usb.util
+
+
+# Where the web toggle is remembered, so switching it on does not have to be
+# redone after every `robot max`. Same directory as the gesture bindings.
+_STATE_PATH = os.path.expanduser('~/.ros/home_robot_doa_rotate.json')
 
 
 VID = 0x2886
@@ -139,7 +154,17 @@ class DoaNode(Node):
         super().__init__('doa_node')
 
         self.declare_parameter('poll_hz',           10.0)
-        self.declare_parameter('rotate_on_wake',    True)
+        # ‼️ OFF by default, and it stays off until the web dashboard turns it
+        # on (Ρυθμίσεις → «Στρίψε προς τη φωνή»). This used to default to True,
+        # which meant the base turned itself the instant the wake word fired —
+        # before any command was spoken, and with no yes/no confirmation, the
+        # guard every other motion path got after the "robot executes overheard
+        # conversation" bug. Measured 2026-08-04 on a plain `robot max` with
+        # nobody talking to the robot: 6 unrequested turns in 100 s, several of
+        # them 155°, off wake words the user never addressed to it. The LED ring
+        # already shows where the speaker is; turning the wheels is the nicety,
+        # and a nicety does not get to move a robot on its own.
+        self.declare_parameter('rotate_on_wake',    False)
         self.declare_parameter('rotate_speed',      0.6)
         self.declare_parameter('min_angle_deg',     20.0)
         self.declare_parameter('led_enabled',       True)
@@ -152,6 +177,13 @@ class DoaNode(Node):
         # last write of each 20 Hz driver tick wins. Turning toward the speaker
         # is a nicety; not fighting the navigator is not.
         self.declare_parameter('rotate_block_s',    1.5)   # s since the last drive command
+        # One wake word, one turn. The XVF3800 re-fires the wake word every
+        # ~1.5 s while somebody keeps talking, and each one used to start its
+        # own rotation: the log for a single conversation shows 205° → turn
+        # -155°, then 205° → turn -155° again 7 s later, because a turn that is
+        # still in flight has not changed the measured DoA yet. Anything inside
+        # this window belongs to the utterance we are already handling.
+        self.declare_parameter('rotate_cooldown_s', 8.0)
 
         poll_hz               = self.get_parameter('poll_hz').value
         self._rotate_on_wake  = self.get_parameter('rotate_on_wake').value
@@ -163,6 +195,13 @@ class DoaNode(Node):
         self._led_brightness  = self.get_parameter('led_brightness').value
         self._listen_timeout  = self.get_parameter('listen_timeout').value
         self._rotate_block_s  = self.get_parameter('rotate_block_s').value
+        self._rotate_cooldown = self.get_parameter('rotate_cooldown_s').value
+
+        # A launch parameter of True is an explicit "start with it on"; it must
+        # not be silently downgraded by a stale file. Otherwise the remembered
+        # web toggle wins, so the setting survives a restart.
+        if not self._rotate_on_wake:
+            self._rotate_on_wake = self._load_enabled()
 
         self._angle_pub   = self.create_publisher(Float32, 'doa/angle', 10)
         self._wake_pub    = self.create_publisher(Float32, 'doa/wake',  10)
@@ -194,8 +233,27 @@ class DoaNode(Node):
                        durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
                        reliability=QoSReliabilityPolicy.RELIABLE))
 
+        # The web dashboard's switch, and the state it paints itself from.
+        # Latched both ways: the dashboard is usually started (or reloaded)
+        # long after this node, and a volatile publisher would leave its
+        # checkbox guessing.
+        _latched = QoSProfile(depth=1,
+                              durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+                              reliability=QoSReliabilityPolicy.RELIABLE)
+        self._rotate_state_pub = self.create_publisher(
+            Bool, 'doa/rotate_state', _latched)
+        self.create_subscription(
+            Bool, 'doa/rotate_enable', self._on_rotate_enable, _latched)
+
         self.create_subscription(String, 'wake_word',   self._on_wake_word,   10)
         self.create_subscription(String, 'speech_text', self._on_speech_text, 10)
+        # ‼️ Nothing else in this node consulted the e-stop. The driver drops
+        # the wheel writes, so the robot did stay still — but this node went on
+        # publishing a turn for the whole sweep, and the moment the latch was
+        # released the leftover twist was still in flight. An e-stopped robot
+        # must have nobody asking it to move.
+        self.create_subscription(
+            Bool, '/emergency_stop', self._on_estop, _latched)
         # Commanded intent, upstream of the collision monitor — the same signal
         # recovery_manager watches. Non-zero here means a navigator (or teleop
         # via the smoother) owns the base right now.
@@ -206,12 +264,48 @@ class DoaNode(Node):
         self._last_speech = None      # so the first reading always publishes
         self._rotating   = False
         self._last_drive = 0.0        # monotonic time of the last non-zero drive cmd
+        self._last_rotate = 0.0       # monotonic time of the last turn we started
+        self._estop      = False
         self._led_state  = self._STATE_IDLE
         self._listen_timer = None
         self._lock       = threading.Lock()
 
+        self._rotate_state_pub.publish(Bool(data=bool(self._rotate_on_wake)))
+
         threading.Thread(target=self._poll_loop, args=(poll_hz,), daemon=True).start()
-        self.get_logger().info('DoA node started')
+        self.get_logger().info(
+            'DoA node started — turn-toward-speaker is '
+            + ('ON' if self._rotate_on_wake else 'OFF (enable it in the web dashboard)'))
+
+    # ── Web toggle ─────────────────────────────────────────────────
+    def _load_enabled(self) -> bool:
+        try:
+            with open(_STATE_PATH, encoding='utf-8') as fh:
+                return bool(json.load(fh).get('rotate_on_wake', False))
+        except (OSError, ValueError):
+            return False
+
+    def _save_enabled(self, enabled: bool):
+        try:
+            tmp = _STATE_PATH + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as fh:
+                json.dump({'rotate_on_wake': bool(enabled)}, fh)
+            os.replace(tmp, _STATE_PATH)
+        except OSError as exc:
+            self.get_logger().warn(f'could not save DoA rotate state: {exc}')
+
+    def _on_rotate_enable(self, msg: Bool):
+        enabled = bool(msg.data)
+        if enabled == self._rotate_on_wake:
+            return
+        self._rotate_on_wake = enabled
+        self._save_enabled(enabled)
+        self._rotate_state_pub.publish(Bool(data=enabled))
+        self.get_logger().info(
+            f'Turn toward speaker {"ENABLED" if enabled else "DISABLED"} from the dashboard')
+
+    def _on_estop(self, msg: Bool):
+        self._estop = bool(msg.data)
 
     # ── USB polling ────────────────────────────────────────────────
     def _poll_loop(self, hz):
@@ -285,8 +379,19 @@ class DoaNode(Node):
         self._listen_timer.daemon = True
         self._listen_timer.start()
 
-        if self._rotate_on_wake and not self._rotating and not self._base_is_busy():
-            threading.Thread(target=self._rotate_toward, args=(angle,), daemon=True).start()
+        if not self._rotate_on_wake:
+            return
+        if self._rotating or self._base_is_busy():
+            return
+        if self._estop:
+            self.get_logger().info('E-stop latched — not turning toward the speaker')
+            return
+        if (time.monotonic() - self._last_rotate) < self._rotate_cooldown:
+            self.get_logger().info(
+                'Already turned for this speaker — ignoring the repeat wake word')
+            return
+        self._last_rotate = time.monotonic()
+        threading.Thread(target=self._rotate_toward, args=(angle,), daemon=True).start()
 
     def _on_drive_cmd(self, msg: Twist):
         if (abs(msg.linear.x) + abs(msg.linear.y) + abs(msg.angular.z)) > 0.01:
@@ -342,6 +447,9 @@ class DoaNode(Node):
                 if (time.monotonic() - self._last_drive) < self._rotate_block_s:
                     self.get_logger().info(
                         'Navigation took the base — abandoning the turn')
+                    break
+                if self._estop or not self._rotate_on_wake:
+                    self.get_logger().info('Turn cancelled mid-sweep')
                     break
                 self._cmd_vel_pub.publish(twist)
                 time.sleep(0.05)

@@ -35,7 +35,10 @@ def generate_launch_description():
     use_wake_word = LaunchConfiguration('use_wake_word', default='false')
     use_stt       = LaunchConfiguration('use_stt',       default='false')
     use_doa             = LaunchConfiguration('use_doa',             default='true')
-    doa_rotate_on_wake  = LaunchConfiguration('doa_rotate_on_wake',  default='true')
+    # ‼️ false: the base must not turn itself just because a wake word fired.
+    # Arm it from the dashboard (Ρυθμίσεις → «Στρίψε προς τη φωνή») — that
+    # choice is remembered across restarts — or pass true here.
+    doa_rotate_on_wake  = LaunchConfiguration('doa_rotate_on_wake',  default='false')
     doa_rotate_speed    = LaunchConfiguration('doa_rotate_speed',    default='0.6')
     doa_min_angle_deg   = LaunchConfiguration('doa_min_angle_deg',   default='20.0')
     doa_led_enabled     = LaunchConfiguration('doa_led_enabled',     default='true')
@@ -1298,7 +1301,7 @@ def generate_launch_description():
         DeclareLaunchArgument('stt_channel',   default_value='0'),
         DeclareLaunchArgument('delivery_mode',  default_value='start_pose'),
         DeclareLaunchArgument('use_doa',            default_value='false'),
-        DeclareLaunchArgument('doa_rotate_on_wake', default_value='true'),
+        DeclareLaunchArgument('doa_rotate_on_wake', default_value='false'),
         DeclareLaunchArgument('doa_rotate_speed',   default_value='0.6'),
         DeclareLaunchArgument('doa_min_angle_deg',  default_value='20.0'),
         DeclareLaunchArgument('doa_led_enabled',    default_value='true'),

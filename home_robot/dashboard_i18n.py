@@ -394,6 +394,35 @@ TRANSLATIONS = {
         ('Warnings & errors (/rosout)', 'Warnungen & Fehler (/rosout)'),
     'Καθάρισε':          ('Clear', 'Leeren'),
 
+    # ── settings: turn toward the speaker ─────────────────────────────────
+    'Αυτόνομη κίνηση':   ('Autonomous motion', 'Autonome Bewegung'),
+    'Να στρίβει προς όποιον μιλάει (μετά το «Έι ρομπότ»)':
+        ('Turn toward whoever is speaking (after “Hey robot”)',
+         'Zu der Person drehen, die spricht (nach „Hey Roboter“)'),
+    'ΕΝΕΡΓΗ':            ('ON', 'AN'),
+    'κλειστή':           ('off', 'aus'),
+    'Στάλθηκε…':         ('Sent…', 'Gesendet…'),
+    '‼️ Κλειστό από προεπιλογή. Ανοιχτό, το ρομπότ γυρίζει τη βάση του μόλις '
+    'ακούσει το wake word — ΠΡΙΝ πει κανείς εντολή και χωρίς να ρωτήσει. '
+    'Επειδή το «Έι ρομπότ» πιάνεται και μέσα από κουβέντες που δεν του '
+    'απευθύνονται, αυτό φαινόταν σαν να «φεύγει» μόνο του.':
+        ('‼️ Off by default. When on, the robot turns its base the moment it '
+         'hears the wake word — BEFORE anyone gives a command and without '
+         'asking. Since “Hey robot” is also picked up from conversations that '
+         'are not addressed to it, this looked like the robot wandering off on '
+         'its own.',
+         '‼️ Standardmäßig aus. Eingeschaltet dreht der Roboter seine Basis, '
+         'sobald er das Weckwort hört — BEVOR jemand einen Befehl gibt und ohne '
+         'zu fragen. Da „Hey Roboter“ auch aus Gesprächen aufgeschnappt wird, '
+         'die ihm gar nicht gelten, wirkte das, als würde er von selbst '
+         'davonfahren.'),
+    'Ο φωτεινός δακτύλιος δείχνει ΠΑΝΤΑ την κατεύθυνση της φωνής, ακόμη κι '
+    'όταν ο διακόπτης είναι κλειστός. Η ρύθμιση θυμάται μετά από':
+        ('The LED ring ALWAYS shows the direction of the voice, even with the '
+         'switch off. The setting is remembered after',
+         'Der LED-Ring zeigt IMMER die Richtung der Stimme, auch bei '
+         'ausgeschaltetem Schalter. Die Einstellung bleibt erhalten nach'),
+
     # ── settings: language ────────────────────────────────────────────────
     'Γλώσσα':            ('Language', 'Sprache'),
     'Αλλάζει μόνο αυτή τη σελίδα. Το ρομπότ συνεχίζει να μιλά ελληνικά.':
