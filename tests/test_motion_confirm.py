@@ -37,8 +37,14 @@ _BRIDGE = open(f'{PKG}/home_robot/nodes/llm_bridge_node.py').read()
 # ── which tools have to ask ──────────────────────────────────────────────────
 
 @pytest.mark.parametrize('tool', ['goto', 'goto_pointed', 'dock', 'patrol',
-                                  'explore', 'tidy', 'find', 'move'])
+                                  'explore', 'tidy', 'find', 'move',
+                                  'follow', 'fetch', 'check', 'goto_object',
+                                  'sort'])
 def test_tools_that_move_the_robot_must_ask(tool):
+    """‼️ The bottom five were missed by the first version of the list, which
+    is the same bug the gate exists for, one level down: «φέρε μου το ποτήρι»
+    and «δες αν έκλεισα το παράθυρο» are overheard exactly as often as «πάμε
+    στο σαλόνι», and `follow` then chased whoever it saw."""
     assert tool in MOTION_TOOLS
 
 
@@ -117,11 +123,66 @@ def test_the_question_is_inflected():
     ('dock', {}), ('patrol', {}), ('explore', {}), ('goto_pointed', {}),
     ('move', {'direction': 'forward'}), ('find', {'object': 'κλειδιά'}),
     ('tidy', {'room': 'all'}), ('goto', {}),
+    ('follow', {}), ('fetch', {'object': 'cup'}), ('check', {'room': 'kouzina'}),
+    ('goto_object', {'object': 'chair'}), ('sort', {'destination': 'saloni'}),
 ])
 def test_every_motion_tool_has_a_yes_no_question(tool, args):
     q = confirm_question(tool, args)
     assert q.endswith(';'), f'{tool} does not ask a question'
     assert '{' not in q, f'{tool} left a template placeholder in: {q}'
+
+
+@pytest.mark.parametrize('tool', sorted(MOTION_TOOLS))
+def test_no_motion_tool_falls_back_to_the_generic_question(tool):
+    """«Να το κάνω;» is answerable but tells you nothing, and a yes to it is a
+    yes to something the person never heard named. Adding a tool to
+    MOTION_TOOLS without writing its question has to fail here."""
+    assert confirm_question(tool, {}) != 'Να το κάνω;', f'{tool} has no question'
+
+
+def test_the_missing_argument_still_produces_a_sentence():
+    """A tool call can arrive without its argument. The question that follows
+    must still be answerable rather than «Να πάω να φέρω ;»."""
+    for tool in sorted(MOTION_TOOLS):
+        q = confirm_question(tool, {})
+        assert ' ;' not in q, f'{tool}: {q}'
+        assert '  ' not in q, f'{tool}: {q}'
+
+
+# ── objects, spoken as objects ───────────────────────────────────────────────
+
+def test_fetch_says_the_object_in_greek_accusative():
+    """‼️ `fetch` and `goto_object` take COCO labels straight off the detector,
+    so the naive question was «Να πάω να φέρω cup;»."""
+    assert confirm_question('fetch', {'object': 'cup'}) == 'Να πάω να φέρω την κούπα;'
+    assert confirm_question('fetch', {'object': 'sofa'}) == 'Να πάω να φέρω τον καναπέ;'
+    assert confirm_question('fetch', {'object': 'suitcase'}) == 'Να πάω να φέρω τη βαλίτσα;'
+
+
+def test_goto_object_says_where_not_what():
+    assert confirm_question('goto_object', {'object': 'chair'}) == 'Να πάω στην καρέκλα;'
+    assert confirm_question('goto_object', {'object': 'couch'}) == 'Να πάω στον καναπέ;'
+
+
+def test_check_and_sort_inflect_the_room():
+    assert confirm_question('check', {'room': 'kouzina'}) == 'Να πάω στην κουζίνα να δω;'
+    assert confirm_question('sort', {'destination': 'saloni'}) == \
+        'Να μαζέψω τα σκόρπια πράγματα στο σαλόνι;'
+    # 'all' is "everywhere", not a room named all.
+    assert 'all' not in confirm_question('sort', {'destination': 'all'})
+
+
+@pytest.mark.parametrize('label', [
+    'cup', 'bottle', 'chair', 'couch', 'tv', 'bed', 'laptop', 'remote',
+    'book', 'banana', 'apple', 'clock', 'vase', 'bowl', 'toothbrush',
+])
+def test_no_english_label_reaches_the_speaker(label):
+    """Every COCO class a home actually contains has to be speakable, in both
+    questions. A gap here is a robot asking «Να πάω στο toothbrush;»."""
+    for tool, template in (('fetch', 'Να πάω να φέρω'), ('goto_object', 'Να πάω')):
+        q = confirm_question(tool, {'object': label})
+        assert label not in q, q
+        assert q.startswith(template), q
 
 
 def test_the_window_is_short_enough_to_be_safe():

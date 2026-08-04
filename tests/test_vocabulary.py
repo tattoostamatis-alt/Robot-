@@ -6,8 +6,8 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from home_robot.vocabulary import (  # noqa: E402
-    COCO_NAMES, greek_for, needs_open_vocab, normalize_vocabulary,
-    strip_accents, to_prompt,
+    COCO_NAMES, greek_accusative, greek_for, greek_to, needs_open_vocab,
+    normalize_vocabulary, strip_accents, to_prompt,
 )
 
 
@@ -142,3 +142,60 @@ def test_round_trip_for_every_mapped_household_item():
     for stem, prompt in HOUSEHOLD_EL.items():
         assert to_prompt(stem) == prompt, stem
         assert greek_for(prompt)          # never empty
+
+
+# ── greek_accusative ──────────────────────────────────────────────────────────
+
+def test_neuter_and_plural_are_unchanged_but_for_nothing():
+    assert greek_accusative('bottle') == 'το μπουκάλι'
+    assert greek_accusative('keys') == 'τα κλειδιά'
+
+
+def test_feminine_takes_the_accusative_article():
+    assert greek_accusative('cup') == 'την κούπα'
+    assert greek_accusative('chair') == 'την καρέκλα'
+
+
+def test_masculine_loses_its_sigma():
+    """«Να φέρω τον καναπές;» is the giveaway that nothing inflected it."""
+    assert greek_accusative('couch') == 'τον καναπέ'
+    assert greek_accusative('dog') == 'τον σκύλο'
+    assert greek_accusative('person') == 'τον άνθρωπο'
+
+
+def test_the_final_n_follows_the_next_word():
+    """«την βαλίτσα» is the sound of a machine reading a table. The ν stays
+    before a vowel or a stop and goes before everything else."""
+    assert greek_accusative('suitcase') == 'τη βαλίτσα'      # β  -> drop
+    assert greek_accusative('towel') == 'την πετσέτα'         # π  -> keep
+    assert greek_accusative('banana') == 'την μπανάνα'        # μπ -> keep
+    assert greek_accusative('umbrella') == 'την ομπρέλα'      # vowel -> keep
+    assert greek_accusative('lamp') == 'τη λάμπα'             # λ  -> drop
+
+
+def test_an_unknown_label_is_left_alone():
+    """No article is the honest output for a label we cannot inflect — an
+    invented one would be wrong out loud, every time."""
+    assert greek_accusative('snowboard') == 'snowboard'
+    assert greek_to('snowboard') == 'στο snowboard'
+
+
+# ── greek_to ──────────────────────────────────────────────────────────────────
+
+def test_going_somewhere_merges_the_preposition():
+    assert greek_to('chair') == 'στην καρέκλα'
+    assert greek_to('couch') == 'στον καναπέ'
+    assert greek_to('bed') == 'στο κρεβάτι'
+    assert greek_to('suitcase') == 'στη βαλίτσα'
+
+
+def test_every_greek_label_survives_both_inflections():
+    """Whatever the detector reports, both questions must come out as Greek
+    with an article and no leftover English."""
+    from home_robot.vocabulary import _EN_TO_EL
+    for prompt, nominative in _EN_TO_EL.items():
+        acc, to = greek_accusative(prompt), greek_to(prompt)
+        assert acc and to, prompt
+        assert not acc.startswith(('ο ', 'η ', 'οι ')), f'{prompt}: {acc}'
+        assert to.startswith('σ'), f'{prompt}: {to}'
+        assert len(acc.split()) == len(nominative.split()), prompt

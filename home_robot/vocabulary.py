@@ -23,6 +23,7 @@ import unicodedata
 __all__ = [
     'COCO_NAMES', 'HOUSEHOLD_EL', 'strip_accents', 'to_prompt',
     'needs_open_vocab', 'normalize_vocabulary', 'greek_for',
+    'greek_accusative', 'greek_to',
 ]
 
 # The 80 classes object_detector already covers. Anything here must NOT wake the
@@ -116,7 +117,48 @@ _EN_TO_EL = {
     'keyboard': 'το πληκτρολόγιο', 'lamp': 'η λάμπα', 'candle': 'το κερί',
     'plant': 'το φυτό', 'flower pot': 'η γλάστρα', 'toy': 'το παιχνίδι',
     'ball': 'η μπάλα', 'doll': 'η κούκλα',
+    # The COCO labels the robot actually says out loud — `goto_object` and
+    # `fetch` take them straight from the detector, and without these the
+    # spoken confirmation was «Να πάω στο chair;». Only the ones that exist in
+    # a home; the remaining 32 (giraffe, snowboard) would just be noise.
+    'chair': 'η καρέκλα', 'couch': 'ο καναπές', 'sofa': 'ο καναπές',
+    'bed': 'το κρεβάτι', 'dining_table': 'το τραπέζι',
+    'dining table': 'το τραπέζι', 'table': 'το τραπέζι',
+    'tv': 'η τηλεόραση', 'laptop': 'το λάπτοπ', 'mouse': 'το ποντίκι',
+    'cell_phone': 'το κινητό', 'cell phone': 'το κινητό',
+    'refrigerator': 'το ψυγείο', 'microwave': 'ο φούρνος μικροκυμάτων',
+    'oven': 'ο φούρνος', 'sink': 'ο νεροχύτης', 'toilet': 'η τουαλέτα',
+    'potted_plant': 'το φυτό', 'potted plant': 'το φυτό', 'vase': 'το βάζο',
+    'clock': 'το ρολόι', 'backpack': 'το σακίδιο', 'handbag': 'η τσάντα',
+    'suitcase': 'η βαλίτσα', 'teddy_bear': 'το αρκουδάκι',
+    'teddy bear': 'το αρκουδάκι', 'sports_ball': 'η μπάλα',
+    'bowl': 'το μπολ', 'fork': 'το πιρούνι', 'knife': 'το μαχαίρι',
+    'spoon': 'το κουτάλι', 'wine_glass': 'το ποτήρι',
+    'banana': 'η μπανάνα', 'apple': 'το μήλο', 'orange': 'το πορτοκάλι',
+    'person': 'ο άνθρωπος', 'cat': 'η γάτα', 'dog': 'ο σκύλος',
+    'remote': 'το τηλεκοντρόλ', 'toothbrush': 'η οδοντόβουρτσα',
+    'toaster': 'η τοστιέρα', 'hair_drier': 'το πιστολάκι',
+    'hair drier': 'το πιστολάκι', 'carrot': 'το καρότο',
+    'sandwich': 'το σάντουιτς', 'donut': 'το ντόνατ', 'cake': 'η τούρτα',
+    'pizza': 'η πίτσα', 'broccoli': 'το μπρόκολο',
 }
+
+# Nominative -> accusative, for the article and for the one masculine ending
+# pattern that changes. Everything else in the table above is neuter or a
+# feminine noun in -α/-η, which are identical in both cases.
+# 'οι' is feminine everywhere in this table ('οι κάλτσες'); a masculine plural
+# would want 'τους'.
+_ACC_ARTICLE = {'ο': 'τον', 'η': 'την', 'το': 'το', 'οι': 'τις', 'τα': 'τα'}
+_MASC_ACC = (('ής', 'ή'), ('ές', 'έ'), ('ας', 'α'), ('ος', 'ο'))
+
+# Final-ν rule, feminine only: «την κούπα» but «τη βαλίτσα». The ν survives
+# before a vowel and before a stop — κ π τ ξ ψ and the digraphs γκ μπ ντ τσ τζ
+# — and is dropped before everything else. Masculine 'τον' keeps its ν always
+# in modern usage (it is what tells it apart from 'το'), so it is not listed.
+# Without this the robot says «τη» and «την» in exactly the wrong places, which
+# is audible in a way a missing article is not.
+_KEEPS_N = ('γκ', 'μπ', 'ντ', 'τσ', 'τζ')
+_KEEPS_N_ONE = frozenset('αεηιουω' 'κπτξψ')
 
 # Greek articles and possessives that ride along with a spoken object name and
 # must not reach the prompt. "φέρε μου τα κλειδιά μου" -> "κλειδια".
@@ -197,3 +239,47 @@ def normalize_vocabulary(items, limit=16):
 def greek_for(prompt):
     """Speakable Greek for an English prompt; the prompt itself if unknown."""
     return _EN_TO_EL.get(prompt, prompt)
+
+
+def greek_accusative(prompt):
+    """'cup' -> 'την κούπα'. What the robot FETCHES, not what it is called.
+
+    The table stores nominative ('η κούπα') because that is how you name a
+    thing. Every sentence that acts on it needs the accusative, and «Να φέρω η
+    κούπα;» is exactly the kind of robot-Greek room_locative_el was written to
+    stop. Unknown prompts fall through untouched — a label with no article is
+    an English fallback, and inventing one would be worse than saying it plain.
+    """
+    phrase = greek_for(prompt)
+    parts = str(phrase).split()
+    if len(parts) < 2 or parts[0] not in _ACC_ARTICLE:
+        return phrase
+    article, head, tail = parts[0], parts[1], parts[2:]
+    if article == 'ο':
+        for nom, acc in _MASC_ACC:
+            if head.endswith(nom):
+                head = head[:-len(nom)] + acc
+                break
+    return ' '.join([_final_n(_ACC_ARTICLE[article], head), head] + tail)
+
+
+def _final_n(article, word):
+    """'την' before «κούπα», 'τη' before «βαλίτσα». Feminine singular only."""
+    if article != 'την':
+        return article
+    stem = strip_accents(word.lower())
+    if stem[:2] in _KEEPS_N or stem[:1] in _KEEPS_N_ONE:
+        return article
+    return 'τη'
+
+
+def greek_to(prompt):
+    """'chair' -> 'στην καρέκλα'. Where the robot GOES."""
+    acc = greek_accusative(prompt)
+    first = str(acc).split(' ')[0]
+    # 'σ' + the accusative article is the whole rule: στον/στην/στη/στο/στα/στις
+    # — the final-ν decision was already made one call down, and it is the same
+    # decision here ('στη βαλίτσα', 'στην κούπα').
+    if first in set(_ACC_ARTICLE.values()) | {'τη'}:
+        return 'σ' + acc
+    return f'στο {acc}'

@@ -27,6 +27,7 @@ import re
 
 from home_robot.status_query import room_locative_el
 from home_robot.stop_command import strip_accents
+from home_robot.vocabulary import greek_accusative, greek_to
 
 __all__ = ['MOTION_TOOLS', 'PENDING_TTL', 'is_affirmative', 'is_negative',
            'confirm_question']
@@ -34,8 +35,17 @@ __all__ = ['MOTION_TOOLS', 'PENDING_TTL', 'is_affirmative', 'is_negative',
 # Tools that put the robot on the floor and move it. `stop` is NOT here: it is
 # the one command that must never wait for a second sentence. Neither are the
 # arm tools — the arm is in front of you and stays where the robot is.
+#
+# ‼️ The first version of this list held eight tools and missed five, which is
+# the same bug one level up: `follow`, `fetch`, `check`, `goto_object` and
+# `sort` all put the robot on the floor too, and they went through unasked. The
+# overheard sentence does not have to say «πάμε στο σαλόνι» — «φέρε μου το
+# ποτήρι» and «δες αν έκλεισα το παράθυρο» were just as unaddressed, and
+# `follow` then chased whoever it saw for the next 30 s. Anything that ends in
+# a Nav2 goal or a Twist belongs here; audit this list whenever a tool is added.
 MOTION_TOOLS = frozenset({
     'goto', 'goto_pointed', 'dock', 'patrol', 'explore', 'tidy', 'find', 'move',
+    'follow', 'fetch', 'check', 'goto_object', 'sort',
 })
 
 # How long a pending confirmation stays live. Long enough to answer a spoken
@@ -78,6 +88,11 @@ _QUESTIONS = {
     'tidy':         'Να ξεκινήσω τακτοποίηση{where};',
     'find':         'Να ψάξω {what};',
     'move':         'Να μετακινηθώ;',
+    'follow':       'Να σε ακολουθήσω;',
+    'fetch':        'Να πάω να φέρω {what};',
+    'check':        'Να πάω{where} να δω;',
+    'goto_object':  'Να πάω {what};',
+    'sort':         'Να μαζέψω τα σκόρπια πράγματα{where};',
 }
 
 
@@ -97,5 +112,21 @@ def confirm_question(tool: str, args: dict | None = None) -> str:
         room = args.get('room')
         where = f' {room_locative_el(room)}' if room and room != 'all' else ''
     elif tool == 'find':
+        # `find` is open vocabulary and the model passes the word the person
+        # actually said, in Greek — so it is already speakable, unlike the two
+        # below, which arrive as COCO labels.
         what = args.get('object') or 'κάτι'
+    elif tool == 'check':
+        room = args.get('room')
+        where = f' {room_locative_el(room)}' if room else ''
+    elif tool == 'sort':
+        dest = args.get('destination')
+        where = f' {room_locative_el(dest)}' if dest and dest != 'all' else ''
+    elif tool == 'fetch':
+        what = greek_accusative(args.get('object') or '') or 'κάτι'
+    elif tool == 'goto_object':
+        # 'chair' -> «Να πάω στην καρέκλα;». Without a target the question is
+        # «Να πάω εκεί;», which is still answerable — the object is missing
+        # from the tool call, not from the room.
+        what = greek_to(args.get('object') or '') if args.get('object') else 'εκεί'
     return template.format(where=where, what=what)
