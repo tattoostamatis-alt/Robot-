@@ -3803,7 +3803,7 @@ function renderDiagnostics(m){
 // straight into an AudioContext. No codec, no <audio> element: the stream is
 // endless and 100 ms chunks, which media elements handle badly.
 const MIC_RATE = 16000;
-let audioCtx = null, playHead = 0, listening = false;
+let audioCtx = null, playHead = 0, listening = false, chunkCount = 0;
 
 function startListening(){
   // ‼️ The AudioContext MUST be created inside the click handler. Browsers
@@ -3812,25 +3812,51 @@ function startListening(){
   if(!audioCtx){
     const AC = window.AudioContext || window.webkitAudioContext;
     if(!AC){ $('listen-msg').textContent = t('Χωρίς υποστήριξη ήχου.'); return; }
-    audioCtx = new AC({sampleRate: MIC_RATE});
+    // ‼️ NO forced sampleRate. `new AC({sampleRate:16000})` is accepted and
+    // then sits 'suspended' on iOS. The default-rate context resumes, and
+    // createBuffer(..., MIC_RATE) still declares 16 kHz, so the browser
+    // resamples on playback — which is what we wanted anyway.
+    audioCtx = new AC();
+    // ‼️ iOS needs an actual sound started inside the gesture before the
+    // context will run. One silent sample is enough to unlock it; without
+    // this the context reports 'running' but stays mute.
+    const unlock = audioCtx.createBufferSource();
+    unlock.buffer = audioCtx.createBuffer(1, 1, audioCtx.sampleRate);
+    unlock.connect(audioCtx.destination);
+    unlock.start(0);
   }
-  audioCtx.resume();
   playHead = 0;
+  chunkCount = 0;
   listening = true;
   send({type:'listen', on:true});
-  $('listen-msg').textContent = t('Ακούς ζωντανά.');
+  // resume() is a promise: report what actually happened rather than assuming.
+  audioCtx.resume().then(updateListenMsg, updateListenMsg);
+  updateListenMsg();
+}
+
+function updateListenMsg(){
+  if(!listening){ $('listen-msg').textContent = ''; return; }
+  const state = audioCtx ? audioCtx.state : '—';
+  // Showing the state and the chunk count separates the three failure modes
+  // that all present as "no sound": no data arriving, data arriving but the
+  // context suspended, and everything fine but the phone muted.
+  $('listen-msg').textContent =
+    t('Ακούς ζωντανά.') + ' [' + state + ' · ' + chunkCount + ']';
 }
 
 function stopListening(){
   listening = false;
   send({type:'listen', on:false});
   $('listen-msg').textContent = '';
+  if(audioCtx) audioCtx.suspend();
 }
 
 function playPcmChunk(buf){
   if(!listening || !audioCtx) return;
   const pcm = new Int16Array(buf);
   if(!pcm.length) return;
+  chunkCount++;
+  if(chunkCount % 10 === 1) updateListenMsg();
   const frame = audioCtx.createBuffer(1, pcm.length, MIC_RATE);
   const out = frame.getChannelData(0);
   for(let i=0;i<pcm.length;i++) out[i] = pcm[i] / 32768;

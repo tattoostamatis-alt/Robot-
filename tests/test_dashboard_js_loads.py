@@ -191,6 +191,32 @@ def test_binary_frames_never_reach_json_parse():
         'binary frames are not split off before JSON.parse'
 
 
+def test_audio_context_does_not_force_a_sample_rate():
+    """‼️ `new AudioContext({sampleRate:16000})` is ACCEPTED and then sits
+    'suspended' — the stream arrives and nothing plays. The default-rate
+    context resumes; createBuffer still declares 16 kHz so the browser
+    resamples, which is all that was needed."""
+    body = re.search(r'function startListening\(\)\{(.*?)\n\}', _RAW, re.S)
+    assert body, 'startListening() is gone'
+    assert 'sampleRate: MIC_RATE' not in body.group(1), \
+        'the AudioContext forces a sample rate again — iOS will stay silent'
+    assert re.search(r'new AC\(\s*\)', body.group(1)), \
+        'the context is no longer created with default options'
+
+
+def test_ios_unlock_buffer_is_started_in_the_gesture():
+    """iOS needs a real sound started inside the click before the context will
+    run; without it the state reads 'running' but nothing is audible."""
+    body = re.search(r'function startListening\(\)\{(.*?)\n\}', _RAW, re.S)
+    assert 'createBuffer(1, 1,' in body.group(1), 'the unlock buffer is gone'
+    assert 'unlock.start(0)' in body.group(1)
+
+
+def test_the_buffer_still_declares_the_microphone_rate():
+    """The resampling only works because the buffer says 16 kHz."""
+    assert 'createBuffer(1, pcm.length, MIC_RATE)' in _RAW
+
+
 def test_audio_context_is_created_from_the_click_not_at_load():
     """Browsers refuse to start audio without a user gesture; a context built at
     page load comes up suspended and stays silent."""
