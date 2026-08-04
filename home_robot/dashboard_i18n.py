@@ -779,6 +779,41 @@ TRANSLATIONS = {
          'hört. Derselbe Kanal wie das Wakeword, vom XVF3800 aufbereitet. '
          'Startet nur auf Tastendruck und endet, sobald du den Tab schließt.'),
 
+    # ── touch (arm pane) ──────────────────────────────────────────────────
+    'Αφή':               ('Touch', 'Tastsinn'),
+    'Πίεση':             ('Pressure', 'Druck'),
+    'Σκληρότητα':        ('Hardness', 'Härte'),
+    'Βάρος':             ('Weight', 'Gewicht'),
+    'ΕΠΑΦΗ':             ('CONTACT', 'KONTAKT'),
+    'περιμένει':         ('waiting', 'wartet'),
+    'ελεύθερος':         ('free', 'frei'),
+    'χωρίς αναφορά':     ('no reference', 'keine Referenz'),
+    'Ο βραχίονας στέλνει ΦΟΡΤΙΟ ανά άρθρωση δίπλα σε κάθε γωνία, και μέχρι '
+    'τώρα δεν το διάβαζε κανείς. Η επαφή είναι ΣΚΑΛΟΠΑΤΙ πάνω από το '
+    'φορτίο που κουβαλά κινούμενος στον αέρα· η σκληρότητα είναι φορτίο '
+    'ανά χιλιοστό διαδρομής· το βάρος είναι η διαφορά στον ώμο με κλειστή '
+    'και ανοιχτή δαγκάνα.':
+        ('The arm reports LOAD per joint next to every angle, and until now '
+         'nothing read it. Contact is a STEP above the load it carries moving '
+         'through air; hardness is load per millimetre of travel; weight is '
+         'the difference at the shoulder between a closed and an open gripper.',
+         'Der Arm meldet neben jedem Winkel auch die LAST pro Gelenk, und '
+         'bisher hat sie niemand gelesen. Kontakt ist eine STUFE über der Last '
+         'in der Luft; Härte ist Last pro Millimeter Weg; Gewicht ist die '
+         'Differenz an der Schulter zwischen geschlossenem und offenem '
+         'Greifer.'),
+    '‼️ Οι τιμές είναι ΑΚΑΤΕΡΓΑΣΤΕΣ μονάδες σερβοκινητήρα, όχι γραμμάρια. '
+    'Συγκρίνονται μεταξύ τους και με τίποτα άλλο — γι\' αυτό λέει «βαρύ» '
+    'και όχι «180 γραμμάρια». Η μέτρηση είναι ΠΑΘΗΤΙΚΗ: δεν δίνει ποτέ '
+    'εντολή στον βραχίονα.':
+        ('‼️ The values are RAW servo units, not grams. They compare to each '
+         'other and to nothing else — which is why it says "heavy" and not '
+         '"180 grams". The measurement is PASSIVE: it never commands the arm.',
+         '‼️ Die Werte sind ROHE Servo-Einheiten, keine Gramm. Sie sind '
+         'untereinander vergleichbar und sonst mit nichts — deshalb heißt es '
+         '„schwer" und nicht „180 Gramm". Die Messung ist PASSIV: sie steuert '
+         'den Arm nie.'),
+
     # ── acoustic map ──────────────────────────────────────────────────────
     'Από πού ακούγονται': ('Where they come from', 'Woher sie kommen'),
     'εντοπισμένα':       ('located', 'geortet'),

@@ -814,6 +814,19 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('use_people', default='true')),
     )
 
+    # ── Touch: the arm feels what it is doing ─────────────────────
+    # Passive — it never commands the arm, only reads the load the driver
+    # already reports, so it is safe to run whenever the arm is up.
+    tactile_node = Node(
+        package='home_robot',
+        executable='tactile_node.py',
+        name='tactile_node',
+        output='screen',
+        parameters=[{'speak': LaunchConfiguration('touch_speak',
+                                                  default='false')}],
+        condition=IfCondition(use_arm),
+    )
+
     # ── Acoustic map: where sounds come from ──────────────────────
     # Rides use_sound_events, which is what gives it something to place. Costs
     # almost nothing — it only wakes when a sound actually fires.
@@ -1367,6 +1380,7 @@ def generate_launch_description():
         face_identity_node,
         people_node,
         acoustic_map_node,
+        tactile_node,
         self_diagnosis_node,
         tracker_node,
         diarization_node_action,

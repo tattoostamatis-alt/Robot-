@@ -471,6 +471,7 @@ class DashboardNode(Node):
         self.create_subscription(String, '/hand_gesture', self._cb_hand, latch)
         self.create_subscription(String, '/people', self._cb_people, latch)
         self.create_subscription(String, '/acoustic_map', self._cb_acoustic, latch)
+        self.create_subscription(String, '/arm/touch', self._cb_touch, latch)
         self.create_subscription(String, '/self_diagnosis', self._cb_diag, latch)
         self.create_subscription(String, '/sound_events', self._cb_sound, latch)
         # Both latched by their publishers, so a tab opened long after the fact
@@ -1309,6 +1310,13 @@ class DashboardNode(Node):
         except json.JSONDecodeError:
             return
         self._state.broadcast({'type': 'acoustic', **data})
+
+    def _cb_touch(self, msg: String):
+        try:
+            data = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        self._state.broadcast({'type': 'touch', **data})
 
     def _cb_diag(self, msg: String):
         try:
@@ -2833,6 +2841,27 @@ button{font:inherit;color:inherit}
           <button class="btn" id="b-grip-close">🤏 Κλείσιμο</button>
         </div>
       </div>
+      <div class="card" style="margin-bottom:9px">
+        <h3>Αφή <span class="badge" id="tc-badge">—</span></h3>
+        <div class="grid2">
+          <span class="k">Πίεση</span><span class="v" id="tc-excess">—</span>
+          <span class="k">Σκληρότητα</span><span class="v" id="tc-hard">—</span>
+          <span class="k">Βάρος</span><span class="v" id="tc-weight">—</span>
+        </div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          Ο βραχίονας στέλνει ΦΟΡΤΙΟ ανά άρθρωση δίπλα σε κάθε γωνία, και μέχρι
+          τώρα δεν το διάβαζε κανείς. Η επαφή είναι ΣΚΑΛΟΠΑΤΙ πάνω από το
+          φορτίο που κουβαλά κινούμενος στον αέρα· η σκληρότητα είναι φορτίο
+          ανά χιλιοστό διαδρομής· το βάρος είναι η διαφορά στον ώμο με κλειστή
+          και ανοιχτή δαγκάνα.
+        </p>
+        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+          ‼️ Οι τιμές είναι ΑΚΑΤΕΡΓΑΣΤΕΣ μονάδες σερβοκινητήρα, όχι γραμμάρια.
+          Συγκρίνονται μεταξύ τους και με τίποτα άλλο — γι' αυτό λέει «βαρύ»
+          και όχι «180 γραμμάρια». Η μέτρηση είναι ΠΑΘΗΤΙΚΗ: δεν δίνει ποτέ
+          εντολή στον βραχίονα.
+        </p>
+      </div>
       <div class="card">
         <h3>Εντολές</h3>
         <div class="row">
@@ -3784,6 +3813,7 @@ const HANDLERS = {
   diagnostics(m){ renderDiagnostics(m); },
   sound(m){ soundState = m; renderSound(m); },
   acoustic(m){ renderAcoustic(m); },
+  touch(m){ renderTouch(m); },
   observations(m){ renderObservations(m); },
   timeline(m){ renderTimeline(m); },
   recall_answer(m){ $('tl-answer').textContent = m.text || ''; },
@@ -3870,6 +3900,18 @@ const HANDLERS = {
   fall_event(m){ onFallEvent(m); },
   speaker(m){ onSpeaker(m); },
 };
+
+// ── touch ──────────────────────────────────────────────────────────────────
+function renderTouch(m){
+  $('tc-badge').textContent = m.contact ? t('ΕΠΑΦΗ')
+    : (m.baseline === null ? t('περιμένει') : t('ελεύθερος'));
+  $('tc-excess').textContent = m.contact ? '+' + m.excess : '—';
+  $('tc-hard').textContent = (m.hardness === null) ? '—'
+    : m.hardness_el + ' (' + m.hardness + ')';
+  $('tc-weight').textContent = (m.weight === null || m.weight === undefined)
+    ? (m.have_reference ? '—' : t('χωρίς αναφορά'))
+    : m.weight_el + ' (' + m.weight + ')';
+}
 
 // ── acoustic map ───────────────────────────────────────────────────────────
 function renderAcoustic(m){
