@@ -470,6 +470,7 @@ class DashboardNode(Node):
         self.create_subscription(String, '/vocab/state', self._cb_vocab, latch)
         self.create_subscription(String, '/hand_gesture', self._cb_hand, latch)
         self.create_subscription(String, '/people', self._cb_people, latch)
+        self.create_subscription(String, '/acoustic_map', self._cb_acoustic, latch)
         self.create_subscription(String, '/self_diagnosis', self._cb_diag, latch)
         self.create_subscription(String, '/sound_events', self._cb_sound, latch)
         # Both latched by their publishers, so a tab opened long after the fact
@@ -1301,6 +1302,13 @@ class DashboardNode(Node):
         except json.JSONDecodeError:
             return
         self._state.broadcast({'type': 'people', **data})
+
+    def _cb_acoustic(self, msg: String):
+        try:
+            data = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        self._state.broadcast({'type': 'acoustic', **data})
 
     def _cb_diag(self, msg: String):
         try:
@@ -3075,6 +3083,19 @@ button{font:inherit;color:inherit}
           Ξεκινά μόνο όταν το πατήσεις και κόβεται μόλις κλείσεις το tab.
         </p>
       </div>
+      <div class="card" style="margin-bottom:9px">
+        <h3>Από πού ακούγονται <span class="badge" id="am-badge">—</span></h3>
+        <div id="am-last" style="font-size:12.5px;line-height:1.7;
+          color:#e4e4e7;margin-bottom:9px"></div>
+        <div id="am-list" style="font-size:12.5px;line-height:1.7"></div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          Το μικρόφωνο δίνει ΚΑΤΕΥΘΥΝΣΗ, όχι θέση. Μία γωνία από ένα σημείο
+          είναι ακτίνα, όχι σημείο — γι' αυτό η θέση εμφανίζεται μόνο αφού
+          ακουστεί ο ίδιος ήχος από ΔΥΟ διαφορετικά σημεία. Το δωμάτιο όμως
+          βγαίνει από την πρώτη κιόλας φορά, ακολουθώντας την ακτίνα πάνω
+          στον χάρτη.
+        </p>
+      </div>
       <div class="card">
         <h3>Ιστορικό ήχων</h3>
         <div id="sd-feed" style="font-size:12.5px;line-height:1.75">
@@ -3762,6 +3783,7 @@ const HANDLERS = {
   people(m){ renderPeople(m); },
   diagnostics(m){ renderDiagnostics(m); },
   sound(m){ soundState = m; renderSound(m); },
+  acoustic(m){ renderAcoustic(m); },
   observations(m){ renderObservations(m); },
   timeline(m){ renderTimeline(m); },
   recall_answer(m){ $('tl-answer').textContent = m.text || ''; },
@@ -3848,6 +3870,41 @@ const HANDLERS = {
   fall_event(m){ onFallEvent(m); },
   speaker(m){ onSpeaker(m); },
 };
+
+// ── acoustic map ───────────────────────────────────────────────────────────
+function renderAcoustic(m){
+  const sounds = m.sounds || [];
+  $('am-badge').textContent = (m.localized || 0) + ' ' + t('εντοπισμένα');
+
+  const last = m.last;
+  $('am-last').innerHTML = last
+    ? `<div style="padding:8px 10px;border-radius:9px;background:#232329;
+         border:1px solid #2f2f37">🔊 ${esc(last.greek || last.event)}
+         ${last.room_el ? '<span style="color:#4ade80"> '
+           + esc(last.room_el) + '</span>'
+           : '<span style="color:#71717a"> ' + Math.round(last.angle)
+             + '°</span>'}</div>`
+    : '';
+
+  if(!sounds.length){
+    $('am-list').innerHTML = '<span style="color:#71717a">'
+      + esc(t('Τίποτα ακόμη.')) + '</span>';
+    return;
+  }
+  $('am-list').innerHTML = sounds.map(s => {
+    const spot = s.spots && s.spots[0];
+    // No spot yet is the honest state, not a failure — say why.
+    const where = spot
+      ? `<span style="color:#4ade80">${spot.x.toFixed(1)}, ${spot.y.toFixed(1)} m</span>`
+        + (s.room ? ` <span style="color:#71717a">· ${esc(s.room)}</span>` : '')
+      : `<span style="color:#71717a">${esc(t('θέλει δεύτερο σημείο'))}</span>`;
+    return `<div style="display:flex;justify-content:space-between;gap:10px;
+      padding:6px 0;border-bottom:1px solid #232329">
+      <span>${esc(s.greek || s.event)}
+        <span style="color:#52525b">×${s.heard}</span></span>
+      <span style="text-align:right">${where}</span></div>`;
+  }).join('');
+}
 
 // ── resizable viewers ──────────────────────────────────────────────────────
 // The big panels are flex:1 so they fill the pane. Dragging the grip pins an

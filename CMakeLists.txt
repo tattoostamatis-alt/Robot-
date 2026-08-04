@@ -52,6 +52,7 @@ install(PROGRAMS
   home_robot/nodes/self_diagnosis_node.py
   home_robot/nodes/hand_gesture_node.py
   home_robot/nodes/people_node.py
+  home_robot/nodes/acoustic_map_node.py
   home_robot/nodes/nerf_capture_node.py
   home_robot/nodes/goto_room.py
   home_robot/nodes/record_location.py

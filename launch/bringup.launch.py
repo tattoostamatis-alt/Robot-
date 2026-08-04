@@ -814,6 +814,18 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('use_people', default='true')),
     )
 
+    # ── Acoustic map: where sounds come from ──────────────────────
+    # Rides use_sound_events, which is what gives it something to place. Costs
+    # almost nothing — it only wakes when a sound actually fires.
+    acoustic_map_node = Node(
+        package='home_robot',
+        executable='acoustic_map_node.py',
+        name='acoustic_map_node',
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('use_sound_events',
+                                                  default='false')),
+    )
+
     # ── Self-diagnosis ────────────────────────────────────────────
     # Cheap and always useful: it measures topic RATES and matches /rosout
     # against the signatures of faults this robot has actually had.
@@ -1354,6 +1366,7 @@ def generate_launch_description():
         sound_event_node,
         face_identity_node,
         people_node,
+        acoustic_map_node,
         self_diagnosis_node,
         tracker_node,
         diarization_node_action,

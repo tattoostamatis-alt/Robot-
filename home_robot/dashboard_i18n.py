@@ -779,6 +779,26 @@ TRANSLATIONS = {
          'hört. Derselbe Kanal wie das Wakeword, vom XVF3800 aufbereitet. '
          'Startet nur auf Tastendruck und endet, sobald du den Tab schließt.'),
 
+    # ── acoustic map ──────────────────────────────────────────────────────
+    'Από πού ακούγονται': ('Where they come from', 'Woher sie kommen'),
+    'εντοπισμένα':       ('located', 'geortet'),
+    'θέλει δεύτερο σημείο': ('needs a second spot', 'braucht einen 2. Standort'),
+    'Το μικρόφωνο δίνει ΚΑΤΕΥΘΥΝΣΗ, όχι θέση. Μία γωνία από ένα σημείο '
+    'είναι ακτίνα, όχι σημείο — γι\' αυτό η θέση εμφανίζεται μόνο αφού '
+    'ακουστεί ο ίδιος ήχος από ΔΥΟ διαφορετικά σημεία. Το δωμάτιο όμως '
+    'βγαίνει από την πρώτη κιόλας φορά, ακολουθώντας την ακτίνα πάνω '
+    'στον χάρτη.':
+        ('The microphone gives a DIRECTION, not a position. One bearing from '
+         'one spot is a ray, not a point — so a location only appears once the '
+         'same sound has been heard from TWO different places. The room, '
+         'though, comes out the very first time, by following the ray across '
+         'the map.',
+         'Das Mikrofon liefert eine RICHTUNG, keine Position. Eine Peilung von '
+         'einem Ort ist ein Strahl, kein Punkt — eine Position erscheint erst, '
+         'wenn derselbe Ton von ZWEI Stellen gehört wurde. Der Raum ergibt '
+         'sich dagegen schon beim ersten Mal, indem der Strahl über die Karte '
+         'verfolgt wird.'),
+
     # ── sound events pane ─────────────────────────────────────────────────
     'Ήχοι':              ('Sounds', 'Geräusche'),
     'Τι ακούω':          ('What I hear', 'Was ich höre'),
