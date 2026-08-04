@@ -46,4 +46,14 @@ for f in ('yamnet.onnx', 'yamnet_class_map.csv'):
 print('  ✔ YAMNet cached')
 PY
 
-echo "✔ done — both features can now start offline"
+echo "→ face identity (use_face_detection:=true)"
+# SFace (~37 MB): 128-d embeddings from a 112x112 crop aligned with the SAME
+# five landmarks YuNet already publishes. That pairing is why alignment works.
+HF_HUB_DISABLE_XET=1 python3 - <<'PY'
+from huggingface_hub import hf_hub_download
+hf_hub_download('opencv/face_recognition_sface',
+                'face_recognition_sface_2021dec.onnx')
+print('  ✔ SFace cached')
+PY
+
+echo "✔ done — all features can now start offline"

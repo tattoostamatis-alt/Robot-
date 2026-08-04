@@ -659,6 +659,54 @@ TRANSLATIONS = {
          'genau das Lastproblem, das dieses Projekt schon getroffen hat. '
          'Benötigt'),
 
+    # ── who is here (face identity) ───────────────────────────────────────
+    'Ποιος είναι εδώ':   ('Who is here', 'Wer ist hier'),
+    '👤 Μάθε το πρόσωπο': ('👤 Learn this face', '👤 Gesicht lernen'),
+    'όνομα':             ('name', 'Name'),
+    'κανείς':            ('nobody', 'niemand'),
+    'άγνωστος':          ('unknown', 'unbekannt'),
+    'Μαθαίνω: ':         ('Learning: ', 'Lerne: '),
+    'Έτοιμο.':           ('Done.', 'Fertig.'),
+    'Κανένα πρόσωπο στην κάμερα.': ('No face in the camera.',
+                                    'Kein Gesicht in der Kamera.'),
+    'Γνωστοί: ':         ('Known: ', 'Bekannt: '),
+    'Γράψε πρώτα ένα όνομα.': ('Type a name first.',
+                               'Gib zuerst einen Namen ein.'),
+    'Γράψε το όνομα, στάσου μπροστά στην κάμερα και πάτα το κουμπί. Το '
+    'ρομπότ κρατά λίγες λήψεις — κοίτα το από λίγο διαφορετικές γωνίες. '
+    'Ό,τι δεν αναγνωρίζει μένει «άγνωστος»: ΔΕΝ μαντεύει, γιατί το να '
+    'φωνάξει ένα παιδί με το όνομα του άλλου είναι χειρότερο από το να '
+    'σωπάσει. Θέλει':
+        ('Type the name, stand in front of the camera and press the button. '
+         'The robot keeps a few shots — look at it from slightly different '
+         'angles. Anything it does not recognise stays "unknown": it does NOT '
+         'guess, because calling one child by the other\'s name is worse than '
+         'saying nothing. Requires',
+         'Gib den Namen ein, stell dich vor die Kamera und drücke die Taste. '
+         'Der Roboter behält einige Aufnahmen — schau ihn aus leicht '
+         'unterschiedlichen Winkeln an. Was er nicht erkennt, bleibt '
+         '„unbekannt": er rät NICHT, denn ein Kind mit dem Namen des anderen '
+         'zu rufen ist schlimmer als zu schweigen. Benötigt'),
+
+    # ── self-diagnosis ────────────────────────────────────────────────────
+    'Αυτοδιάγνωση':      ('Self-diagnosis', 'Selbstdiagnose'),
+    'τίποτα γνωστό':     ('nothing known', 'nichts Bekanntes'),
+    'σοβαρά':            ('critical', 'kritisch'),
+    'προειδοποιήσεις':   ('warnings', 'Warnungen'),
+    'Κανένα γνωστό πρόβλημα.': ('No known problem.', 'Kein bekanntes Problem.'),
+    'Ελέγχει τους ΓΝΩΣΤΟΥΣ τρόπους που χαλάει αυτό το ρομπότ — αυτούς που '
+    'έχουν ήδη κοστίσει χρόνο. Σχεδόν όλοι είναι ΣΙΩΠΗΛΟΙ: ο κόμβος ζει, '
+    'το topic υπάρχει, και μόνο η συμπεριφορά είναι λάθος. Κενή λίστα '
+    'σημαίνει «τίποτα γνωστό», όχι «όλα καλά».':
+        ('It checks the KNOWN ways this robot breaks — the ones that have '
+         'already cost time. Almost all of them are SILENT: the node is alive, '
+         'the topic exists, and only the behaviour is wrong. An empty list '
+         'means "nothing known", not "all good".',
+         'Es prüft die BEKANNTEN Fehlerarten dieses Roboters — die, die schon '
+         'Zeit gekostet haben. Fast alle sind STUMM: der Node lebt, das Topic '
+         'existiert, nur das Verhalten ist falsch. Eine leere Liste heißt '
+         '„nichts Bekanntes", nicht „alles gut".'),
+
     # ── live microphone ───────────────────────────────────────────────────
     '🔊 Άκου το μικρόφωνο': ('🔊 Listen to the microphone',
                              '🔊 Mikrofon abhören'),

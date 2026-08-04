@@ -771,6 +771,34 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('use_sound_events', default='false')),
     )
 
+    # ── Face identity (SFace over YuNet's landmarks) ──────────────
+    # Rides use_face_detection: without those five landmarks per face there is
+    # nothing to align, and an unaligned crop costs most of the accuracy.
+    face_identity_node = Node(
+        package='home_robot',
+        executable='face_identity_node.py',
+        name='face_identity_node',
+        output='screen',
+        parameters=[{
+            'threshold': LaunchConfiguration('face_threshold', default='0.363'),
+        }],
+        condition=IfCondition(use_face_detection),
+    )
+
+    # ── Self-diagnosis ────────────────────────────────────────────
+    # Cheap and always useful: it measures topic RATES and matches /rosout
+    # against the signatures of faults this robot has actually had.
+    self_diagnosis_node = Node(
+        package='home_robot',
+        executable='self_diagnosis_node.py',
+        name='self_diagnosis_node',
+        output='screen',
+        parameters=[{
+            'speak': LaunchConfiguration('diagnose_speak', default='true'),
+        }],
+        condition=IfCondition(LaunchConfiguration('use_diagnosis', default='true')),
+    )
+
     # ── Face detection (YuNet on NPU) ─────────────────────────────
     face_detection_node = Node(
         package='home_robot',
@@ -1243,6 +1271,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_episodic',           default_value='true'),
         DeclareLaunchArgument('use_open_vocab',         default_value='false'),
         DeclareLaunchArgument('use_sound_events',       default_value='false'),
+        DeclareLaunchArgument('use_diagnosis',          default_value='true'),
         DeclareLaunchArgument('gesture_auto_goal',      default_value='false'),
         DeclareLaunchArgument('proactive',              default_value='true'),
         DeclareLaunchArgument('use_sim_time',            default_value='false'),
@@ -1288,6 +1317,8 @@ def generate_launch_description():
         episodic_memory_node,
         open_vocab_detector,
         sound_event_node,
+        face_identity_node,
+        self_diagnosis_node,
         tracker_node,
         diarization_node_action,
         recovery_node,

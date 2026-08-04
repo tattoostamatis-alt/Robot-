@@ -468,6 +468,8 @@ class DashboardNode(Node):
         self.create_subscription(String, '/gesture_status', self._cb_gesture, 10)
         self.create_subscription(String, '/observations', self._cb_observations, 10)
         self.create_subscription(String, '/vocab/state', self._cb_vocab, latch)
+        self.create_subscription(String, '/face_identities', self._cb_faces, latch)
+        self.create_subscription(String, '/self_diagnosis', self._cb_diag, latch)
         self.create_subscription(String, '/sound_events', self._cb_sound, latch)
         # Both latched by their publishers, so a tab opened long after the fact
         # still paints a full timeline instead of an empty list.
@@ -501,6 +503,8 @@ class DashboardNode(Node):
         self._gesture_go_pub = self.create_publisher(EmptyMsg, "/gesture_go", 10)
         self._recall_pub = self.create_publisher(String, '/episodic/query', 10)
         self._vocab_pub = self.create_publisher(String, '/vocab/set', 10)
+        self._enrol_pub = self.create_publisher(String, '/faces/enrol', 10)
+        self._forget_pub = self.create_publisher(String, '/faces/forget', 10)
 
         # Map-referenced compass: one calibrated number per map.
         self._last_yaw = None
@@ -1278,6 +1282,20 @@ class DashboardNode(Node):
             return
         self._state.broadcast({'type': 'sound', **data})
 
+    def _cb_faces(self, msg: String):
+        try:
+            data = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        self._state.broadcast({'type': 'faces', **data})
+
+    def _cb_diag(self, msg: String):
+        try:
+            data = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        self._state.broadcast({'type': 'diagnostics', **data})
+
     def _cb_episodic_answer(self, msg: String):
         # Not remembered: an answer belongs to the question that was just asked,
         # so replaying it to a tab that connects later would be confusing.
@@ -1649,6 +1667,14 @@ class DashboardNode(Node):
                     self._listen_ws.add(client)
                 else:
                     self._listen_ws.discard(client)
+        elif t == 'face_enrol':
+            name = str(msg.get('name', '')).strip()
+            if name:
+                self._enrol_pub.publish(String(data=name))
+        elif t == 'face_forget':
+            name = str(msg.get('name', '')).strip()
+            if name:
+                self._forget_pub.publish(String(data=name))
         elif t == 'compass_calibrate':
             self._compass_calibrate(float(msg.get('bearing', 0.0)))
         elif t == 'compass_clear':
@@ -3067,6 +3093,25 @@ button{font:inherit;color:inherit}
     <!-- ── Voice / LLM ─────────────────────────────────────────── -->
     <section class="pane" id="p-llm">
       <div class="card" style="margin-bottom:9px">
+        <h3>Ποιος είναι εδώ <span class="badge" id="fi-badge">—</span></h3>
+        <div id="fi-present" style="font-size:12.5px;line-height:1.8"></div>
+        <div class="row" style="margin-top:10px">
+          <input id="fi-name" placeholder="όνομα"
+            style="flex:1;min-width:110px;background:#232329;border:1px solid #2c2c32;
+            border-radius:8px;color:#e4e4e7;padding:7px 10px;font-size:12.5px"
+            autocomplete="off">
+          <button class="btn pri" id="b-fi-enrol">👤 Μάθε το πρόσωπο</button>
+        </div>
+        <div id="fi-msg" style="font-size:11.5px;color:#71717a;margin-top:8px"></div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          Γράψε το όνομα, στάσου μπροστά στην κάμερα και πάτα το κουμπί. Το
+          ρομπότ κρατά λίγες λήψεις — κοίτα το από λίγο διαφορετικές γωνίες.
+          Ό,τι δεν αναγνωρίζει μένει «άγνωστος»: ΔΕΝ μαντεύει, γιατί το να
+          φωνάξει ένα παιδί με το όνομα του άλλου είναι χειρότερο από το να
+          σωπάσει. Θέλει <code>use_face_detection:=true</code>.
+        </p>
+      </div>
+      <div class="card" style="margin-bottom:9px">
         <h3>Ποιος μιλάει <span class="badge" id="sp-badge">—</span></h3>
         <div id="sp-detail" style="font-size:11.5px;color:#71717a;line-height:1.55">
           Θέλει use_diarization (ποιος), DoA (από πού), use_face_detection (ποιον βλέπω). Ό,τι λείπει παραλείπεται.
@@ -3096,6 +3141,16 @@ button{font:inherit;color:inherit}
 
     <!-- ── System ──────────────────────────────────────────────── -->
     <section class="pane" id="p-sys">
+      <div class="card" style="margin-bottom:9px">
+        <h3>Αυτοδιάγνωση <span class="badge" id="dg-badge">—</span></h3>
+        <div id="dg-list" style="font-size:12.5px;line-height:1.65"></div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          Ελέγχει τους ΓΝΩΣΤΟΥΣ τρόπους που χαλάει αυτό το ρομπότ — αυτούς που
+          έχουν ήδη κοστίσει χρόνο. Σχεδόν όλοι είναι ΣΙΩΠΗΛΟΙ: ο κόμβος ζει,
+          το topic υπάρχει, και μόνο η συμπεριφορά είναι λάθος. Κενή λίστα
+          σημαίνει «τίποτα γνωστό», όχι «όλα καλά».
+        </p>
+      </div>
       <div class="card">
         <h3>Υπολογιστής</h3>
         <div id="s-bars"></div>
@@ -3594,6 +3649,8 @@ const HANDLERS = {
   gesture(m){ gestureState = m; drawPointRing(); },
   vocab(m){ renderVocab(m); },
   compass(m){ compassOffset = m.offset; drawCompass2(); },
+  faces(m){ renderFaces(m); },
+  diagnostics(m){ renderDiagnostics(m); },
   sound(m){ soundState = m; renderSound(m); },
   observations(m){ renderObservations(m); },
   timeline(m){ renderTimeline(m); },
@@ -3681,6 +3738,65 @@ const HANDLERS = {
   fall_event(m){ onFallEvent(m); },
   speaker(m){ onSpeaker(m); },
 };
+
+// ── who is here ────────────────────────────────────────────────────────────
+function renderFaces(m){
+  const present = m.present || [];
+  $('fi-badge').textContent = !m.ready ? t('φορτώνει…')
+    : (present.length ? present.join(', ') : t('κανείς'));
+
+  if(m.enrolling){
+    $('fi-msg').textContent = t('Μαθαίνω: ') + m.enrolling.name
+      + ' (' + m.enrolling.left + ')';
+  } else if($('fi-msg').textContent.startsWith(t('Μαθαίνω: '))){
+    $('fi-msg').textContent = t('Έτοιμο.');
+  }
+
+  const faces = m.faces || [];
+  const el = $('fi-present');
+  if(!faces.length){
+    el.innerHTML = '<span style="color:#71717a">'
+      + esc(t('Κανένα πρόσωπο στην κάμερα.')) + '</span>';
+  } else {
+    el.innerHTML = faces.map(f=>{
+      const known = f.name && f.name !== 'unknown';
+      const col = known ? '#4ade80' : '#a1a1aa';
+      const label = known ? f.name : t('άγνωστος');
+      return `<div><span style="color:${col}">${esc(label)}</span>`
+        + `<span style="color:#71717a"> ${(f.score*100).toFixed(0)}%</span></div>`;
+    }).join('');
+  }
+
+  // Known people, each with a way to remove them.
+  const enrolled = m.enrolled || [];
+  if(enrolled.length){
+    el.innerHTML += '<div style="margin-top:8px;color:#71717a">'
+      + esc(t('Γνωστοί: ')) + enrolled.map(esc).join(', ') + '</div>';
+  }
+}
+
+// ── self-diagnosis ─────────────────────────────────────────────────────────
+const DG_COLOR = {critical:'#ef4444', warning:'#f59e0b', info:'#71717a'};
+
+function renderDiagnostics(m){
+  const f = m.findings || [];
+  const crit = f.filter(x=>x.severity==='critical').length;
+  $('dg-badge').textContent = !f.length ? t('τίποτα γνωστό')
+    : (crit ? crit + ' ' + t('σοβαρά') : f.length + ' ' + t('προειδοποιήσεις'));
+  const el = $('dg-list');
+  if(!f.length){
+    el.innerHTML = '<span style="color:#4ade80">'
+      + esc(t('Κανένα γνωστό πρόβλημα.')) + '</span>';
+    return;
+  }
+  el.innerHTML = f.map(x=>`
+    <div style="padding:8px 0;border-bottom:1px solid #232329">
+      <div style="color:${DG_COLOR[x.severity]||'#a1a1aa'};font-weight:600">
+        ${esc(x.title)}</div>
+      <div style="color:#a1a1aa;margin-top:3px">${esc(x.detail)}</div>
+      <div style="color:#60a5fa;margin-top:4px">→ ${esc(x.fix)}</div>
+    </div>`).join('');
+}
 
 // ── live microphone ────────────────────────────────────────────────────────
 // Raw 16 kHz int16 PCM arrives as BINARY websocket frames and is scheduled
@@ -4332,6 +4448,13 @@ $('b-nerf-go').addEventListener('click',()=>send({type:'nerf_capture', on:true})
 $('b-nerf-stop').addEventListener('click',()=>send({type:'nerf_capture', on:false}));
 $('b-follow').addEventListener('click',()=>send({type:'follow', on:true}));
 $('b-follow-stop').addEventListener('click',()=>send({type:'follow', on:false}));
+
+$('b-fi-enrol').addEventListener('click',()=>{
+  const n=$('fi-name').value.trim();
+  if(!n){ $('fi-msg').textContent = t('Γράψε πρώτα ένα όνομα.'); return; }
+  send({type:'face_enrol', name:n});
+  $('fi-msg').textContent = t('Μαθαίνω: ') + n;
+});
 
 $('b-listen').addEventListener('click', startListening);
 $('b-listen-stop').addEventListener('click', stopListening);

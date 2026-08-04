@@ -33,10 +33,13 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 
-from home_robot.proactive import Baseline, ObservationGate, find_observations
+from home_robot.proactive import (Baseline, Observation, ObservationGate,
+                                  find_observations)
+from home_robot.routines import RoutineLearner
 from home_robot.status_query import ROOM_LOCATIVE_EL
 
 _STATE_PATH = os.path.expanduser('~/.ros/home_robot_baseline.json')
+_ROUTINE_PATH = os.path.expanduser('~/.ros/home_robot_routines.json')
 
 # How long after the last skeleton we still consider somebody present. People
 # step out of frame constantly; a hard "visible right now" test would silence
@@ -58,6 +61,21 @@ def render_greek(obs):
     if obs.kind == 'moved':
         return f'Το {obs.label} έχει μετακινηθεί {_locative(obs.room)}.'
     return f'Κάτι άλλαξε με το {obs.label}.'
+
+
+def render_routine_el(key, expected_hour, hours_late):
+    """The sentence for a routine that has not happened. Absence is the news."""
+    when = f'{int(expected_hour):02d}:{int(round((expected_hour % 1) * 60)):02d}'
+    kind, _, name = key.partition(':')
+    if kind == 'person':
+        return (f'Ο {name} συνήθως είναι εδώ γύρω στις {when}. '
+                f'Δεν τον έχω δει σήμερα.')
+    if kind == 'sound':
+        return f'Συνήθως ακούω {name} γύρω στις {when}. Σήμερα όχι.'
+    if kind == 'room':
+        return (f'Συνήθως περνάω {ROOM_LOCATIVE_EL.get(name, name)} γύρω στις '
+                f'{when}. Σήμερα δεν έχω πάει.')
+    return f'Το «{key}» συνήθως γίνεται γύρω στις {when}. Σήμερα δεν έγινε.'
 
 
 class ProactiveObserverNode(Node):
@@ -87,11 +105,18 @@ class ProactiveObserverNode(Node):
                          self.get_parameter('quiet_end_hour').value))
 
         self.baseline = self._load_baseline()
+        self.routines = self._load_routines()
         self._last_person_at = 0.0
         self._feed = []            # recent observations, for the dashboard
 
         self.create_subscription(String, '/object_memory', self._cb_memory, 5)
         self.create_subscription(String, '/pose_detections', self._cb_poses, 5)
+        # Signals the household's rhythm is made of. Deliberately NOT the
+        # robot's own position: /current_room says where the ROBOT went, which
+        # is its patrol schedule, not the family's habits.
+        self.create_subscription(String, '/current_speaker', self._cb_speaker, 10)
+        self.create_subscription(String, '/sound_events', self._cb_sound, 10)
+        self.create_subscription(String, '/face_identities', self._cb_faces, 10)
 
         self._say_pub  = self.create_publisher(String, '/speech_response', 10)
         self._feed_pub = self.create_publisher(String, 'observations', 10)
@@ -99,10 +124,16 @@ class ProactiveObserverNode(Node):
         # Persist periodically: a baseline that only survives a clean shutdown
         # would be lost on every power cut, and this machine has those.
         self.create_timer(120.0, self._save_baseline)
+        self.create_timer(120.0, self._save_routines)
+        # Checked every few minutes, not every second: "this did not happen
+        # today" cannot become true between one tick and the next.
+        self.create_timer(300.0, self._check_routines)
 
         self.get_logger().info(
             f'Proactive observer ready — {len(self.baseline.known_labels())} '
-            f'objects with a learned home, enabled={self.enabled}')
+            f'objects with a learned home, '
+            f'{len(self.routines.established())} learned routines, '
+            f'enabled={self.enabled}')
 
     # ── state ─────────────────────────────────────────────────────────────────
 
@@ -129,7 +160,77 @@ class ProactiveObserverNode(Node):
             self.get_logger().warn(f'could not save baseline: {exc}',
                                    throttle_duration_sec=300.0)
 
+    def _load_routines(self):
+        try:
+            with open(_ROUTINE_PATH, encoding='utf-8') as fh:
+                return RoutineLearner.from_dict(json.load(fh))
+        except FileNotFoundError:
+            return RoutineLearner()
+        except (json.JSONDecodeError, OSError) as exc:
+            self.get_logger().warn(f'routines unreadable ({exc}) — relearning')
+            return RoutineLearner()
+
+    def _save_routines(self):
+        self.routines.prune()
+        try:
+            os.makedirs(os.path.dirname(_ROUTINE_PATH), exist_ok=True)
+            tmp = _ROUTINE_PATH + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as fh:
+                json.dump(self.routines.to_dict(), fh, ensure_ascii=False)
+            os.replace(tmp, _ROUTINE_PATH)
+        except OSError as exc:
+            self.get_logger().warn(f'could not save routines: {exc}',
+                                   throttle_duration_sec=300.0)
+
     # ── inputs ────────────────────────────────────────────────────────────────
+
+    def _cb_speaker(self, msg: String):
+        name = (msg.data or '').strip()
+        if name and name.lower() != 'unknown':
+            self.routines.observe(f'person:{name}')
+
+    def _cb_faces(self, msg: String):
+        """Seeing somebody is a better rhythm signal than hearing them: people
+        come home long before they say anything."""
+        try:
+            data = json.loads(msg.data) or {}
+        except json.JSONDecodeError:
+            return
+        for face in data.get('faces', []) or []:
+            name = face.get('name')
+            if name and name != 'unknown':
+                self.routines.observe(f'person:{name}')
+
+    def _cb_sound(self, msg: String):
+        try:
+            data = json.loads(msg.data) or {}
+        except json.JSONDecodeError:
+            return
+        for key in data.get('fired', []) or []:
+            self.routines.observe(f'sound:{key}')
+
+    def _check_routines(self):
+        """Speak about a routine that should have happened and did not."""
+        if not self.enabled:
+            return
+        now = time.time()
+        hour = time.localtime(now).tm_hour
+        person = self._person_present()
+        for key, expected, late in self.routines.overdue(now=now):
+            # Reuses Observation so the gate's dedup/cooldown/quiet-hours
+            # logic is shared — a missing routine is just another thing
+            # worth saying at most once in a while.
+            obs = Observation('routine_missing', key, importance=0.7)
+            if not self.gate.allow(obs, now=now, person_present=person,
+                                   hour=hour):
+                continue
+            text = render_routine_el(key, expected, late)
+            self._say_pub.publish(String(data=text))
+            self.gate.record(obs, now=now)
+            self._push_feed(obs, text, now)
+            self.get_logger().info(f'Routine missing: {text}')
+            break            # one remark per cycle
+
 
     def _cb_poses(self, msg: String):
         # ‼️ pose_node publishes {"persons": [...], "width": W, "height": H}.
