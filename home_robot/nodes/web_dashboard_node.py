@@ -2495,6 +2495,14 @@ button{font:inherit;color:inherit}
 /* Cards holding a viewer can also be dragged taller. Native resize is pointer
    only — folding is what works on a phone, which is why both exist. */
 .card.sizable{resize:vertical;overflow:auto;min-height:130px}
+/* Drag bar under a viewer. Native CSS resize is pointer-only and most of the
+   use here is a phone, so this is a real handle with touch events. */
+.grip{height:16px;margin:-2px 0 7px;border-radius:8px;cursor:ns-resize;
+  background:#232329;border:1px solid #2f2f37;display:flex;
+  align-items:center;justify-content:center;flex:0 0 auto;touch-action:none}
+.grip::after{content:'';width:34px;height:3px;border-radius:2px;background:#4a4a56}
+.grip:active{background:#2c2c34}
+.grip:active::after{background:#67c4ff}
 .row{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
 .btn{background:linear-gradient(#2e2e36,#26262d);border:1px solid #3d3d48;
   color:#d9d9de;padding:8px 15px;border-radius:10px;cursor:pointer;font-size:13px;
@@ -3841,6 +3849,77 @@ const HANDLERS = {
   speaker(m){ onSpeaker(m); },
 };
 
+// ── resizable viewers ──────────────────────────────────────────────────────
+// The big panels are flex:1 so they fill the pane. Dragging the grip pins an
+// explicit height instead; double-tapping it gives the pane back its space.
+const VIEWERS = ['map-wrap', 'cam-wrap', 'cost-wrap', 'arm3d', 'cloud-canvas'];
+
+function loadSizes(){
+  try { return JSON.parse(localStorage.getItem('hr_sizes') || '{}'); }
+  catch(e){ return {}; }
+}
+function saveSizes(o){
+  try { localStorage.setItem('hr_sizes', JSON.stringify(o)); } catch(e){}
+}
+
+function setupViewers(){
+  const sizes = loadSizes();
+  for (const id of VIEWERS){
+    const el = $(id);
+    if (!el || el.dataset.gripWired) continue;
+    el.dataset.gripWired = '1';
+
+    if (sizes[id]) applyViewerHeight(el, sizes[id]);
+
+    const grip = document.createElement('div');
+    grip.className = 'grip';
+    grip.title = 'drag / double-tap';
+    el.parentNode.insertBefore(grip, el.nextSibling);
+
+    let startY = 0, startH = 0;
+    const yOf = e => e.touches ? e.touches[0].clientY : e.clientY;
+    const down = e => {
+      startY = yOf(e);
+      startH = el.getBoundingClientRect().height;
+      e.preventDefault();
+      window.addEventListener('mousemove', move);
+      window.addEventListener('touchmove', move, {passive:false});
+      window.addEventListener('mouseup', up);
+      window.addEventListener('touchend', up);
+    };
+    const move = e => {
+      const h = Math.max(120, Math.min(1400, startH + (yOf(e) - startY)));
+      applyViewerHeight(el, h);
+      e.preventDefault();
+      redrawVisible();
+    };
+    const up = () => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('touchmove', move);
+      window.removeEventListener('mouseup', up);
+      window.removeEventListener('touchend', up);
+      const o = loadSizes();
+      o[id] = Math.round(el.getBoundingClientRect().height);
+      saveSizes(o);
+      redrawVisible();
+    };
+    grip.addEventListener('mousedown', down);
+    grip.addEventListener('touchstart', down, {passive:false});
+    // Double-tap the grip to hand the space back to the pane.
+    grip.addEventListener('dblclick', () => {
+      el.style.height = ''; el.style.flex = '';
+      const o = loadSizes(); delete o[id]; saveSizes(o);
+      redrawVisible();
+    });
+  }
+}
+
+function applyViewerHeight(el, h){
+  // flex:none is what stops the pane's flex:1 from immediately overriding it.
+  el.style.flex = '0 0 auto';
+  el.style.height = h + 'px';
+}
+
 // ── foldable cards ─────────────────────────────────────────────────────────
 // Every card folds from its header, and the state survives a reload. On a
 // phone the panes stack several cards deep and the useful one is often third;
@@ -3886,7 +3965,7 @@ function setupCards(){
 // A canvas inside a folded card has no size; on unfold it needs repainting.
 function redrawVisible(){
   for (const f of [window.draw, window.armDraw, window.drawCompass2,
-                   window.drawPointRing]){
+                   window.drawPointRing, window.drawCost, window.cloudDraw]){
     if (typeof f === 'function') { try { f(); } catch(e){} }
   }
   window.dispatchEvent(new Event('resize'));
@@ -4991,6 +5070,7 @@ function applyLang(){
   renderTabs();
   renderChips();
   setupCards();
+  setupViewers();
   for(const b of document.querySelectorAll('#lang-buttons .btn'))
     b.classList.toggle('pri', b.dataset.lang === LANG);
   if(document.querySelector('#p-set.active')) mapsRefresh();
