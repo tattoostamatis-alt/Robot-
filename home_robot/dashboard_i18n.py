@@ -22,11 +22,9 @@ TRANSLATIONS = {
     # ── tabs ──────────────────────────────────────────────────────────────
     'Χάρτης':            ('Map', 'Karte'),
     'Κάμερα':            ('Camera', 'Kamera'),
-    'Βραχίονας':         ('Arm', 'Arm'),
     'Σκούπα':            ('Vacuum', 'Sauger'),
-    'Φωνή/LLM':          ('Voice/LLM', 'Sprache/LLM'),
     'Σύστημα':           ('System', 'System'),
-    'Ρυθμίσεις':         ('Settings', 'Einstellungen'),
+    'Ρύθμιση':           ('Settings', 'Einstellung'),
 
     # ── map pane ──────────────────────────────────────────────────────────
     'ΧΑΡΤΗΣ · κλικ για πλοήγηση': ('MAP · click to navigate',
@@ -188,7 +186,6 @@ TRANSLATIONS = {
          'speist zusammen mit der Odometrie den EKF.'),
 
     # ── RTAB-Map / 3D map pane ────────────────────────────────────────────
-    '3D Χάρτης':         ('3D Map', '3D-Karte'),
     'Χαρτογράφηση':      ('Mapping', 'Kartierung'),
     'Καρέ-κλειδιά':      ('Keyframes', 'Schlüsselbilder'),
     'Κλεισίματα βρόχου': ('Loop closures', 'Schleifenschlüsse'),
@@ -477,7 +474,7 @@ TRANSLATIONS = {
                                'Die Sitzung läuft nicht.'),
 
     # ── gestures pane ─────────────────────────────────────────────────────
-    'Χειρονομίες':       ('Gestures', 'Gesten'),
+    'Δείξε':             ('Point', 'Zeigen'),
     'Δείξε με το χέρι':  ('Point with your hand', 'Mit der Hand zeigen'),
     'Στόχος X':          ('Target X', 'Ziel X'),
     'Στόχος Y':          ('Target Y', 'Ziel Y'),
@@ -521,7 +518,7 @@ TRANSLATIONS = {
                                    'und ausgerichtete Tiefe.'),
 
     # ── observations pane ─────────────────────────────────────────────────
-    'Παρατηρήσεις':      ('Observations', 'Beobachtungen'),
+    'Πρόσεξα':           ('Noticed', 'Bemerkt'),
     'Τι πρόσεξε':        ('What it noticed', 'Was aufgefallen ist'),
     'Καμία παρατήρηση ακόμη.': ('No observations yet.',
                                 'Noch keine Beobachtungen.'),
@@ -557,6 +554,55 @@ TRANSLATIONS = {
 
     # ── timeline pane ─────────────────────────────────────────────────────
     'Χρονολόγιο':        ('Timeline', 'Zeitleiste'),
+    'Χρονικό':           ('Timeline', 'Verlauf'),
+    'Χέρι':              ('Arm', 'Arm'),
+    'Σπίτι 3D':          ('House 3D', 'Haus 3D'),
+    'Φωνή':              ('Voice', 'Sprache'),
+
+    # ── compass ───────────────────────────────────────────────────────────
+    'Πυξίδα':            ('Compass', 'Kompass'),
+    'Κατεύθυνση':        ('Direction', 'Richtung'),
+    'Μοίρες':            ('Degrees', 'Grad'),
+    'Βορράς στον χάρτη': ('North on the map', 'Norden auf der Karte'),
+    '🧭 Κοιτάω Βορρά':   ('🧭 I am facing north', '🧭 Ich schaue nach Norden'),
+    'Βορρά':             ('north', 'Norden'),
+    'Ανατολή':           ('east', 'Osten'),
+    'Νότο':              ('south', 'Süden'),
+    'Δύση':              ('west', 'Westen'),
+    '✕ Καθάρισε':        ('✕ Clear', '✕ Löschen'),
+    'αβαθμονόμητη':      ('not calibrated', 'nicht kalibriert'),
+    'χωρίς εντοπισμό':   ('no localization', 'keine Lokalisierung'),
+    'βαθμονομημένη':     ('calibrated', 'kalibriert'),
+    'Βαθμονομήθηκε.':    ('Calibrated.', 'Kalibriert.'),
+    'Δεν υπάρχει θέση — κάνε πρώτα εντοπισμό.':
+        ('No pose — localize first.', 'Keine Position — zuerst lokalisieren.'),
+    # Compass rose letters.
+    'Β': ('N', 'N'),   'ΒΑ': ('NE', 'NO'),  'Α': ('E', 'O'),   'ΝΑ': ('SE', 'SO'),
+    'Ν': ('S', 'S'),   'ΝΔ': ('SW', 'SW'),  'Δ': ('W', 'W'),   'ΒΔ': ('NW', 'NW'),
+    'Η πυξίδα ΔΕΝ βγαίνει από μαγνητόμετρο — βγαίνει από τον ΧΑΡΤΗ. Ο χάρτης '
+    'δεν γυρίζει ποτέ και το AMCL διορθώνει τη γωνία πάνω σε αληθινούς '
+    'τοίχους, οπότε μέσα στο σπίτι είναι πολύ σταθερότερο από κάθε '
+    'μαγνητόμετρο δίπλα σε μοτέρ σκούπας.':
+        ('The compass does NOT come from a magnetometer — it comes from the '
+         'MAP. The map never rotates and AMCL corrects the angle against real '
+         'walls, which indoors is far steadier than any magnetometer next to a '
+         'vacuum motor.',
+         'Der Kompass kommt NICHT von einem Magnetometer — er kommt von der '
+         'KARTE. Die Karte dreht sich nie und AMCL korrigiert den Winkel an '
+         'echten Wänden, was drinnen weit stabiler ist als jedes Magnetometer '
+         'neben einem Saugermotor.'),
+    'Λείπει μόνο ΕΝΑ νούμερο: προς τα πού είναι ο Βορράς μέσα στον χάρτη. '
+    'Γύρνα το ρομπότ να κοιτάει Βορρά και πάτα το κουμπί — μία φορά για κάθε '
+    'χάρτη. Αν ξέρεις ότι κοιτάει άλλη κατεύθυνση, διάλεξέ την από τη λίστα. '
+    '‼️ Θέλει εντοπισμό: χωρίς AMCL δεν υπάρχει γωνία να μετρηθεί.':
+        ('Only ONE number is missing: which way north points inside the map. '
+         'Turn the robot to face north and press the button — once per map. If '
+         'you know it faces some other direction, pick that from the list. '
+         '‼️ Needs localization: without AMCL there is no angle to measure.',
+         'Es fehlt nur EINE Zahl: wohin Norden in der Karte zeigt. Drehe den '
+         'Roboter nach Norden und drücke die Taste — einmal pro Karte. Wenn du '
+         'weißt, dass er anders steht, wähle die Richtung aus der Liste. '
+         '‼️ Benötigt Lokalisierung: ohne AMCL gibt es keinen Winkel.'),
     'Ρώτα τη μνήμη':     ('Ask the memory', 'Frag das Gedächtnis'),
     'Ρώτα':              ('Ask', 'Fragen'),
     'π.χ. τι έγινε σήμερα το πρωί;': ('e.g. what happened this morning?',
@@ -570,7 +616,7 @@ TRANSLATIONS = {
     'πριν από 2 ώρες':   ('2 hours ago', 'vor 2 Stunden'),
 
     # ── open-vocabulary search pane ───────────────────────────────────────
-    'Αναζήτηση':         ('Search', 'Suche'),
+    'Ψάξε':              ('Search', 'Suchen'),
     'Ψάξε ό,τι θέλεις':  ('Search for anything', 'Suche irgendetwas'),
     '🔎 Ψάξε':           ('🔎 Search', '🔎 Suchen'),
     'π.χ. κλειδιά, γυαλιά, φορτιστής': ('e.g. keys, glasses, charger',
@@ -612,6 +658,21 @@ TRANSLATIONS = {
          'Ein zweiter Detektor, der dauerhaft auf derselben iGPU läuft, ist '
          'genau das Lastproblem, das dieses Projekt schon getroffen hat. '
          'Benötigt'),
+
+    # ── live microphone ───────────────────────────────────────────────────
+    '🔊 Άκου το μικρόφωνο': ('🔊 Listen to the microphone',
+                             '🔊 Mikrofon abhören'),
+    'Ακούς ζωντανά.':    ('Listening live.', 'Live-Wiedergabe.'),
+    'Χωρίς υποστήριξη ήχου.': ('No audio support.', 'Kein Audio-Support.'),
+    'ΖΩΝΤΑΝΟΣ ήχος από το δωμάτιο όπου βρίσκεται το ρομπότ — ακούς ό,τι '
+    'ακούει. Ίδιο κανάλι με το «Έι ρομπότ», καθαρισμένο από τον XVF3800. '
+    'Ξεκινά μόνο όταν το πατήσεις και κόβεται μόλις κλείσεις το tab.':
+        ('LIVE audio from the room the robot is in — you hear what it hears. '
+         'The same channel as the wake word, cleaned up by the XVF3800. It '
+         'starts only when you press it and stops the moment you close the tab.',
+         'LIVE-Ton aus dem Raum, in dem der Roboter steht — du hörst, was er '
+         'hört. Derselbe Kanal wie das Wakeword, vom XVF3800 aufbereitet. '
+         'Startet nur auf Tastendruck und endet, sobald du den Tab schließt.'),
 
     # ── sound events pane ─────────────────────────────────────────────────
     'Ήχοι':              ('Sounds', 'Geräusche'),

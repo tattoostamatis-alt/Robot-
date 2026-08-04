@@ -57,10 +57,11 @@ from sensor_msgs.msg import Image, Imu, JointState, LaserScan, PointCloud2
 # and this file needs both — the localize/rtabmap service clients and the
 # gesture_go publisher. Aliasing the message keeps the pre-existing `Empty` as
 # the service, so none of the service call sites below change meaning.
-from std_msgs.msg import Bool, Float32, String
+from std_msgs.msg import Bool, Float32, Int16MultiArray, String
 from std_msgs.msg import Empty as EmptyMsg
 from std_srvs.srv import Empty
 
+from home_robot.compass import offset_from_known_bearing
 from home_robot.dashboard_i18n import LANGUAGES, as_js_table
 
 import uvicorn
@@ -71,6 +72,9 @@ from fastapi.staticfiles import StaticFiles
 # Overridable so a second instance can be brought up beside the live one for
 # testing without taking the robot's dashboard off 8080.
 PORT = int(os.environ.get('HOME_ROBOT_DASHBOARD_PORT', '8080'))
+
+# Which way north points IN THE MAP — one number, calibrated once per map.
+_COMPASS_PATH = os.path.expanduser('~/.ros/home_robot_compass.json')
 SHARE = get_package_share_directory('home_robot')
 # Resolve via the installed share dir — a path relative to __file__ breaks
 # under `ros2 run` (lib/home_robot/../config does not exist).
@@ -253,6 +257,26 @@ class State:
         del self.chat[:-60]
         self.broadcast({'type': 'chat', **entry}, remember=False)
 
+    def send_bytes(self, targets, payload: bytes):
+        """Binary frame to a SUBSET of clients — used for the live mic stream.
+
+        Not a broadcast: audio only goes to the tabs that asked to listen, and
+        never gets remembered in `latest` (replaying a second of month-old audio
+        to a tab that just connected would be nonsense).
+        """
+        if self._loop is None or not targets:
+            return
+        asyncio.run_coroutine_threadsafe(
+            self._bcast_bytes(list(targets), payload), self._loop)
+
+    async def _bcast_bytes(self, clients, payload: bytes):
+        for ws in clients:
+            try:
+                await ws.send_bytes(payload)
+            except Exception:
+                with self._lock:
+                    self._clients.discard(ws)
+
     async def _bcast(self, data: str):
         dead = []
         with self._lock:
@@ -354,6 +378,9 @@ class DashboardNode(Node):
         # closed while the tab was open never sent its 'off', so the stream ran
         # forever at 150 kB/s with nobody watching.
         self._cloud_ws: Set[object] = set()
+        # Tabs currently listening to the microphone. Per socket, like the
+        # cloud stream: two phones listening must not switch each other off.
+        self._listen_ws: Set[object] = set()
         self._cloud_last = 0.0
         # The camera ships with its pointcloud filter off; _set_camera_pointcloud
         # turns it on for as long as someone is on the 3D tab.
@@ -435,6 +462,9 @@ class DashboardNode(Node):
         self.create_subscription(String, '/situation_context', self._cb_situation, 10)
 
         # ── Gestures / observations / timeline ──────────────────────────────
+        # ‼️ The SHARED mic topic, not the ALSA device. wake_word_node owns the
+        # stream; stt_node and sound_event_node read this same topic.
+        self.create_subscription(Int16MultiArray, '/mic/audio', self._cb_mic, 30)
         self.create_subscription(String, '/gesture_status', self._cb_gesture, 10)
         self.create_subscription(String, '/observations', self._cb_observations, 10)
         self.create_subscription(String, '/vocab/state', self._cb_vocab, latch)
@@ -471,6 +501,12 @@ class DashboardNode(Node):
         self._gesture_go_pub = self.create_publisher(EmptyMsg, "/gesture_go", 10)
         self._recall_pub = self.create_publisher(String, '/episodic/query', 10)
         self._vocab_pub = self.create_publisher(String, '/vocab/set', 10)
+
+        # Map-referenced compass: one calibrated number per map.
+        self._last_yaw = None
+        self._compass_offset = self._compass_load()
+        # Remembered in state.latest, so a tab opening later still gets it.
+        self._broadcast_compass()
         # Same topic the llm_bridge `check` tool publishes, so the button and
         # "πήγαινε να δεις αν…" take one code path.
         self._mission_pub = self.create_publisher(String, '/mission/start', 10)
@@ -690,6 +726,9 @@ class DashboardNode(Node):
         self._publish_pose(p.position.x, p.position.y, yaw)
 
     def _publish_pose(self, x: float, y: float, yaw: float):
+        # Kept for compass calibration: the button says "I am facing north",
+        # and the server needs the yaw that statement refers to.
+        self._last_yaw = yaw
         self._state.broadcast({
             'type': 'pose',
             'x':   round(x, 3),
@@ -1152,6 +1191,57 @@ class DashboardNode(Node):
 
     # ── Gestures / observations / timeline ───────────────────────────────────
 
+    # ── Map-referenced compass ───────────────────────────────────────────────
+    # The offset lives on disk, not in a launch parameter: it belongs to the
+    # MAP, and a remap invalidates it the same way it invalidates the taught
+    # locations. Stored with the map name so switching maps does not silently
+    # carry a stale north over.
+
+    def _compass_load(self):
+        try:
+            with open(_COMPASS_PATH, encoding='utf-8') as fh:
+                return json.load(fh).get('offset')
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return None
+
+    def _compass_store(self, offset):
+        self._compass_offset = offset
+        try:
+            os.makedirs(os.path.dirname(_COMPASS_PATH), exist_ok=True)
+            tmp = _COMPASS_PATH + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as fh:
+                json.dump({'offset': offset}, fh)
+            os.replace(tmp, _COMPASS_PATH)
+        except OSError as exc:
+            self.get_logger().warn(f'could not save compass offset: {exc}')
+        self._broadcast_compass()
+
+    def _compass_calibrate(self, bearing_deg):
+        if self._last_yaw is None:
+            self.get_logger().warn(
+                'compass calibration needs a pose — localize first')
+            return
+        self._compass_store(
+            offset_from_known_bearing(self._last_yaw, bearing_deg))
+        self.get_logger().info(
+            f'Compass calibrated: facing {bearing_deg:.0f}° at yaw '
+            f'{math.degrees(self._last_yaw):.1f}°')
+
+    def _broadcast_compass(self):
+        self._state.broadcast({'type': 'compass', 'offset': self._compass_offset})
+
+    def _cb_mic(self, msg: Int16MultiArray):
+        """Forward raw 16 kHz mono PCM to whoever is listening.
+
+        Sent as int16 little-endian bytes rather than JSON: a 100 ms chunk is
+        ~1600 samples, and base64 in a JSON envelope would roughly double the
+        bytes and cost a parse per chunk at 10 Hz per client.
+        """
+        if not self._listen_ws:
+            return
+        self._state.send_bytes(self._listen_ws,
+                               np.asarray(msg.data, dtype=np.int16).tobytes())
+
     def _cb_gesture(self, msg: String):
         """Live pointing state. Broadcast as-is; the pane renders the ring."""
         try:
@@ -1457,6 +1547,9 @@ class DashboardNode(Node):
     def release_client(self, client):
         """A browser went away — forget anything it had switched on."""
         self._cloud_ws.discard(client)
+        # Same for a tab that was listening: a closed phone must not leave the
+        # microphone streaming to nobody.
+        self._listen_ws.discard(client)
         # A tab closed on the 3D pane never sends its 'off', so the camera would
         # keep building pointclouds for nobody.
         self._set_camera_pointcloud(bool(self._cloud_ws))
@@ -1550,6 +1643,16 @@ class DashboardNode(Node):
             self._gesture_go_pub.publish(EmptyMsg())
         elif t == 'recall':
             self._recall_pub.publish(String(data=str(msg.get('when', ''))))
+        elif t == 'listen':
+            if client is not None:
+                if msg.get('on'):
+                    self._listen_ws.add(client)
+                else:
+                    self._listen_ws.discard(client)
+        elif t == 'compass_calibrate':
+            self._compass_calibrate(float(msg.get('bearing', 0.0)))
+        elif t == 'compass_clear':
+            self._compass_store(None)
         elif t == 'vocab':
             # An empty string clears the vocabulary and idles the detector,
             # which is how the Stop button releases the GPU.
@@ -2229,8 +2332,15 @@ async def ws_endpoint(ws: WebSocket, t: str = ''):
                 ros_node.dispatch(msg, ws)
     except WebSocketDisconnect:
         pass
-    except Exception:
-        pass
+    except Exception as exc:                              # noqa: BLE001
+        # ‼️ This used to be a bare `pass`. Any exception inside dispatch() —
+        # a typo, a missing attribute, a bad cast — closed the socket and left
+        # NOTHING anywhere: no log line, no error to the browser, just a button
+        # that did nothing. Cost real time chasing the compass calibration.
+        # Still swallowed (a dead socket must not take the node down), but it
+        # is now visible.
+        if ros_node:
+            ros_node.get_logger().error(f'dashboard client error: {exc!r}')
     finally:
         state.remove_client(ws)
         if ros_node:
@@ -2458,7 +2568,7 @@ button{font:inherit;color:inherit}
   .tab{flex:0 0 14.28%;flex-direction:column;gap:2px;padding:6px 2px;
     font-size:9.5px;border-left:none;border-top:3px solid transparent;
     justify-content:center;text-align:center;min-width:0}
-  /* Long labels (Βραχίονας, Ρυθμίσεις) must shrink, not widen the cell and
+  /* Long labels (Costmap, Σπίτι 3D) must shrink, not widen the cell and
      push the row back into overflow. */
   .tab>span:last-child{overflow:hidden;text-overflow:ellipsis;
     white-space:nowrap;max-width:100%}
@@ -2801,6 +2911,16 @@ button{font:inherit;color:inherit}
         </div>
         <div id="sd-cands" style="font-size:11.5px;color:#a1a1aa;margin-top:10px;
           line-height:1.6"></div>
+        <div class="row" style="margin-top:12px;align-items:center">
+          <button class="btn pri" id="b-listen">🔊 Άκου το μικρόφωνο</button>
+          <button class="btn" id="b-listen-stop">■ Σταμάτα</button>
+          <span id="listen-msg" style="font-size:11.5px;color:#71717a"></span>
+        </div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+          ΖΩΝΤΑΝΟΣ ήχος από το δωμάτιο όπου βρίσκεται το ρομπότ — ακούς ό,τι
+          ακούει. Ίδιο κανάλι με το «Έι ρομπότ», καθαρισμένο από τον XVF3800.
+          Ξεκινά μόνο όταν το πατήσεις και κόβεται μόλις κλείσεις το tab.
+        </p>
       </div>
       <div class="card">
         <h3>Ιστορικό ήχων</h3>
@@ -2888,6 +3008,41 @@ button{font:inherit;color:inherit}
         </div>
         <p style="font-size:11.5px;color:#71717a;margin-top:12px;line-height:1.6">
           ‼️ ΣΧΕΤΙΚΗ πυξίδα, όχι Βορράς. Το firmware στέλνει GAME_ROTATION_VECTOR — σύντηξη γυροσκοπίου και επιταχυνσιομέτρου χωρίς το μαγνητόμετρο, επίτηδες: μέσα στο σπίτι οι κινητήρες DC της Roomba και τα μέταλλα διέλυαν την απόλυτη γωνία, ο EKF γύριζε και το AMCL δεν κρατούσε σύγκλιση. Το 0° είναι τυχαία κατεύθυνση σε κάθε boot. Για πλοήγηση δεν χρειάζεται αληθινός Βορράς — μόνο σταθερή σχετική γωνία, και το AMCL διορθώνει τη μικρή απόκλιση με scan matching.
+        </p>
+      </div>
+      <div class="card">
+        <h3>Πυξίδα <span class="badge" id="cp-badge">—</span></h3>
+        <div class="row" style="align-items:center;gap:18px;flex-wrap:wrap">
+          <canvas id="cp-rose" width="200" height="200"
+                  style="width:200px;height:200px;flex:0 0 auto"></canvas>
+          <div class="grid2" style="flex:1;min-width:190px">
+            <span class="k">Κατεύθυνση</span><span class="v" id="cp-card">—</span>
+            <span class="k">Μοίρες</span><span class="v" id="cp-deg">—</span>
+            <span class="k">Βορράς στον χάρτη</span><span class="v" id="cp-off">—</span>
+          </div>
+        </div>
+        <div class="row" style="margin-top:12px;flex-wrap:wrap">
+          <button class="btn pri" id="b-cp-north">🧭 Κοιτάω Βορρά</button>
+          <select id="cp-dir" class="btn" style="padding:6px 9px">
+            <option value="0">Βορρά</option>
+            <option value="90">Ανατολή</option>
+            <option value="180">Νότο</option>
+            <option value="270">Δύση</option>
+          </select>
+          <button class="btn" id="b-cp-clear">✕ Καθάρισε</button>
+        </div>
+        <div id="cp-msg" style="font-size:11.5px;color:#71717a;margin-top:8px"></div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          Η πυξίδα ΔΕΝ βγαίνει από μαγνητόμετρο — βγαίνει από τον ΧΑΡΤΗ. Ο χάρτης
+          δεν γυρίζει ποτέ και το AMCL διορθώνει τη γωνία πάνω σε αληθινούς
+          τοίχους, οπότε μέσα στο σπίτι είναι πολύ σταθερότερο από κάθε
+          μαγνητόμετρο δίπλα σε μοτέρ σκούπας.
+        </p>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          Λείπει μόνο ΕΝΑ νούμερο: προς τα πού είναι ο Βορράς μέσα στον χάρτη.
+          Γύρνα το ρομπότ να κοιτάει Βορρά και πάτα το κουμπί — μία φορά για κάθε
+          χάρτη. Αν ξέρεις ότι κοιτάει άλλη κατεύθυνση, διάλεξέ την από τη λίστα.
+          ‼️ Θέλει εντοπισμό: χωρίς AMCL δεν υπάρχει γωνία να μετρηθεί.
         </p>
       </div>
       <div class="card">
@@ -3064,22 +3219,22 @@ const TABS = [
   ['cloud',  '🧿', '3D'],
   ['rviz',   '🧊', 'RViz'],
   ['moveit', '🎯', 'MoveIt'],
-  ['arm',    '🦾', 'Βραχίονας'],
+  ['arm',    '🦾', 'Χέρι'],
   ['base',   '🧹', 'Σκούπα'],
   ['imu',    '🧭', 'IMU'],
-  ['rtabmap','🏠', '3D Χάρτης'],
+  ['rtabmap','🏠', 'Σπίτι 3D'],
   ['cost',   '🧱', 'Costmap'],
   ['nerf',   '✨', 'NeRF'],
-  ['point',  '👉', 'Χειρονομίες'],
-  ['vocab',  '🔎', 'Αναζήτηση'],
+  ['point',  '👉', 'Δείξε'],
+  ['vocab',  '🔎', 'Ψάξε'],
   ['sound',  '👂', 'Ήχοι'],
-  ['obs',    '💡', 'Παρατηρήσεις'],
-  ['time',   '🕐', 'Χρονολόγιο'],
-  ['llm',    '💬', 'Φωνή/LLM'],
+  ['obs',    '💡', 'Πρόσεξα'],
+  ['time',   '🕐', 'Χρονικό'],
+  ['llm',    '💬', 'Φωνή'],
   ['gazebo', '🌍', 'Gazebo'],
   ['sys',    '📊', 'Σύστημα'],
   ['log',    '📜', 'Log'],
-  ['set',    '⚙️', 'Ρυθμίσεις'],
+  ['set',    '⚙️', 'Ρύθμιση'],
 ];
 // Rebuilt on every language change; the labels come from the same t() as the
 // rest of the page. Preserves which tab is active across the rebuild.
@@ -3424,6 +3579,7 @@ const HANDLERS = {
     $('iy').textContent   = m.y.toFixed(2)+' m';
     $('iyaw').textContent = (m.yaw*180/Math.PI).toFixed(0)+'°';
     draw();
+    drawCompass2();
   },
   scan(m){ scan=m; draw(); },
   plan(m){ plan=m.points; draw(); },
@@ -3437,6 +3593,7 @@ const HANDLERS = {
   situation(m){ $('situation').textContent = m.text || '—'; },
   gesture(m){ gestureState = m; drawPointRing(); },
   vocab(m){ renderVocab(m); },
+  compass(m){ compassOffset = m.offset; drawCompass2(); },
   sound(m){ soundState = m; renderSound(m); },
   observations(m){ renderObservations(m); },
   timeline(m){ renderTimeline(m); },
@@ -3524,6 +3681,113 @@ const HANDLERS = {
   fall_event(m){ onFallEvent(m); },
   speaker(m){ onSpeaker(m); },
 };
+
+// ── live microphone ────────────────────────────────────────────────────────
+// Raw 16 kHz int16 PCM arrives as BINARY websocket frames and is scheduled
+// straight into an AudioContext. No codec, no <audio> element: the stream is
+// endless and 100 ms chunks, which media elements handle badly.
+const MIC_RATE = 16000;
+let audioCtx = null, playHead = 0, listening = false;
+
+function startListening(){
+  // ‼️ The AudioContext MUST be created inside the click handler. Browsers
+  // (Safari especially) refuse to start audio without a user gesture, and a
+  // context created at page load comes up 'suspended' and stays silent.
+  if(!audioCtx){
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if(!AC){ $('listen-msg').textContent = t('Χωρίς υποστήριξη ήχου.'); return; }
+    audioCtx = new AC({sampleRate: MIC_RATE});
+  }
+  audioCtx.resume();
+  playHead = 0;
+  listening = true;
+  send({type:'listen', on:true});
+  $('listen-msg').textContent = t('Ακούς ζωντανά.');
+}
+
+function stopListening(){
+  listening = false;
+  send({type:'listen', on:false});
+  $('listen-msg').textContent = '';
+}
+
+function playPcmChunk(buf){
+  if(!listening || !audioCtx) return;
+  const pcm = new Int16Array(buf);
+  if(!pcm.length) return;
+  const frame = audioCtx.createBuffer(1, pcm.length, MIC_RATE);
+  const out = frame.getChannelData(0);
+  for(let i=0;i<pcm.length;i++) out[i] = pcm[i] / 32768;
+  const src = audioCtx.createBufferSource();
+  src.buffer = frame; src.connect(audioCtx.destination);
+  // Keep a running playhead so consecutive chunks butt up against each other.
+  // Starting each chunk at currentTime would leave audible gaps whenever the
+  // network jittered. If we fall behind, jump forward rather than accumulate
+  // an ever-growing delay.
+  const now = audioCtx.currentTime;
+  if(playHead < now + 0.05) playHead = now + 0.05;
+  src.start(playHead);
+  playHead += frame.duration;
+}
+
+// ── map-referenced compass ─────────────────────────────────────────────────
+// Heading comes from AMCL, not from a magnetometer: the firmware disables the
+// magnetometer-fused rotation vector on purpose (the Roomba's motors wrecked it
+// indoors and AMCL lost convergence). The map never rotates, so a single
+// calibrated offset turns AMCL's yaw into a true bearing.
+let compassOffset = null;          // map yaw that faces north, radians
+
+const CARDINALS = ['Β','ΒΑ','Α','ΝΑ','Ν','ΝΔ','Δ','ΒΔ'];
+
+function drawCompass2(){
+  const c=$('cp-rose'); if(!c) return;
+  const g=c.getContext('2d'), S=c.width, R=S/2-16;
+  g.clearRect(0,0,S,S);
+  g.beginPath(); g.arc(S/2,S/2,R,0,Math.PI*2);
+  g.strokeStyle='#2c2c32'; g.lineWidth=2; g.stroke();
+
+  const haveYaw = pose && typeof pose.yaw === 'number';
+  const ready = haveYaw && compassOffset !== null;
+
+  $('cp-off').textContent = compassOffset===null ? '—'
+    : (compassOffset*180/Math.PI).toFixed(0)+'°';
+
+  if(!ready){
+    $('cp-badge').textContent = compassOffset===null
+      ? t('αβαθμονόμητη') : t('χωρίς εντοπισμό');
+    $('cp-card').textContent='—'; $('cp-deg').textContent='—';
+    g.fillStyle='#52525b'; g.font='600 13px system-ui';
+    g.textAlign='center'; g.textBaseline='middle';
+    g.fillText('—', S/2, S/2);
+    return;
+  }
+
+  // ‼️ Same sign rule as home_robot/compass.py: ROS yaw grows counter-
+  // clockwise, compass bearings grow clockwise, so this subtracts.
+  let bearing = ((compassOffset - pose.yaw)*180/Math.PI) % 360;
+  if(bearing < 0) bearing += 360;
+  const card = CARDINALS[Math.round(bearing/45) % 8];
+  $('cp-badge').textContent = t('βαθμονομημένη');
+  $('cp-card').textContent = t(card);
+  // Round BEFORE wrapping: 359.98 rounds to 360, which must read 0°.
+  $('cp-deg').textContent = (Math.round(bearing) % 360)+'°';
+
+  // The rose turns under a fixed robot: north sits at -bearing from up.
+  for(let i=0;i<8;i++){
+    const ang = (i*45 - bearing)*Math.PI/180 - Math.PI/2;
+    const major = (i%2)===0;
+    const rr = R - (major?2:8);
+    const x=S/2+Math.cos(ang)*rr, y=S/2+Math.sin(ang)*rr;
+    g.fillStyle = i===0 ? '#ef4444' : (i===4 ? '#60a5fa' : '#71717a');
+    g.font = (major?'600 13px':'400 10px')+' system-ui';
+    g.textAlign='center'; g.textBaseline='middle';
+    g.fillText(t(CARDINALS[i]), x, y);
+  }
+  // The robot always points up — it is the world that rotates around it.
+  g.beginPath();
+  g.moveTo(S/2, S/2-R+26); g.lineTo(S/2-9, S/2+14); g.lineTo(S/2+9, S/2+14);
+  g.closePath(); g.fillStyle='#e4e4e7'; g.fill();
+}
 
 // ── pointing gestures ──────────────────────────────────────────────────────
 let gestureState = null;
@@ -3698,8 +3962,15 @@ function connect(){
                      // socket, so after a restart it has forgotten this tab.
                      if(costOn) send({type:'costmap', on:true});
                      if(!overlayOn) send({type:'overlay', on:false}); };
-  ws.onclose = ()=>{ $('dot').classList.remove('on'); setTimeout(connect,2000); };
+  ws.onclose = ()=>{ $('dot').classList.remove('on');
+                     // The server forgets listeners per socket, so a dropped
+                     // connection silently stops the audio — reflect that.
+                     if(listening) stopListening();
+                     setTimeout(connect,2000); };
+  ws.binaryType = 'arraybuffer';
   ws.onmessage = e=>{
+    // Audio arrives as binary; everything else is JSON.
+    if(e.data instanceof ArrayBuffer){ playPcmChunk(e.data); return; }
     const m=JSON.parse(e.data);
     const h=HANDLERS[m.type];
     if(h) h(m);
@@ -4061,6 +4332,22 @@ $('b-nerf-go').addEventListener('click',()=>send({type:'nerf_capture', on:true})
 $('b-nerf-stop').addEventListener('click',()=>send({type:'nerf_capture', on:false}));
 $('b-follow').addEventListener('click',()=>send({type:'follow', on:true}));
 $('b-follow-stop').addEventListener('click',()=>send({type:'follow', on:false}));
+
+$('b-listen').addEventListener('click', startListening);
+$('b-listen-stop').addEventListener('click', stopListening);
+
+// ── compass calibration ────────────────────────────────────────────────────
+$('b-cp-north').addEventListener('click',()=>{
+  if(!pose || typeof pose.yaw !== 'number'){
+    $('cp-msg').textContent = t('Δεν υπάρχει θέση — κάνε πρώτα εντοπισμό.');
+    return;
+  }
+  const bearing = parseFloat($('cp-dir').value) || 0;
+  send({type:'compass_calibrate', bearing:bearing});
+  $('cp-msg').textContent = t('Βαθμονομήθηκε.');
+  setTimeout(()=>{ $('cp-msg').textContent=''; }, 3000);
+});
+$('b-cp-clear').addEventListener('click',()=>send({type:'compass_clear'}));
 
 // ── gestures ───────────────────────────────────────────────────────────────
 // Acting on a gesture is deliberately a separate, explicit press — gesture_node

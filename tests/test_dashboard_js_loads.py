@@ -176,3 +176,25 @@ def test_stripper_preserves_offsets_and_real_code():
 
 def test_stripper_keeps_braces_outside_comments():
     assert _blank_comments_and_strings('function f(){ /* } */ }').count('}') == 1
+
+
+# ── live microphone stream ───────────────────────────────────────────────────
+
+def test_binary_frames_never_reach_json_parse():
+    """Audio arrives as binary websocket frames on the SAME socket as the JSON
+    state. Without the ArrayBuffer branch every chunk hits JSON.parse and throws
+    ten times a second."""
+    assert 'ws.binaryType' in _RAW, 'binaryType is not set — frames arrive as Blob'
+    m = re.search(r'ws\.onmessage\s*=.*?JSON\.parse', _RAW, re.S)
+    assert m, 'the onmessage handler changed shape'
+    assert 'ArrayBuffer' in m.group(0), \
+        'binary frames are not split off before JSON.parse'
+
+
+def test_audio_context_is_created_from_the_click_not_at_load():
+    """Browsers refuse to start audio without a user gesture; a context built at
+    page load comes up suspended and stays silent."""
+    body = re.search(r'function startListening\(\)\{(.*?)\n\}', _RAW, re.S)
+    assert body, 'startListening() is gone'
+    assert 'new AC(' in body.group(1), \
+        'the AudioContext is no longer created inside startListening()'
