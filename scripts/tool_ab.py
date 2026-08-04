@@ -29,8 +29,11 @@ def _preseed():
     Python, so importing it here still costs no rclpy.
     """
     sys.path.insert(0, str(NODE.parents[2]))
+    from home_robot import arm_motion
     from home_robot.status_query import ROOM_NAMES_EL
-    return {'ROOM_NAMES_EL': ROOM_NAMES_EL}
+    # arm_motion supplies the arm tool's direction/amount enums, the same way
+    # status_query supplies the room list. Both are pure Python — no rclpy.
+    return {'ROOM_NAMES_EL': ROOM_NAMES_EL, 'arm_motion': arm_motion}
 
 
 def extract(names):

@@ -13,6 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from home_robot import arm_motion  # noqa: E402
 from home_robot.status_query import ROOM_NAMES_EL  # noqa: E402
 from home_robot.tool_router import select_tools  # noqa: E402
 
@@ -21,7 +22,9 @@ from home_robot.tool_router import select_tools  # noqa: E402
 # node, so seed it here — exec'ing the snippet runs no imports.
 _SRC = (Path(__file__).resolve().parents[1]
         / 'home_robot' / 'nodes' / 'llm_bridge_node.py').read_text()
-_ns = {'ROOM_NAMES_EL': ROOM_NAMES_EL}
+# arm_motion supplies the arm tool's direction/amount enums the same way
+# status_query supplies the room list — seeded, not imported by the snippet.
+_ns = {'ROOM_NAMES_EL': ROOM_NAMES_EL, 'arm_motion': arm_motion}
 exec(compile(  # noqa: S102 - test-only extraction of a module-level constant
     __import__('re').search(r'^_APPS = .*?^\]', _SRC, 8 | 16).group(0)
     + '\n'
@@ -132,6 +135,7 @@ def test_every_tool_is_reachable():
         ('πήγαινε να δεις αν έκλεισα το παράθυρο', 0),
         ('πήγαινε εκεί', 0), ('τι έγινε σήμερα', 0),
         ('βρες τα κλειδιά μου', 0),
+        ('κάνε τον βραχίονα λίγο μπροστά', 0),
     ]:
         covered |= names(text)
     # `stop` is gated by stop_command.py before the model, never routed here.

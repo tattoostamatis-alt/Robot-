@@ -43,6 +43,7 @@ from cv_bridge import CvBridge
 from dotenv import load_dotenv
 from geometry_msgs.msg import Quaternion, Twist
 from home_robot import api_keys
+from home_robot import arm_motion
 from home_robot.status_query import (ROOM_NAMES_EL, format_location,
                                      format_status, is_location_query,
                                      is_status_query, wants_battery)
@@ -57,8 +58,8 @@ from nav2_msgs.action import NavigateToPose
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
-from sensor_msgs.msg import BatteryState, Image
-from std_msgs.msg import Bool, Empty, String
+from sensor_msgs.msg import BatteryState, Image, JointState
+from std_msgs.msg import Bool, Empty, Float32, String
 
 load_dotenv(os.path.expanduser('~/.env'))
 
@@ -150,6 +151,22 @@ TOOLS = [
         'name': 'list_windows',
         'description': 'Τι είναι ανοιχτό στην οθόνη του υπολογιστή',
         'parameters': {'type': 'object', 'properties': {}},
+    }},
+    {'type': 'function', 'function': {
+        # ‼️ 2026-08-04: "λέω κάνε τον βραχίονα λίγο μπροστά και δεν κάνει
+        # τίποτα". It was not the phrasing — there was no arm tool at all.
+        # `pick`/`fetch` drive the whole pick-and-place pipeline at an object;
+        # nothing could simply move the arm. The dashboard sliders and the PS5
+        # stick could, and that was the whole list.
+        'name': 'arm',
+        'description': 'Κούνα τον βραχίονα προς μια κατεύθυνση. ΟΧΙ για πιάσιμο '
+                       'αντικειμένου — γι\' αυτό είναι το pick.',
+        'parameters': {'type': 'object', 'properties': {
+            'direction': {'type': 'string',
+                          'enum': list(arm_motion.DIRECTIONS)},
+            'amount': {'type': 'string', 'enum': list(arm_motion.AMOUNTS),
+                       'description': 'πόσο· default «λίγο»'},
+        }, 'required': ['direction']},
     }},
     {'type': 'function', 'function': {
         'name': 'goto',
@@ -421,6 +438,15 @@ class LLMBridgeNode(Node):
         self.cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
         self.tidy_pub = self.create_publisher(String, 'tidy_command', 10)
+        # The arm, spoken. Positions are ABSOLUTE on the wire, so a relative
+        # "λίγο μπροστά" needs the current pose — hence the joint_states
+        # subscription. arm_driver clamps to its own limits; nothing here
+        # second-guesses those numbers.
+        self.arm_cmd_pub = self.create_publisher(JointState, '/arm/joint_cmd', 10)
+        self.gripper_pub = self.create_publisher(Float32, '/arm/gripper_cmd', 10)
+        self._arm_pose = {}
+        self.create_subscription(JointState, '/arm/joint_states',
+                                 self._on_arm_state, 10)
         self.patrol_pub = self.create_publisher(Bool, 'patrol_command', 10)
         self.explore_pub = self.create_publisher(Bool, 'explore_command', 10)
         self.memory_store_pub = self.create_publisher(String, 'memory/store', 10)
@@ -855,6 +881,46 @@ class LLMBridgeNode(Node):
         self.get_logger().info(
             f'No yes/no for {tool} — dropping it and treating this as new speech')
         return False
+
+    def _on_arm_state(self, msg: JointState):
+        for name, pos in zip(msg.name, msg.position):
+            self._arm_pose[name] = float(pos)
+
+    def _move_arm(self, direction, amount):
+        """"Κάνε τον βραχίονα λίγο μπροστά" — relative, from where it is now.
+
+        ‼️ Requires a live pose. The wire format is absolute positions, so with
+        no /arm/joint_states the only options are to guess a starting point or
+        to refuse; guessing would fling the arm from wherever it happens to be
+        to wherever the guess said. It refuses, and says why.
+        """
+        deltas = arm_motion.deltas_for(direction, amount)
+        if deltas is None:
+            return {'status': 'error', 'action': 'arm',
+                    'reason': f'unknown direction: {direction}',
+                    'known': list(arm_motion.DIRECTIONS)}
+        if not self._arm_pose:
+            return {'status': 'error', 'action': 'arm',
+                    'reason': 'δεν παίρνω θέση από τον βραχίονα — τρέχει ο arm_driver;'}
+
+        js = JointState()
+        moved = {}
+        for joint, delta in deltas.items():
+            cur = self._arm_pose.get(joint)
+            if cur is None:
+                continue
+            target = cur + delta
+            js.name.append(joint)
+            js.position.append(target)
+            moved[joint] = round(target, 3)
+        if not js.name:
+            return {'status': 'error', 'action': 'arm',
+                    'reason': f'no joint state for {list(deltas)}'}
+
+        js.header.stamp = self.get_clock().now().to_msg()
+        self.arm_cmd_pub.publish(js)
+        return {'status': 'ok', 'action': 'arm',
+                'moved': arm_motion.describe(direction, amount), 'targets': moved}
 
     def _on_current_room(self, msg: String):
         self._current_room = msg.data.strip()
@@ -1400,6 +1466,9 @@ class LLMBridgeNode(Node):
 
         elif name == 'distance_to':
             return self._distance_to(args.get('object') or 'person')
+
+        elif name == 'arm':
+            return self._move_arm(args.get('direction'), args.get('amount'))
 
         elif name == 'stop':
             self.cmd_vel_pub.publish(Twist())

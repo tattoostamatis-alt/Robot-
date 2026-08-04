@@ -83,6 +83,15 @@ _GROUPS = [
      r'μαζεψ\w*|μαζευ\w*|σηκωσ\w*|κουπ\w*|μπουκαλ\w*|βιβλι\w*|ποτηρ\w*|'
      r'πιατ\w*|παιχνιδ\w*'),
 
+    # ‼️ The arm has its own group, separate from pick/fetch. "κάνε τον
+    # βραχίονα λίγο μπροστά" is not a request to grab anything, and routing it
+    # to `pick` would send the robot hunting for an object that was never
+    # named. 'χερι' is here too — people say "σήκωσε το χέρι σου" and mean the
+    # arm; `pick`'s own keywords (πιασ/φερ) stay out of it.
+    (['arm'],
+     r'βραχιον\w*|χερι\w*|αρθρωσ\w*|ωμο\w*|αγκων\w*|καρπ\w*|δαγκαν\w*|'
+     r'γαντζ\w*|απλωσ\w*|τεντωσ\w*|διπλωσ\w*'),
+
     (['remember'],
      r'θυμ\w*|σημειωσ\w*|κρατα|μαθε'),
 

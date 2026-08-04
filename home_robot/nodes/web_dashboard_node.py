@@ -4584,6 +4584,18 @@ function gestureLabels(){
   return Object.assign({}, a, b);
 }
 
+// ‼️ 2026-08-04: "πάω να πατήσω μια χειρονομία να επιλέξω τι θα κάνει και
+// τρεμοπαίζει και δεν μπορώ να επιλέξω". /gesture_status arrives at 15 Hz —
+// it carries the live hold progress — and this function used to rebuild
+// gb-list.innerHTML on every one of them. That destroys and recreates the
+// <select> elements fifteen times a second, so an open dropdown is closed
+// before you can move the mouse to an option, and the whole list strobes.
+//
+// The rows are now built ONCE and only mutated afterwards. gbKey is what the
+// structure depends on (which gestures exist, which actions are offered); the
+// 15 Hz part — highlight, progress bar — only touches style and width.
+let gbKey = null;
+
 function renderGestureBindings(){
   const body = (gestureState && gestureState.vocab) || null;
   const hand = handState || null;
@@ -4608,38 +4620,37 @@ function renderGestureBindings(){
   const bodySet = ['point_floor','hand_up','both_hands_up','wave',
                    'arms_crossed','t_pose'];
 
-  $('gb-list').innerHTML = rows.map(g => {
-    const cur = src.bindings[g];
-    const live = (g === holding);
-    const risky = SAFE_ACTIONS.indexOf(cur) < 0;
-    const opts = Object.keys(labels).map(a =>
-      `<option value="${esc(a)}"${a===cur?' selected':''}>${esc(labels[a])}</option>`
-    ).join('');
-    const bar = live
-      ? `<div style="height:3px;border-radius:2px;background:#2c2c34;margin-top:6px">
-           <div style="height:3px;border-radius:2px;background:#4ade80;
-             width:${Math.round(progress*100)}%"></div></div>`
-      : '';
-    return `<div style="display:flex;align-items:center;gap:11px;padding:9px 10px;
-      margin-bottom:7px;border-radius:11px;
-      background:${live?'#16281c':'#232329'};
-      border:1px solid ${live?'#2f6b41':'#2f2f37'}">
+  const key = JSON.stringify([rows, Object.keys(labels)]);
+  if(key !== gbKey){
+    gbKey = key;
+    gbBuild(rows, labels, names, bodySet);
+  }
+  gbUpdate(rows, src, holding, progress);
+}
+
+function gbBuild(rows, labels, names, bodySet){
+  const opts = Object.keys(labels).map(a =>
+    `<option value="${esc(a)}">${esc(labels[a])}</option>`).join('');
+  $('gb-list').innerHTML = rows.map(g => `
+    <div class="gb-row" data-gesture="${esc(g)}"
+      style="display:flex;align-items:center;gap:11px;padding:9px 10px;
+      margin-bottom:7px;border-radius:11px">
       <div style="font-size:26px;line-height:1;flex:0 0 34px;text-align:center"
         title="${esc(g)}">${GESTURE_ICONS[g]||'✋'}</div>
       <div style="flex:1;min-width:0">
-        <div style="font-size:12.5px;${live?'color:#7ee2a0;font-weight:600':'color:#d4d4d8'}">
-          ${esc(names[g] || g)}</div>
+        <div class="gb-name" style="font-size:12.5px">${esc(names[g] || g)}</div>
         <div style="font-size:10.5px;color:#71717a;margin-top:1px">
           ${bodySet.indexOf(g)>=0 ? esc(t('στάση σώματος')) : esc(t('δάχτυλα'))}
-          ${risky ? ' · <span style="color:#f59e0b">'+esc(t('κινεί'))+'</span>' : ''}
+          <span class="gb-risk"></span>
         </div>
-        ${bar}
+        <div class="gb-bar" style="height:3px;border-radius:2px;background:#2c2c34;
+          margin-top:6px;display:none">
+          <div style="height:3px;border-radius:2px;background:#4ade80;width:0%"></div>
+        </div>
       </div>
       <select data-gesture="${esc(g)}" class="btn gb-sel"
-        style="flex:0 0 148px;padding:6px 8px;font-size:12px;
-        ${risky?'border-color:#7c5310':''}">${opts}</select>
-    </div>`;
-  }).join('');
+        style="flex:0 0 148px;padding:6px 8px;font-size:12px">${opts}</select>
+    </div>`).join('');
 
   for(const sel of document.querySelectorAll('.gb-sel')){
     sel.onchange = () => {
@@ -4647,6 +4658,34 @@ function renderGestureBindings(){
       $('gb-msg').textContent = t('Αποθηκεύτηκε.');
       setTimeout(()=>{ $('gb-msg').textContent=''; }, 2500);
     };
+  }
+}
+
+function gbUpdate(rows, src, holding, progress){
+  for(const row of $('gb-list').children){
+    const g = row.dataset.gesture;
+    const cur = src.bindings[g];
+    const live = (g === holding);
+    const risky = SAFE_ACTIONS.indexOf(cur) < 0;
+
+    row.style.background = live ? '#16281c' : '#232329';
+    row.style.border = '1px solid ' + (live ? '#2f6b41' : '#2f2f37');
+    const name = row.querySelector('.gb-name');
+    name.style.color = live ? '#7ee2a0' : '#d4d4d8';
+    name.style.fontWeight = live ? '600' : '';
+    row.querySelector('.gb-risk').innerHTML =
+      risky ? ' · <span style="color:#f59e0b">' + esc(t('κινεί')) + '</span>' : '';
+
+    const bar = row.querySelector('.gb-bar');
+    bar.style.display = live ? '' : 'none';
+    if(live) bar.firstElementChild.style.width = Math.round(progress*100) + '%';
+
+    // ‼️ Never while the user is in it. Writing .value on a focused <select>
+    // is what closes an open dropdown — the same bug in miniature, and the
+    // reason a rebuilt list could not be used at all.
+    const sel = row.querySelector('.gb-sel');
+    if(document.activeElement !== sel && sel.value !== cur) sel.value = cur;
+    sel.style.borderColor = risky ? '#7c5310' : '';
   }
 }
 
