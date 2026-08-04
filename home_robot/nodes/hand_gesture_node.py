@@ -268,6 +268,7 @@ class HandGestureNode(Node):
             'motion_enabled': self.bindings.motion_enabled,
             'bindings': self.bindings.as_dict(),
             'action_labels': ACTION_EL,
+            'gesture_labels': HAND_GESTURE_EL,
         }, ensure_ascii=False)))
 
 

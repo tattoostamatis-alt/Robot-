@@ -2434,8 +2434,8 @@ button{font:inherit;color:inherit}
 #dot{width:9px;height:9px;border-radius:50%;background:#444;transition:.3s;flex-shrink:0}
 #dot.on{background:#00e08a;box-shadow:0 0 8px #00e08a}
 #title{font-size:15px;font-weight:600;letter-spacing:.2px;white-space:nowrap}
-.badge{background:#1e3a5f;color:#67c4ff;padding:3px 11px;border-radius:11px;
-  font-size:12px;white-space:nowrap}
+.badge{background:#17324f;color:#7cccff;padding:3px 11px;border-radius:11px;
+  font-size:11.5px;white-space:nowrap;border:1px solid #24486e;font-weight:600}
 #hdr-spacer{margin-left:auto}
 #estop{background:#7f1d1d;border:1px solid #b91c1c;color:#fecaca;padding:7px 16px;
   border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap}
@@ -2460,12 +2460,20 @@ button{font:inherit;color:inherit}
 #panes{flex:1;position:relative;overflow:hidden}
 .pane{position:absolute;inset:0;display:none;padding:10px;overflow:auto}
 .pane.active{display:flex;flex-direction:column;gap:10px}
-.card{background:#1c1c20;border:1px solid #2c2c32;border-radius:12px;padding:12px 14px}
-.card h3{font-size:12px;font-weight:600;color:#8b8b93;text-transform:uppercase;
-  letter-spacing:.6px;margin-bottom:9px}
+/* A soft inner highlight and a real shadow give the cards depth instead of
+   reading as flat rectangles on a flat background. */
+.card{background:linear-gradient(#1f1f24,#1a1a1e);border:1px solid #2f2f37;
+  border-radius:14px;padding:13px 15px;
+  box-shadow:0 1px 0 rgba(255,255,255,.03) inset,0 2px 10px rgba(0,0,0,.35)}
+.card h3{font-size:11.5px;font-weight:700;color:#9a9aa4;text-transform:uppercase;
+  letter-spacing:.9px;margin-bottom:11px}
 .row{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
-.btn{background:#2a2a31;border:1px solid #3a3a44;color:#d4d4d8;padding:8px 15px;
-  border-radius:9px;cursor:pointer;font-size:13px;user-select:none;white-space:nowrap}
+.btn{background:linear-gradient(#2e2e36,#26262d);border:1px solid #3d3d48;
+  color:#d9d9de;padding:8px 15px;border-radius:10px;cursor:pointer;font-size:13px;
+  user-select:none;white-space:nowrap;transition:background .12s,border-color .12s}
+.btn:hover{background:linear-gradient(#35353e,#2b2b33);border-color:#4a4a57}
+.btn:active{transform:translateY(1px)}
+.btn:disabled{opacity:.45;cursor:default}
 .btn:hover{background:#33333c}
 .btn:active{background:#3d3d47}
 .btn.pri{background:#1d4ed8;border-color:#2563eb;color:#fff}
@@ -2905,6 +2913,27 @@ button{font:inherit;color:inherit}
           Θέλει <code>use_pose:=true</code> και ευθυγραμμισμένο βάθος.
         </p>
       </div>
+      <div class="card">
+        <h3>Τι κάνει η κάθε χειρονομία <span class="badge" id="gb-badge">—</span></h3>
+        <label style="display:flex;align-items:center;gap:9px;font-size:12.5px;
+          cursor:pointer;user-select:none;padding:9px 11px;border-radius:10px;
+          background:#232329;border:1px solid #33333d">
+          <input type="checkbox" id="gb-motion">
+          <span>Να επιτρέπονται χειρονομίες που ΚΙΝΟΥΝ το ρομπότ</span>
+        </label>
+        <div id="gb-list" style="margin-top:12px"></div>
+        <div id="gb-msg" style="color:#71717a;font-size:11.5px;margin-top:8px"></div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          ‼️ Οι χειρονομίες που ΣΤΑΜΑΤΟΥΝ δουλεύουν πάντα, ακόμη κι όταν ο
+          διακόπτης είναι κλειστός — το αντίθετο θα ήταν η χειρότερη δυνατή
+          συμπεριφορά. Όσες ΞΕΚΙΝΟΥΝ κίνηση θέλουν διπλάσιο κράτημα, γιατί ένα
+          λάθος «έλα εδώ» στέλνει μηχάνημα πάνω σε άνθρωπο.
+        </p>
+        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+          Οι στάσεις σώματος διαβάζονται από απόσταση· τα δάχτυλα θέλουν
+          κοντινή απόσταση και <code>use_hand_gestures:=true</code>.
+        </p>
+      </div>
     </section>
 
     <!-- ── Open-vocabulary search ──────────────────────────────── -->
@@ -3213,27 +3242,6 @@ button{font:inherit;color:inherit}
         </div>
       </div>
 
-      <div class="card">
-        <h3>Χειρονομίες <span class="badge" id="gb-badge">—</span></h3>
-        <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;
-          cursor:pointer;user-select:none">
-          <input type="checkbox" id="gb-motion">
-          <span>Να επιτρέπονται χειρονομίες που ΚΙΝΟΥΝ το ρομπότ</span>
-        </label>
-        <div id="gb-list" style="margin-top:10px"></div>
-        <div id="gb-msg" style="color:#71717a;font-size:11.5px;margin-top:8px"></div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
-          ‼️ Οι χειρονομίες που ΣΤΑΜΑΤΟΥΝ δουλεύουν πάντα, ακόμη κι όταν ο
-          διακόπτης είναι κλειστός — το αντίθετο θα ήταν η χειρότερη δυνατή
-          συμπεριφορά. Όσες ΞΕΚΙΝΟΥΝ κίνηση θέλουν διπλάσιο κράτημα, γιατί ένα
-          λάθος «έλα εδώ» στέλνει μηχάνημα πάνω σε άνθρωπο.
-        </p>
-        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
-          Οι στάσεις σώματος διαβάζονται από απόσταση· τα δάχτυλα θέλουν
-          κοντινή απόσταση και <code>use_hand_gestures:=true</code>.
-        </p>
-      </div>
-
       <div class="card" style="flex:1;overflow:auto">
         <h3>Χάρτες <span class="badge" id="map-active">—</span></h3>
         <div id="map-list" style="margin:8px 0"></div>
@@ -3321,7 +3329,7 @@ const TABS = [
   ['rtabmap','🏠', 'Σπίτι 3D'],
   ['cost',   '🧱', 'Costmap'],
   ['nerf',   '✨', 'NeRF'],
-  ['point',  '👉', 'Δείξε'],
+  ['point',  '👉', 'Χειρονομίες'],
   ['vocab',  '🔎', 'Ψάξε'],
   ['sound',  '👂', 'Ήχοι'],
   ['obs',    '💡', 'Πρόσεξα'],
@@ -3788,33 +3796,82 @@ let handState = null;
 const SAFE_ACTIONS = ['none','stop','estop','stop_follow','cancel',
                       'say_hello','listen'];
 
+// A sticker per gesture. The emoji does more than the words: you recognise
+// ✌️ instantly and read "δύο δάχτυλα" second, which is the right order when
+// you are standing in front of a camera trying to remember what to do.
+const GESTURE_ICONS = {
+  point_floor:'👇', hand_up:'✋', both_hands_up:'🙌', wave:'👋',
+  arms_crossed:'🙅', t_pose:'🧍',
+  fist:'✊', point:'☝️', victory:'✌️', three:'3️⃣', open_palm:'🖐️',
+  thumbs_up:'👍', thumbs_down:'👎', ok:'👌',
+};
+// Body poses first, then fingers — the order people will read them in.
+const GESTURE_ORDER = ['point_floor','hand_up','both_hands_up','wave',
+                       'arms_crossed','t_pose',
+                       'fist','point','victory','three','open_palm',
+                       'thumbs_up','thumbs_down','ok'];
+
+function gestureLabels(){
+  // Both nodes ship their own table; merge whichever are running.
+  const a = (gestureState && gestureState.vocab && gestureState.vocab.gesture_labels) || {};
+  const b = (handState && handState.gesture_labels) || {};
+  return Object.assign({}, a, b);
+}
+
 function renderGestureBindings(){
   const body = (gestureState && gestureState.vocab) || null;
   const hand = handState || null;
   const src = body || hand;
-  if(!src || !src.bindings){ return; }
+  if(!src || !src.bindings) return;
 
   const labels = src.action_labels || {};
+  const names = gestureLabels();
   const motion = !!src.motion_enabled;
   $('gb-motion').checked = motion;
   $('gb-badge').textContent = motion ? t('κίνηση ΕΝΕΡΓΗ') : t('μόνο ασφαλείς');
 
-  // Names come from whichever node is running; both publish the full map.
   const holding = (body && body.holding) || (hand && hand.holding) || null;
-  const rows = Object.keys(src.bindings).sort();
+  const progress = Math.max((body && body.progress) || 0,
+                            (hand && hand.progress) || 0);
+
+  // Keep the declared order, then anything the nodes added that we do not
+  // know about — a new gesture must still appear rather than vanish.
+  const keys = Object.keys(src.bindings);
+  const rows = GESTURE_ORDER.filter(g => keys.indexOf(g) >= 0)
+                 .concat(keys.filter(g => GESTURE_ORDER.indexOf(g) < 0).sort());
+  const bodySet = ['point_floor','hand_up','both_hands_up','wave',
+                   'arms_crossed','t_pose'];
+
   $('gb-list').innerHTML = rows.map(g => {
     const cur = src.bindings[g];
     const live = (g === holding);
+    const risky = SAFE_ACTIONS.indexOf(cur) < 0;
     const opts = Object.keys(labels).map(a =>
       `<option value="${esc(a)}"${a===cur?' selected':''}>${esc(labels[a])}</option>`
     ).join('');
-    const risky = SAFE_ACTIONS.indexOf(cur) < 0;
-    return `<div class="row" style="margin:5px 0;align-items:center;gap:8px">
-      <span style="flex:0 0 128px;font-size:12px;${live?'color:#4ade80;font-weight:600':''}">
-        ${esc(GESTURE_LABEL(g))}</span>
+    const bar = live
+      ? `<div style="height:3px;border-radius:2px;background:#2c2c34;margin-top:6px">
+           <div style="height:3px;border-radius:2px;background:#4ade80;
+             width:${Math.round(progress*100)}%"></div></div>`
+      : '';
+    return `<div style="display:flex;align-items:center;gap:11px;padding:9px 10px;
+      margin-bottom:7px;border-radius:11px;
+      background:${live?'#16281c':'#232329'};
+      border:1px solid ${live?'#2f6b41':'#2f2f37'}">
+      <div style="font-size:26px;line-height:1;flex:0 0 34px;text-align:center"
+        title="${esc(g)}">${GESTURE_ICONS[g]||'✋'}</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:12.5px;${live?'color:#7ee2a0;font-weight:600':'color:#d4d4d8'}">
+          ${esc(names[g] || g)}</div>
+        <div style="font-size:10.5px;color:#71717a;margin-top:1px">
+          ${bodySet.indexOf(g)>=0 ? esc(t('στάση σώματος')) : esc(t('δάχτυλα'))}
+          ${risky ? ' · <span style="color:#f59e0b">'+esc(t('κινεί'))+'</span>' : ''}
+        </div>
+        ${bar}
+      </div>
       <select data-gesture="${esc(g)}" class="btn gb-sel"
-        style="flex:1;min-width:120px;padding:5px 8px;font-size:12px;
-        ${risky?'border-color:#f59e0b':''}">${opts}</select>
+        style="flex:0 0 148px;padding:6px 8px;font-size:12px;
+        ${risky?'border-color:#7c5310':''}">${opts}</select>
     </div>`;
   }).join('');
 
@@ -3825,15 +3882,6 @@ function renderGestureBindings(){
       setTimeout(()=>{ $('gb-msg').textContent=''; }, 2500);
     };
   }
-}
-
-// Greek label for a gesture, from whichever node published it.
-function GESTURE_LABEL(g){
-  const b = gestureState && gestureState.vocab;
-  const h = handState;
-  if(b && b.holding === g && b.holding_el) return b.holding_el;
-  if(h && h.holding === g && h.holding_el) return h.holding_el;
-  return t(g);
 }
 
 // ── who is here ────────────────────────────────────────────────────────────

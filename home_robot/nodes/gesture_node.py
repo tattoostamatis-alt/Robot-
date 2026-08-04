@@ -418,6 +418,9 @@ class GestureNode(Node):
                 'motion_enabled': self.bindings.motion_enabled,
                 'bindings': self.bindings.as_dict(),
                 'action_labels': ACTION_EL,
+                # The whole table, so the dashboard can name every row and not
+                # only the gesture currently being held.
+                'gesture_labels': GESTURE_EL,
             },
         }
         if debug:

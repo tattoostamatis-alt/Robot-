@@ -474,7 +474,6 @@ TRANSLATIONS = {
                                'Die Sitzung läuft nicht.'),
 
     # ── gestures pane ─────────────────────────────────────────────────────
-    'Δείξε':             ('Point', 'Zeigen'),
     'Δείξε με το χέρι':  ('Point with your hand', 'Mit der Hand zeigen'),
     'Στόχος X':          ('Target X', 'Ziel X'),
     'Στόχος Y':          ('Target Y', 'Ziel Y'),
@@ -659,8 +658,13 @@ TRANSLATIONS = {
          'genau das Lastproblem, das dieses Projekt schon getroffen hat. '
          'Benötigt'),
 
-    # ── gesture bindings (Settings) ───────────────────────────────────────
+    # ── gesture bindings (in the Gestures tab) ────────────────────────────
     'Χειρονομίες':       ('Gestures', 'Gesten'),
+    'Τι κάνει η κάθε χειρονομία': ('What each gesture does',
+                                   'Was jede Geste bewirkt'),
+    'στάση σώματος':     ('body pose', 'Körperhaltung'),
+    'δάχτυλα':           ('fingers', 'Finger'),
+    'κινεί':             ('moves', 'bewegt'),
     'Να επιτρέπονται χειρονομίες που ΚΙΝΟΥΝ το ρομπότ':
         ('Allow gestures that MOVE the robot',
          'Gesten zulassen, die den Roboter BEWEGEN'),
