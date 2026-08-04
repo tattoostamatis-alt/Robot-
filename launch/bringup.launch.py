@@ -699,10 +699,27 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'auto_goal':     LaunchConfiguration('gesture_auto_goal', default='false'),
+            'motion_gestures': LaunchConfiguration('motion_gestures', default='false'),
             'confirm_hits':  LaunchConfiguration('gesture_confirm_hits', default='5'),
             'max_distance':  LaunchConfiguration('gesture_max_distance', default='8.0'),
         }],
         condition=IfCondition(use_pose),
+    )
+
+    # ── Finger gestures (hand landmarks over pose_node's wrists) ──
+    # Rides use_pose: the crop comes from the skeleton's wrist, so without
+    # skeletons there is nothing to crop.
+    hand_gesture_node = Node(
+        package='home_robot',
+        executable='hand_gesture_node.py',
+        name='hand_gesture_node',
+        output='screen',
+        parameters=[{
+            'motion_gestures': LaunchConfiguration('motion_gestures',
+                                                   default='false'),
+        }],
+        condition=IfCondition(LaunchConfiguration('use_hand_gestures',
+                                                  default='false')),
     )
 
     # ── Proactive observations (the robot speaks first) ───────────
@@ -1273,6 +1290,10 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sound_events',       default_value='false'),
         DeclareLaunchArgument('use_diagnosis',          default_value='true'),
         DeclareLaunchArgument('gesture_auto_goal',      default_value='false'),
+        DeclareLaunchArgument('use_hand_gestures',      default_value='false'),
+        # ‼️ Off by default: this is the master switch for gestures that can
+        # MOVE the robot. Stop-type gestures work regardless.
+        DeclareLaunchArgument('motion_gestures',        default_value='false'),
         DeclareLaunchArgument('proactive',              default_value='true'),
         DeclareLaunchArgument('use_sim_time',            default_value='false'),
         DeclareLaunchArgument('use_roomba',              default_value='true'),
@@ -1313,6 +1334,7 @@ def generate_launch_description():
         fall_monitor_node,
         face_detection_node,
         gesture_node,
+        hand_gesture_node,
         proactive_observer_node,
         episodic_memory_node,
         open_vocab_detector,

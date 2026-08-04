@@ -26,6 +26,7 @@ also why a gesture needs several agreeing frames before it counts.
 """
 
 import json
+import os
 
 import numpy as np
 
@@ -34,9 +35,9 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 
 from cv_bridge import CvBridge
-from geometry_msgs.msg import PointStamped, PoseStamped
+from geometry_msgs.msg import PointStamped, PoseStamped, Twist
 from sensor_msgs.msg import CameraInfo, Image
-from std_msgs.msg import Empty, String
+from std_msgs.msg import Bool, Empty, String
 from visualization_msgs.msg import Marker, MarkerArray
 
 import tf2_ros
@@ -46,8 +47,11 @@ from home_robot.gesture import (
     GestureStabilizer, arm_straightness, depths_are_consistent,
     floor_intersection, is_pointing,
 )
+from home_robot.gesture_bindings import ACTION_EL, GestureBindings
+from home_robot.gesture_vocab import GESTURE_EL, GestureClassifier
 
 CAMERA_FRAME = 'camera_color_optical_frame'
+_BINDINGS_PATH = os.path.expanduser('~/.ros/home_robot_gesture_bindings.json')
 
 # Depth is noisy on a hand, so sample a small patch and take the median rather
 # than the single pixel under the keypoint.
@@ -66,6 +70,8 @@ class GestureNode(Node):
         self.declare_parameter('min_keypoint_conf', 0.5)
         self.declare_parameter('auto_goal', False)
         self.declare_parameter('tf_timeout', 0.2)
+        self.declare_parameter('vocab_hold_frames', 6)
+        self.declare_parameter('motion_gestures', False)
 
         self.target_frame = self.get_parameter('target_frame').value
         self.floor_z      = self.get_parameter('floor_z').value
@@ -78,6 +84,14 @@ class GestureNode(Node):
         self._depth = None
         self._intrinsics = None            # (fx, fy, cx, cy)
         self._last_point = None            # last confirmed (x, y) in map
+
+        # Body-pose vocabulary on top of the pointing geometry. Same skeletons,
+        # no extra camera work.
+        self.bindings = self._load_bindings()
+        self.vocab = GestureClassifier(
+            hold_frames=self.get_parameter('vocab_hold_frames').value)
+        self._last_gesture = None
+        self._gesture_at = 0.0
 
         self._stab = GestureStabilizer(
             confirm_hits=self.get_parameter('confirm_hits').value,
@@ -106,6 +120,18 @@ class GestureNode(Node):
         self._status_pub = self.create_publisher(String, 'gesture_status', 10)
         self._marker_pub = self.create_publisher(MarkerArray, 'gesture_markers', 5)
         self._goal_pub   = self.create_publisher(PoseStamped, '/goal_pose', 10)
+        # One topic per command family, matching what already exists on the
+        # graph — no new command protocol invented for gestures.
+        self._stop_pub   = self.create_publisher(Twist, '/cmd_vel_safe', 10)
+        self._estop_pub  = self.create_publisher(Bool, '/emergency_stop', latched)
+        self._dock_pub   = self.create_publisher(Bool, '/dock', 10)
+        self._follow_pub = self.create_publisher(Bool, '/follow_command', 10)
+        self._say_pub    = self.create_publisher(String, '/speech_response', 10)
+        self._cancel_pub = self.create_publisher(String, '/mission/cancel', 10)
+        self._patrol_pub = self.create_publisher(String, '/patrol_command', 10)
+        self._event_pub  = self.create_publisher(String, 'gesture_event', 10)
+        self.create_subscription(String, '/gesture_bindings/set',
+                                 self._cb_set_bindings, 5)
 
         self.get_logger().info(
             f'Gesture node ready (auto_goal={self.auto_goal}) — point at the '
@@ -137,6 +163,14 @@ class GestureNode(Node):
         persons = payload.get('persons', []) if isinstance(payload, dict) else payload
         if not isinstance(persons, list):
             return
+
+        # The vocabulary reads the FIRST person only: a command has one author,
+        # and two people gesturing at once must not race each other.
+        if persons:
+            first = {k['name']: k for k in persons[0].get('keypoints', [])}
+            fired = self.vocab.update(first)
+            if fired:
+                self._on_gesture(fired)
 
         best = None            # (straightness, floor_point, debug)
         for person in persons:
@@ -257,6 +291,89 @@ class GestureNode(Node):
         if self.auto_goal:
             self.send_goal()
 
+    # ── the vocabulary ────────────────────────────────────────────────────────
+
+    def _load_bindings(self):
+        try:
+            with open(_BINDINGS_PATH, encoding='utf-8') as fh:
+                b = GestureBindings.from_dict(json.load(fh))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            b = GestureBindings()
+        # The launch flag is the floor: a stored mapping cannot switch motion
+        # gestures on when the operator started the robot with them off.
+        if not self.get_parameter('motion_gestures').value:
+            b.motion_enabled = False
+        return b
+
+    def _save_bindings(self):
+        try:
+            os.makedirs(os.path.dirname(_BINDINGS_PATH), exist_ok=True)
+            tmp = _BINDINGS_PATH + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as fh:
+                json.dump(self.bindings.to_dict(), fh, ensure_ascii=False)
+            os.replace(tmp, _BINDINGS_PATH)
+        except OSError as exc:
+            self.get_logger().warn(f'could not save bindings: {exc}')
+
+    def _cb_set_bindings(self, msg: String):
+        try:
+            data = json.loads(msg.data) or {}
+        except json.JSONDecodeError:
+            return
+        for gesture, action in (data.get('bindings') or {}).items():
+            if not self.bindings.set(gesture, action):
+                self.get_logger().warn(f'rejected binding {gesture} -> {action}')
+        if 'motion_enabled' in data:
+            if self.get_parameter('motion_gestures').value:
+                self.bindings.motion_enabled = bool(data['motion_enabled'])
+            else:
+                self.get_logger().warn(
+                    'motion gestures are disabled by launch (motion_gestures:=false)')
+        self._save_bindings()
+        self.get_logger().info('Gesture bindings updated')
+
+    def _on_gesture(self, gesture):
+        """A body pose was held long enough. Run whatever it is bound to."""
+        import time
+        self._last_gesture, self._gesture_at = gesture, time.time()
+        action = self.bindings.action_for(gesture)
+        greek = GESTURE_EL.get(gesture, gesture)
+        self._event_pub.publish(String(data=json.dumps(
+            {'gesture': gesture, 'greek': greek, 'action': action,
+             'ts': self._gesture_at}, ensure_ascii=False)))
+        if action is None:
+            self.get_logger().info(f'Gesture «{greek}» — not bound')
+            return
+        self.get_logger().info(f'Gesture «{greek}» -> {action}')
+        self._dispatch(action)
+
+    def _dispatch(self, action):
+        """Send the command. Stop-type actions go out immediately and
+        repeatedly; a single Twist can be lost in a DDS hiccup."""
+        if action == 'stop':
+            for _ in range(3):
+                self._stop_pub.publish(Twist())
+        elif action == 'estop':
+            self._estop_pub.publish(Bool(data=True))
+        elif action == 'goto_pointed':
+            if not self.send_goal():
+                self._say_pub.publish(String(
+                    data='Δεν έχω σημείο — δείξε πρώτα στο πάτωμα.'))
+        elif action == 'follow':
+            self._follow_pub.publish(Bool(data=True))
+        elif action == 'stop_follow':
+            self._follow_pub.publish(Bool(data=False))
+        elif action == 'dock':
+            self._dock_pub.publish(Bool(data=True))
+        elif action == 'patrol':
+            self._patrol_pub.publish(String(data='{}'))
+        elif action == 'cancel':
+            self._cancel_pub.publish(String(data='{}'))
+        elif action == 'say_hello':
+            self._say_pub.publish(String(data='Γεια σου!'))
+        elif action == 'listen':
+            self._say_pub.publish(String(data='Σε ακούω.'))
+
     def _cb_go(self, _msg: Empty):
         if not self.send_goal():
             self.get_logger().warn('No gesture to act on yet — point at the '
@@ -292,6 +409,16 @@ class GestureNode(Node):
                            'y': round(self._last_point[1], 2)}
                           if self._last_point else None),
             'auto_goal': self.auto_goal,
+            'vocab': {
+                'holding': self.vocab.holding,
+                'holding_el': GESTURE_EL.get(self.vocab.holding),
+                'progress': round(self.vocab.progress, 2),
+                'last': self._last_gesture,
+                'last_el': GESTURE_EL.get(self._last_gesture),
+                'motion_enabled': self.bindings.motion_enabled,
+                'bindings': self.bindings.as_dict(),
+                'action_labels': ACTION_EL,
+            },
         }
         if debug:
             status.update(debug)
