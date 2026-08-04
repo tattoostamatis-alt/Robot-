@@ -131,15 +131,25 @@ TOKEN_FILE = os.path.expanduser('~/.home_robot/dashboard_token')
 NO_AUTH = os.environ.get('HOME_ROBOT_DASHBOARD_NO_AUTH') == '1'
 
 
+# Below this a stored token is not protecting anything. The file held the
+# literal string "robot" for a long time — five characters, guessable on the
+# first try, on a server bound to 0.0.0.0 that exposes the camera, the
+# microphone and the drive controls.
+_MIN_TOKEN_LEN = 16
+
+
 def _load_or_create_token() -> str:
     try:
         with open(TOKEN_FILE) as f:
             tok = f.read().strip()
-        if tok:
+        if tok and len(tok) >= _MIN_TOKEN_LEN:
             return tok
+        if tok:
+            print(f'[dashboard] stored token is only {len(tok)} characters — '
+                  f'replacing it with a strong one', flush=True)
     except OSError:
         pass
-    tok = secrets.token_urlsafe(16)
+    tok = secrets.token_urlsafe(24)      # 192 bits
     try:
         os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
         with open(TOKEN_FILE, 'w') as f:
@@ -1756,6 +1766,24 @@ class DashboardNode(Node):
                     self._listen_ws.add(client)
                 else:
                     self._listen_ws.discard(client)
+        elif t == 'sys_rotate_token':
+            # Writing the file is enough: the node reads it at startup, so the
+            # new token takes effect on the next restart and the current tab
+            # keeps working until then.
+            new = secrets.token_urlsafe(24)
+            try:
+                os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
+                with open(TOKEN_FILE, 'w') as fh:
+                    fh.write(new + '\n')
+                os.chmod(TOKEN_FILE, 0o600)
+                self.get_logger().warn(
+                    'dashboard token rotated — restart the node, then open '
+                    'the new link once on every device')
+                self._state.broadcast({'type': 'token', 'token': new},
+                                      remember=False)
+            except OSError as exc:
+                self._state.broadcast({'type': 'token', 'error': str(exc)},
+                                      remember=False)
         elif t == 'sys_refresh':
             threading.Thread(target=self._sys_snapshot, daemon=True).start()
         elif t == 'sys_wifi_connect':
@@ -2606,6 +2634,14 @@ button{font:inherit;color:inherit}
 /* Cards holding a viewer can also be dragged taller. Native resize is pointer
    only — folding is what works on a phone, which is why both exist. */
 .card.sizable{resize:vertical;overflow:auto;min-height:130px}
+/* ‼️ A card that grows to fill the pane must still never collapse to nothing.
+   The pane is a scrolling flex column, and `flex:1` combined with
+   `overflow:auto` resolves min-height to 0 — so as soon as other cards were
+   added above it, the growing card vanished entirely. That is what happened to
+   the map list once the network and Bluetooth cards went in: it was there, at
+   zero pixels, at the bottom. The floor makes it always visible and lets the
+   PANE scroll instead. */
+.card.grow{flex:1 1 auto;overflow:auto;min-height:220px}
 /* Drag bar under a viewer. Native CSS resize is pointer-only and most of the
    use here is a phone, so this is a real handle with touch events. */
 .grip{height:16px;margin:-2px 0 7px;border-radius:8px;cursor:ns-resize;
@@ -3128,7 +3164,7 @@ button{font:inherit;color:inherit}
         <div id="pp-msg" style="font-size:11.5px;color:#71717a;margin-top:8px"></div>
       </div>
 
-      <div class="card" style="flex:1;overflow:auto">
+      <div class="card grow">
         <h3>Γνωστά άτομα <span class="badge" id="pp-count">—</span></h3>
         <div id="pp-list"></div>
         <p style="font-size:11.5px;color:#71717a;margin-top:12px;line-height:1.6">
@@ -3441,7 +3477,7 @@ button{font:inherit;color:inherit}
         <h3>Δίσκοι</h3>
         <div id="s-disks">—</div>
       </div>
-      <div class="card" style="flex:1;overflow:auto">
+      <div class="card grow">
         <h3>Κόμβοι ROS (<span id="s-nodecount">0</span>)</h3>
         <div id="s-nodes" style="font-family:ui-monospace,Menlo,monospace;font-size:11.5px;
           color:#a1a1aa;line-height:1.75;columns:2;column-gap:20px">—</div>
@@ -3471,6 +3507,18 @@ button{font:inherit;color:inherit}
         </div>
       </div>
 
+      <div class="card grow">
+        <h3>Χάρτες <span class="badge" id="map-active">—</span></h3>
+        <div id="map-list" style="margin:8px 0"></div>
+        <div class="row" style="margin-top:10px">
+          <button class="btn pri" id="b-map-new">🆕 Νέος χάρτης (SLAM)</button>
+          <input id="map-save-name" placeholder="όνομα χάρτη"
+                 style="flex:1;min-width:120px;background:#18181b;border:1px solid #27272a;
+                        color:#e4e4e7;border-radius:8px;padding:8px 10px">
+          <button class="btn" id="b-map-save">💾 Αποθήκευση</button>
+        </div>
+        <div id="map-msg" style="color:#71717a;font-size:11.5px;margin-top:8px"></div>
+      </div>
       <div class="card" style="margin-bottom:9px">
         <h3>Δίκτυο <span class="badge" id="sn-badge">—</span></h3>
         <div class="grid2" style="margin-bottom:9px">
@@ -3517,18 +3565,22 @@ button{font:inherit;color:inherit}
         <div id="sn-msg" style="font-size:11.5px;color:#71717a;margin-top:9px"></div>
       </div>
 
-      <div class="card" style="flex:1;overflow:auto">
-        <h3>Χάρτες <span class="badge" id="map-active">—</span></h3>
-        <div id="map-list" style="margin:8px 0"></div>
+      <div class="card" style="margin-bottom:9px">
+        <h3>Ασφάλεια <span class="badge" id="tk-badge">—</span></h3>
+        <div id="tk-out" style="font-size:12px;line-height:1.6;
+          word-break:break-all;color:#a1a1aa"></div>
         <div class="row" style="margin-top:10px">
-          <button class="btn pri" id="b-map-new">🆕 Νέος χάρτης (SLAM)</button>
-          <input id="map-save-name" placeholder="όνομα χάρτη"
-                 style="flex:1;min-width:120px;background:#18181b;border:1px solid #27272a;
-                        color:#e4e4e7;border-radius:8px;padding:8px 10px">
-          <button class="btn" id="b-map-save">💾 Αποθήκευση</button>
+          <button class="btn warn" id="b-tk-new">🔑 Νέο κλειδί</button>
         </div>
-        <div id="map-msg" style="color:#71717a;font-size:11.5px;margin-top:8px"></div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          Ο πίνακας ακούει σε ΟΛΟ το τοπικό δίκτυο και δίνει κάμερα, μικρόφωνο,
+          χειριστήριο και χάρτη του σπιτιού. Το κλειδί είναι το μόνο που τον
+          προστατεύει. Το νέο ισχύει μετά από επανεκκίνηση — η τρέχουσα καρτέλα
+          συνεχίζει να δουλεύει ώσπου τότε. Άνοιξε τον νέο σύνδεσμο μία φορά σε
+          κάθε συσκευή.
+        </p>
       </div>
+
     </section>
 
     <section class="pane" id="p-log">
@@ -3981,6 +4033,7 @@ const HANDLERS = {
   acoustic(m){ renderAcoustic(m); },
   echo(m){ renderEcho(m); },
   sysnet(m){ renderSysNet(m); },
+  token(m){ renderToken(m); },
   touch(m){ renderTouch(m); },
   observations(m){ renderObservations(m); },
   timeline(m){ renderTimeline(m); },
@@ -4079,6 +4132,19 @@ function renderTouch(m){
   $('tc-weight').textContent = (m.weight === null || m.weight === undefined)
     ? (m.have_reference ? '—' : t('χωρίς αναφορά'))
     : m.weight_el + ' (' + m.weight + ')';
+}
+
+// ── dashboard key ──────────────────────────────────────────────────────────
+function renderToken(m){
+  if(m.error){ $('tk-out').textContent = m.error; return; }
+  const url = location.origin + '/?t=' + encodeURIComponent(m.token);
+  $('tk-badge').textContent = t('νέο κλειδί');
+  $('tk-out').innerHTML =
+    '<div style="color:#f59e0b;margin-bottom:6px">'
+    + esc(t('Κράτησέ το τώρα — μετά την επανεκκίνηση χρειάζεται:')) + '</div>'
+    + '<div style="background:#232329;border:1px solid #33333d;border-radius:9px;'
+    + 'padding:9px 11px;font-family:monospace;font-size:11.5px">'
+    + esc(url) + '</div>';
 }
 
 // ── system settings ────────────────────────────────────────────────────────
@@ -5182,6 +5248,10 @@ $('b-follow').addEventListener('click',()=>send({type:'follow', on:true}));
 $('b-follow-stop').addEventListener('click',()=>send({type:'follow', on:false}));
 
 let volDragging = false;
+$('b-tk-new').addEventListener('click', ()=>{
+  if(confirm(t('Νέο κλειδί; Ο παλιός σύνδεσμος θα πάψει να δουλεύει.')))
+    send({type:'sys_rotate_token'});
+});
 $('b-sn-scan').addEventListener('click', ()=>{
   send({type:'sys_refresh'}); snMsg(t('Σάρωση…'));
 });

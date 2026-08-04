@@ -850,6 +850,32 @@ TRANSLATIONS = {
          'schwach und lauscht im GESAMTEN lokalen Netz — verbinde ein neues '
          'WLAN nur von hier, wenn du allen im Netz vertraust.'),
 
+    # ── dashboard key ─────────────────────────────────────────────────────
+    'Ασφάλεια':          ('Security', 'Sicherheit'),
+    '🔑 Νέο κλειδί':     ('🔑 New key', '🔑 Neuer Schlüssel'),
+    'νέο κλειδί':        ('new key', 'neuer Schlüssel'),
+    'Κράτησέ το τώρα — μετά την επανεκκίνηση χρειάζεται:':
+        ('Save it now — it is needed after the restart:',
+         'Jetzt speichern — nach dem Neustart wird er gebraucht:'),
+    'Νέο κλειδί; Ο παλιός σύνδεσμος θα πάψει να δουλεύει.':
+        ('New key? The old link will stop working.',
+         'Neuer Schlüssel? Der alte Link funktioniert dann nicht mehr.'),
+    'Ο πίνακας ακούει σε ΟΛΟ το τοπικό δίκτυο και δίνει κάμερα, μικρόφωνο, '
+    'χειριστήριο και χάρτη του σπιτιού. Το κλειδί είναι το μόνο που τον '
+    'προστατεύει. Το νέο ισχύει μετά από επανεκκίνηση — η τρέχουσα καρτέλα '
+    'συνεχίζει να δουλεύει ώσπου τότε. Άνοιξε τον νέο σύνδεσμο μία φορά σε '
+    'κάθε συσκευή.':
+        ('The dashboard listens on the WHOLE local network and hands over the '
+         'camera, the microphone, the drive controls and a map of the home. '
+         'The key is the only thing protecting it. A new one takes effect '
+         'after a restart — this tab keeps working until then. Open the new '
+         'link once on every device.',
+         'Das Dashboard lauscht im GESAMTEN lokalen Netz und gibt Kamera, '
+         'Mikrofon, Fahrsteuerung und eine Karte der Wohnung frei. Der '
+         'Schlüssel ist das Einzige, was es schützt. Ein neuer gilt nach einem '
+         'Neustart — dieser Tab funktioniert bis dahin weiter. Öffne den neuen '
+         'Link einmal auf jedem Gerät.'),
+
     # ── echolocation ──────────────────────────────────────────────────────
     'Ηχοεντοπισμός':     ('Echolocation', 'Echoortung'),
     'Αντήχηση':          ('Reverberation', 'Nachhall'),
