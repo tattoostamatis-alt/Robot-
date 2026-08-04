@@ -131,22 +131,22 @@ TOKEN_FILE = os.path.expanduser('~/.home_robot/dashboard_token')
 NO_AUTH = os.environ.get('HOME_ROBOT_DASHBOARD_NO_AUTH') == '1'
 
 
-# Below this a stored token is not protecting anything. The file held the
-# literal string "robot" for a long time — five characters, guessable on the
-# first try, on a server bound to 0.0.0.0 that exposes the camera, the
-# microphone and the drive controls.
-_MIN_TOKEN_LEN = 16
+# A short token is weak on a server bound to 0.0.0.0 that exposes the camera,
+# the microphone and the drive controls. This used to REPLACE anything shorter
+# than 16 characters, which locked the owner out of their own bookmark on the
+# phone — so it warns and obeys instead. Whoever writes this file decides.
+_WEAK_TOKEN_LEN = 16
 
 
 def _load_or_create_token() -> str:
     try:
         with open(TOKEN_FILE) as f:
             tok = f.read().strip()
-        if tok and len(tok) >= _MIN_TOKEN_LEN:
-            return tok
         if tok:
-            print(f'[dashboard] stored token is only {len(tok)} characters — '
-                  f'replacing it with a strong one', flush=True)
+            if len(tok) < _WEAK_TOKEN_LEN:
+                print(f'[dashboard] token is only {len(tok)} characters — weak, '
+                      f'but keeping it as configured', flush=True)
+            return tok
     except OSError:
         pass
     tok = secrets.token_urlsafe(24)      # 192 bits
