@@ -469,6 +469,7 @@ class DashboardNode(Node):
         self.create_subscription(String, '/observations', self._cb_observations, 10)
         self.create_subscription(String, '/vocab/state', self._cb_vocab, latch)
         self.create_subscription(String, '/face_identities', self._cb_faces, latch)
+        self.create_subscription(String, '/hand_gesture', self._cb_hand, latch)
         self.create_subscription(String, '/self_diagnosis', self._cb_diag, latch)
         self.create_subscription(String, '/sound_events', self._cb_sound, latch)
         # Both latched by their publishers, so a tab opened long after the fact
@@ -505,6 +506,8 @@ class DashboardNode(Node):
         self._vocab_pub = self.create_publisher(String, '/vocab/set', 10)
         self._enrol_pub = self.create_publisher(String, '/faces/enrol', 10)
         self._forget_pub = self.create_publisher(String, '/faces/forget', 10)
+        self._bind_pub = self.create_publisher(
+            String, '/gesture_bindings/set', 10)
 
         # Map-referenced compass: one calibrated number per map.
         self._last_yaw = None
@@ -1289,6 +1292,13 @@ class DashboardNode(Node):
             return
         self._state.broadcast({'type': 'faces', **data})
 
+    def _cb_hand(self, msg: String):
+        try:
+            data = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        self._state.broadcast({'type': 'hand', **data})
+
     def _cb_diag(self, msg: String):
         try:
             data = json.loads(msg.data)
@@ -1667,6 +1677,16 @@ class DashboardNode(Node):
                     self._listen_ws.add(client)
                 else:
                     self._listen_ws.discard(client)
+        elif t == 'gesture_bind':
+            # Relayed as-is; the gesture nodes validate and are the authority on
+            # whether motion may be enabled at all.
+            payload = {}
+            if msg.get('gesture'):
+                payload['bindings'] = {str(msg['gesture']): str(msg.get('action', 'none'))}
+            if 'motion_enabled' in msg:
+                payload['motion_enabled'] = bool(msg['motion_enabled'])
+            if payload:
+                self._bind_pub.publish(String(data=json.dumps(payload)))
         elif t == 'face_enrol':
             name = str(msg.get('name', '')).strip()
             if name:
@@ -3193,6 +3213,27 @@ button{font:inherit;color:inherit}
         </div>
       </div>
 
+      <div class="card">
+        <h3>Χειρονομίες <span class="badge" id="gb-badge">—</span></h3>
+        <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;
+          cursor:pointer;user-select:none">
+          <input type="checkbox" id="gb-motion">
+          <span>Να επιτρέπονται χειρονομίες που ΚΙΝΟΥΝ το ρομπότ</span>
+        </label>
+        <div id="gb-list" style="margin-top:10px"></div>
+        <div id="gb-msg" style="color:#71717a;font-size:11.5px;margin-top:8px"></div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          ‼️ Οι χειρονομίες που ΣΤΑΜΑΤΟΥΝ δουλεύουν πάντα, ακόμη κι όταν ο
+          διακόπτης είναι κλειστός — το αντίθετο θα ήταν η χειρότερη δυνατή
+          συμπεριφορά. Όσες ΞΕΚΙΝΟΥΝ κίνηση θέλουν διπλάσιο κράτημα, γιατί ένα
+          λάθος «έλα εδώ» στέλνει μηχάνημα πάνω σε άνθρωπο.
+        </p>
+        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+          Οι στάσεις σώματος διαβάζονται από απόσταση· τα δάχτυλα θέλουν
+          κοντινή απόσταση και <code>use_hand_gestures:=true</code>.
+        </p>
+      </div>
+
       <div class="card" style="flex:1;overflow:auto">
         <h3>Χάρτες <span class="badge" id="map-active">—</span></h3>
         <div id="map-list" style="margin:8px 0"></div>
@@ -3646,10 +3687,11 @@ const HANDLERS = {
   },
   objects(m){ $('objects').textContent = m.text || '—'; },
   situation(m){ $('situation').textContent = m.text || '—'; },
-  gesture(m){ gestureState = m; drawPointRing(); },
+  gesture(m){ gestureState = m; drawPointRing(); renderGestureBindings(); },
   vocab(m){ renderVocab(m); },
   compass(m){ compassOffset = m.offset; drawCompass2(); },
   faces(m){ renderFaces(m); },
+  hand(m){ handState = m; renderGestureBindings(); },
   diagnostics(m){ renderDiagnostics(m); },
   sound(m){ soundState = m; renderSound(m); },
   observations(m){ renderObservations(m); },
@@ -3738,6 +3780,61 @@ const HANDLERS = {
   fall_event(m){ onFallEvent(m); },
   speaker(m){ onSpeaker(m); },
 };
+
+// ── gesture bindings editor ────────────────────────────────────────────────
+let handState = null;
+// Actions that only ever reduce what the robot is doing. Mirrors
+// gesture_bindings._SAFE_ACTIONS; the server is still the authority.
+const SAFE_ACTIONS = ['none','stop','estop','stop_follow','cancel',
+                      'say_hello','listen'];
+
+function renderGestureBindings(){
+  const body = (gestureState && gestureState.vocab) || null;
+  const hand = handState || null;
+  const src = body || hand;
+  if(!src || !src.bindings){ return; }
+
+  const labels = src.action_labels || {};
+  const motion = !!src.motion_enabled;
+  $('gb-motion').checked = motion;
+  $('gb-badge').textContent = motion ? t('κίνηση ΕΝΕΡΓΗ') : t('μόνο ασφαλείς');
+
+  // Names come from whichever node is running; both publish the full map.
+  const holding = (body && body.holding) || (hand && hand.holding) || null;
+  const rows = Object.keys(src.bindings).sort();
+  $('gb-list').innerHTML = rows.map(g => {
+    const cur = src.bindings[g];
+    const live = (g === holding);
+    const opts = Object.keys(labels).map(a =>
+      `<option value="${esc(a)}"${a===cur?' selected':''}>${esc(labels[a])}</option>`
+    ).join('');
+    const risky = SAFE_ACTIONS.indexOf(cur) < 0;
+    return `<div class="row" style="margin:5px 0;align-items:center;gap:8px">
+      <span style="flex:0 0 128px;font-size:12px;${live?'color:#4ade80;font-weight:600':''}">
+        ${esc(GESTURE_LABEL(g))}</span>
+      <select data-gesture="${esc(g)}" class="btn gb-sel"
+        style="flex:1;min-width:120px;padding:5px 8px;font-size:12px;
+        ${risky?'border-color:#f59e0b':''}">${opts}</select>
+    </div>`;
+  }).join('');
+
+  for(const sel of document.querySelectorAll('.gb-sel')){
+    sel.onchange = () => {
+      send({type:'gesture_bind', gesture: sel.dataset.gesture, action: sel.value});
+      $('gb-msg').textContent = t('Αποθηκεύτηκε.');
+      setTimeout(()=>{ $('gb-msg').textContent=''; }, 2500);
+    };
+  }
+}
+
+// Greek label for a gesture, from whichever node published it.
+function GESTURE_LABEL(g){
+  const b = gestureState && gestureState.vocab;
+  const h = handState;
+  if(b && b.holding === g && b.holding_el) return b.holding_el;
+  if(h && h.holding === g && h.holding_el) return h.holding_el;
+  return t(g);
+}
 
 // ── who is here ────────────────────────────────────────────────────────────
 function renderFaces(m){
@@ -4474,6 +4571,12 @@ $('b-nerf-go').addEventListener('click',()=>send({type:'nerf_capture', on:true})
 $('b-nerf-stop').addEventListener('click',()=>send({type:'nerf_capture', on:false}));
 $('b-follow').addEventListener('click',()=>send({type:'follow', on:true}));
 $('b-follow-stop').addEventListener('click',()=>send({type:'follow', on:false}));
+
+$('gb-motion').addEventListener('change', e => {
+  send({type:'gesture_bind', motion_enabled: e.target.checked});
+  $('gb-msg').textContent = t('Αποθηκεύτηκε.');
+  setTimeout(()=>{ $('gb-msg').textContent=''; }, 2500);
+});
 
 $('b-fi-enrol').addEventListener('click',()=>{
   const n=$('fi-name').value.trim();

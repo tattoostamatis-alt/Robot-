@@ -659,6 +659,31 @@ TRANSLATIONS = {
          'genau das Lastproblem, das dieses Projekt schon getroffen hat. '
          'Benötigt'),
 
+    # ── gesture bindings (Settings) ───────────────────────────────────────
+    'Χειρονομίες':       ('Gestures', 'Gesten'),
+    'Να επιτρέπονται χειρονομίες που ΚΙΝΟΥΝ το ρομπότ':
+        ('Allow gestures that MOVE the robot',
+         'Gesten zulassen, die den Roboter BEWEGEN'),
+    'κίνηση ΕΝΕΡΓΗ':     ('motion ON', 'Bewegung AN'),
+    'μόνο ασφαλείς':     ('safe only', 'nur sichere'),
+    'Αποθηκεύτηκε.':     ('Saved.', 'Gespeichert.'),
+    '‼️ Οι χειρονομίες που ΣΤΑΜΑΤΟΥΝ δουλεύουν πάντα, ακόμη κι όταν ο '
+    'διακόπτης είναι κλειστός — το αντίθετο θα ήταν η χειρότερη δυνατή '
+    'συμπεριφορά. Όσες ΞΕΚΙΝΟΥΝ κίνηση θέλουν διπλάσιο κράτημα, γιατί ένα '
+    'λάθος «έλα εδώ» στέλνει μηχάνημα πάνω σε άνθρωπο.':
+        ('‼️ Gestures that STOP always work, even with the switch off — the '
+         'opposite would be the worst possible behaviour. Ones that START '
+         'motion need twice the hold, because a mistaken "come here" sends a '
+         'machine at a person.',
+         '‼️ Gesten, die STOPPEN, funktionieren immer, auch bei ausgeschaltetem '
+         'Schalter — das Gegenteil wäre das schlimmstmögliche Verhalten. Gesten, '
+         'die Bewegung STARTEN, brauchen doppelt so langes Halten, denn ein '
+         'irrtümliches „komm her" schickt eine Maschine auf einen Menschen zu.'),
+    'Οι στάσεις σώματος διαβάζονται από απόσταση· τα δάχτυλα θέλουν '
+    'κοντινή απόσταση και':
+        ('Body poses read from across the room; fingers need to be close, and',
+         'Körperhaltungen sind aus der Ferne lesbar; Finger brauchen Nähe und'),
+
     # ── who is here (face identity) ───────────────────────────────────────
     'Ποιος είναι εδώ':   ('Who is here', 'Wer ist hier'),
     '👤 Μάθε το πρόσωπο': ('👤 Learn this face', '👤 Gesicht lernen'),
