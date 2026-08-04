@@ -182,3 +182,138 @@ def test_it_subscribes_best_effort(cam):
     mod, node, _ = cam
     src = open(f'{PKG}/home_robot/nodes/camera_watchdog_node.py').read()
     assert 'BEST_EFFORT' in src
+
+
+# ── depth dies on its own while colour keeps streaming (2026-08-04) ──────────
+# Measured live: colour ran at 30 Hz, /camera/camera/depth/image_rect_raw
+# published nothing at all, the pointcloud topic had a publisher and zero
+# messages, and the 3D tab sat empty. The watchdog watched colour only, so it
+# reported a healthy camera the whole time.
+
+def _depth_cli(node):
+    """Give the node a param client that records the calls it makes."""
+    calls = []
+    node._depth_cli = _ns(service_is_ready=lambda: True,
+                          call_async=lambda req: calls.append(req))
+    return calls
+
+
+def _depth_age(node, seconds):
+    import time
+    node._last_depth = time.monotonic() - seconds
+
+
+def test_depth_stalling_alone_is_noticed(cam):
+    """‼️ THE BUG. Colour is fine, so _check() is happy; only depth is gone."""
+    mod, node, launched = cam
+    node._on_frame(None)
+    node._on_depth(None)
+    _depth_age(node, 60.0)
+    _depth_cli(node)
+
+    node._check()                        # colour path: sees nothing wrong
+    node._check_depth()
+
+    assert launched == [], 'depth is repaired in place, not by a relaunch'
+    assert node._depth_reported is True
+
+
+def test_depth_is_toggled_off_then_back_on(cam):
+    """The fix that worked by hand: enable_depth false, then true. A relaunch
+    would drop the colour stream that object detection is riding on."""
+    import time
+    mod, node, launched = cam
+    node._on_frame(None)
+    node._on_depth(None)
+    _depth_age(node, 60.0)
+    calls = _depth_cli(node)
+
+    node._check_depth()
+    assert len(calls) == 1
+    assert calls[0].parameters[0].name == 'enable_depth'
+    assert calls[0].parameters[0].value.bool_value is False
+
+    node._depth_on_at = time.monotonic() - 0.1     # the 2 s wait elapses
+    node._check_depth()
+
+    assert len(calls) == 2
+    assert calls[1].parameters[0].value.bool_value is True
+
+
+def test_healthy_depth_is_left_alone(cam):
+    mod, node, launched = cam
+    node._on_frame(None)
+    node._on_depth(None)
+    calls = _depth_cli(node)
+
+    node._check_depth()
+
+    assert calls == []
+
+
+def test_a_dead_camera_is_not_also_depth_repaired(cam):
+    """When the whole camera is down the relaunch owns the recovery. Both
+    firing at once would toggle a parameter on a driver that is being replaced."""
+    mod, node, launched = cam
+    node._on_frame(None)
+    node._on_depth(None)
+    _age(node, 60.0)
+    _depth_age(node, 60.0)
+    calls = _depth_cli(node)
+
+    node._check_depth()
+
+    assert calls == [], 'depth recovery ran while the camera itself was dead'
+
+
+def test_depth_recovery_is_rate_limited(cam):
+    """Toggling every second while the driver is coming back up would keep it
+    from ever coming back up."""
+    mod, node, launched = cam
+    node._on_frame(None)
+    node._on_depth(None)
+    _depth_age(node, 60.0)
+    calls = _depth_cli(node)
+
+    node._check_depth()
+    node._depth_on_at = 0.0              # ignore the scheduled turn-on
+    node._check_depth()
+    node._check_depth()
+
+    assert len(calls) == 1
+
+
+def test_depth_recovery_can_be_switched_off(cam):
+    mod, node, launched = cam
+    node.depth_recover = False
+    node._on_frame(None)
+    node._on_depth(None)
+    _depth_age(node, 60.0)
+    calls = _depth_cli(node)
+
+    node._check_depth()
+
+    assert calls == []
+    assert node._depth_reported is True, 'it must still say so in the log'
+
+
+def test_depth_returning_is_announced(cam):
+    mod, node, launched = cam
+    node._on_frame(None)
+    node._on_depth(None)
+    _depth_age(node, 60.0)
+    _depth_cli(node)
+    node._check_depth()
+    assert node._depth_reported is True
+
+    node._on_depth(None)
+
+    assert node._depth_reported is False
+
+
+def test_it_subscribes_to_the_raw_depth_topic(cam):
+    """aligned_depth_to_color is turned on and off at runtime by the 3D map tab,
+    so watching it would read a deliberate change as a failure."""
+    mod, node, _ = cam
+    topics = [t for t, _cb in node.subs]
+    assert '/camera/camera/depth/image_rect_raw' in topics

@@ -26,11 +26,14 @@ import subprocess
 import time
 
 import rclpy
+from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
+from rcl_interfaces.srv import SetParameters
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 from sensor_msgs.msg import Image
 
 DEFAULT_TOPIC = '/camera/camera/color/image_raw'
+DEFAULT_DEPTH_TOPIC = '/camera/camera/depth/image_rect_raw'
 
 
 class CameraWatchdog(Node):
@@ -65,6 +68,23 @@ class CameraWatchdog(Node):
             'align_depth.enable:=true', 'pointcloud.enable:=true',
         ])
 
+        # ‼️ The depth stream can die on its own while colour keeps streaming at
+        # 30 Hz — measured live on 2026-08-04. Everything above watched colour
+        # only, so the watchdog stayed happy while the 3D tab sat empty, the
+        # pointcloud never published and the detector answered [] forever. The
+        # camera looks healthy from the outside; only depth is gone.
+        # The fix is NOT a relaunch: toggling enable_depth off and back on
+        # brought depth (and the pointcloud) back at 25 Hz in seconds, without
+        # dropping the colour stream that object detection is riding on.
+        self.declare_parameter('depth_topic', DEFAULT_DEPTH_TOPIC)
+        # Depth runs at 30 Hz like colour. 12 s is longer than the colour
+        # timeout on purpose: a depth stall is repaired in place, so there is no
+        # cost to being sure, and the pointcloud filter genuinely pauses depth
+        # for a moment when the 3D tab flips the parameter.
+        self.declare_parameter('depth_timeout', 12.0)
+        self.declare_parameter('depth_grace', 20.0)
+        self.declare_parameter('enable_depth_recover', True)
+
         self.topic = self.get_parameter('topic').value
         self.timeout = float(self.get_parameter('timeout').value)
         self.grace = float(self.get_parameter('restart_grace').value)
@@ -84,6 +104,21 @@ class CameraWatchdog(Node):
             Image, self.topic, self._on_frame,
             QoSProfile(depth=1, reliability=QoSReliabilityPolicy.BEST_EFFORT))
         self.create_timer(1.0, self._check)
+
+        self.depth_topic = self.get_parameter('depth_topic').value
+        self.depth_timeout = float(self.get_parameter('depth_timeout').value)
+        self.depth_grace = float(self.get_parameter('depth_grace').value)
+        self.depth_recover = bool(self.get_parameter('enable_depth_recover').value)
+        self._last_depth = None
+        self._depth_blocked_until = 0.0
+        self._depth_reported = False
+        self._depth_on_at = 0.0         # when to flip enable_depth back on
+        self._depth_cli = self.create_client(
+            SetParameters, '/camera/camera/set_parameters')
+        self.create_subscription(
+            Image, self.depth_topic, self._on_depth,
+            QoSProfile(depth=1, reliability=QoSReliabilityPolicy.BEST_EFFORT))
+        self.create_timer(1.0, self._check_depth)
 
         self.get_logger().info(
             f'Camera watchdog armed on {self.topic} '
@@ -138,6 +173,61 @@ class CameraWatchdog(Node):
         self.get_logger().warn(
             f'Restarting the camera (attempt {self._restarts}/{self.max_restarts})')
         self._restart_camera()
+
+    def _on_depth(self, _msg):
+        if self._depth_reported:
+            self.get_logger().info('Depth is back')
+            self._depth_reported = False
+        self._last_depth = time.monotonic()
+
+    def _check_depth(self):
+        # Only meaningful once colour is up: a camera that never started is the
+        # other check's problem, and both firing at once would fight each other.
+        now = time.monotonic()
+        if self._depth_on_at and now >= self._depth_on_at:
+            self._depth_on_at = 0.0
+            self._toggle_depth(True)
+            return
+        if self._last_frame is None:
+            return
+        if now - self._last_frame > self.timeout:
+            return                      # whole camera is down, not just depth
+        if self._last_depth is None:
+            # Give depth the same startup allowance as the camera itself.
+            if now - self._started_at < self.startup_timeout:
+                return
+            gap = now - self._started_at
+        else:
+            gap = now - self._last_depth
+            if gap < self.depth_timeout:
+                return
+        if now < self._depth_blocked_until:
+            return
+
+        if not self._depth_reported:
+            self.get_logger().error(
+                f'No depth frames for {gap:.0f}s on {self.depth_topic} while '
+                'colour is still streaming — the 3D tab, the pointcloud and '
+                'every distance answer are dead. Colour-only looks healthy, '
+                'which is why this needs saying out loud.')
+            self._depth_reported = True
+
+        if not self.depth_recover or not self._depth_cli.service_is_ready():
+            return
+        self._depth_blocked_until = now + self.depth_grace
+        self.get_logger().warn('Restarting the depth stream (enable_depth off/on)')
+        self._toggle_depth(False)
+        # Turned back on from this same 1 Hz timer, not from a sleep: this runs
+        # on the executor and blocking here would stall the colour check too.
+        self._depth_on_at = now + 2.0
+
+    def _toggle_depth(self, on: bool):
+        req = SetParameters.Request()
+        req.parameters = [Parameter(
+            name='enable_depth',
+            value=ParameterValue(type=ParameterType.PARAMETER_BOOL, bool_value=on),
+        )]
+        self._depth_cli.call_async(req)
 
     def _restart_camera(self):
         args = list(self.get_parameter('launch_args').value or [])

@@ -2642,6 +2642,14 @@ button{font:inherit;color:inherit}
    zero pixels, at the bottom. The floor makes it always visible and lets the
    PANE scroll instead. */
 .card.grow{flex:1 1 auto;overflow:auto;min-height:220px}
+/* ‼️ A card must never be squeezed smaller than what is inside it. The pane is
+   a flex column, so by default every card shrinks to make the pane fit — and a
+   card holding a 300px canvas happily rendered at 130px, showing the top
+   quarter of the arm and nothing else. getBoundingClientRect on the canvas
+   still reported the full height, which is why this hid so well. Same silent
+   crop on the IMU rose and the pointing ring. The pane already scrolls; let it.
+   :not(.grow) because that class deliberately gives its space back. */
+.pane>.card:not(.grow){flex-shrink:0}
 /* Drag bar under a viewer. Native CSS resize is pointer-only and most of the
    use here is a phone, so this is a real handle with touch events. */
 .grip{height:16px;margin:-2px 0 7px;border-radius:8px;cursor:ns-resize;
@@ -2719,8 +2727,15 @@ button{font:inherit;color:inherit}
 #map-wrap{position:relative;background:#0c0c0e;border:1px solid #2c2c32;
   border-radius:12px;overflow:hidden;cursor:crosshair;flex:1;min-height:200px}
 #map-canvas{width:100%;height:100%;display:block}
+/* ‼️ Square, and capped. The costmap is a 60x60 grid of a 3x3 m window, so
+   flex:1 stretched it across a 1200x450 pane: every cell became a ~20x7 px
+   slab, the window read as a rectangle when it is a square, and the whole
+   thing was far bigger than it needed to be to be legible. Sizing by HEIGHT
+   with aspect-ratio (width:auto) keeps it square through the drag grip too,
+   which pins an explicit height and would otherwise squash it again. */
 #cost-wrap{position:relative;background:#0c0c0e;border:1px solid #2c2c32;
-  border-radius:12px;overflow:hidden;flex:1;min-height:200px}
+  border-radius:12px;overflow:hidden;flex:0 0 auto;align-self:center;
+  aspect-ratio:1;height:min(58vh,440px);width:auto;max-width:100%;min-height:200px}
 #cost-canvas{width:100%;height:100%;display:block;
   /* 60x60 cells blown up to a phone screen: keep the cells as crisp squares
      rather than letting the browser smear them into a watercolour. */
@@ -2950,8 +2965,12 @@ button{font:inherit;color:inherit}
         <h3>3D <span class="badge" id="arm3d-info">—</span>
           <button class="btn" id="b-arm3d-reset" style="float:right">Επαναφορά όψης</button>
         </h3>
-        <canvas id="arm3d" style="width:100%;height:300px;background:#0a0a0b;
-          border-radius:8px;touch-action:none;cursor:grab;display:block"></canvas>
+        <!-- ‼️ Sized in vh, not a fixed 300px: on a laptop the arm pane holds six
+             cards, so a short viewer left the gripper cropped off the bottom even
+             though the canvas itself was fine. The grip below still overrides it. -->
+        <canvas id="arm3d" style="width:100%;height:min(52vh,560px);min-height:260px;
+          background:#0a0a0b;border-radius:8px;touch-action:none;cursor:grab;
+          display:block"></canvas>
         <div style="color:#71717a;font-size:11.5px;margin-top:6px">
           Σύρε για περιστροφή · ροδέλα για ζουμ · κινείται με τις αρθρώσεις από κάτω
         </div>
@@ -5763,8 +5782,12 @@ function armDraw(){
   const cy = Math.cos(armYaw), sy = Math.sin(armYaw);
   const cp = Math.cos(armPitch), sp = Math.sin(armPitch);
   if (armReach === null) armReach = armMeasureReach();
-  // Fit the arm to ~80% of the smaller canvas dimension.
-  const scale = (Math.min(w, h) * 1.25 / armReach) * armZoom;
+  // Fit the arm to ~80% of the smaller canvas dimension. ‼️ The factor was 1.25,
+  // which is 125% — the comment said 80% and the code did the opposite, so a
+  // fully extended arm was drawn taller than the canvas and the gripper went
+  // off the edge no matter how the view was centred. armZoom is how you get
+  // closer, deliberately.
+  const scale = (Math.min(w, h) * 0.8 / armReach) * armZoom;
   // Origin is resolved AFTER the geometry is projected — see the centring pass
   // below. Fixed offsets were guesswork and left the gripper off the bottom.
   let ox = 0, oy = 0;
