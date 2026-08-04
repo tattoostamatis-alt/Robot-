@@ -117,7 +117,18 @@ def _mic_dead(h):
 def _stt_stuck(h):
     # The wake word fires but nothing is ever transcribed: the classic "the
     # robot has gone deaf" — stt_node holding _busy forever.
-    return h.logged('Already transcribing') >= 2
+    #
+    # ‼️ NOT 'Already transcribing'. That line is ORDINARY: a second wake word
+    # inside the 5 s listening window prints it, and on 2026-08-04 the robot
+    # was interrupting itself often enough to print it 38 times in 20 minutes
+    # while transcribing perfectly well. This check called the robot deaf all
+    # evening — a critical finding, spoken out loud, about a subsystem that was
+    # working. A false CRITICAL is worse than no check: it sends the owner to
+    # restart the one node that was fine.
+    #
+    # stt_node's own busy watchdog already names the real thing when it fires
+    # ('Transcription has not returned after Ns'), so that is the signature.
+    return h.logged('Transcription has not returned') >= 1
 
 
 def _swap_thrashing(h):

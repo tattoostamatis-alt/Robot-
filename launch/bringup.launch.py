@@ -1034,11 +1034,23 @@ def generate_launch_description():
             # containing the wake word disables barge-in for its duration
             # (utterance_is_risky in voice_gate.py), which is exactly the case
             # that used to fire. Ordinary replies, the large majority, keep it.
-            # ‼️ HW-untested. If it still interrupts itself, pass
-            # allow_barge_in:=false and say so — the next lever is routing TTS
-            # through the ReSpeaker so the AEC finally has a reference signal
-            # (tts_node's device_name parameter).
-            'allow_barge_in': LaunchConfiguration('allow_barge_in', default='true'),
+            #
+            # ‼️ 2026-08-04, BACK TO FALSE — measured on hardware, not guessed.
+            # In one 20-minute evening session: 81 wake detections, 46 of them
+            # WHILE SPEAKING, scoring 0.78-1.00, and every one followed by "No
+            # speech detected after wake word". The robot spent the evening
+            # cutting itself off mid-sentence and listening to an empty room.
+            # utterance_is_risky did its job — none of those replies contained
+            # the wake word — and it made no difference, because the problem is
+            # not what the robot says, it is that ch4 is a raw capsule with no
+            # echo canceller: its own loudspeaker arrives as ordinary loud
+            # speech that scores 1.00. No threshold separates that from a
+            # person, which is what the note above already suspected.
+            # The next lever is unchanged: route TTS through the ReSpeaker so
+            # the AEC finally has a reference signal (tts_node device_name).
+            # Until then the node also disarms barge-in on its own after three
+            # fruitless interruptions (BARGE_IN_DISARM_AFTER).
+            'allow_barge_in': LaunchConfiguration('allow_barge_in', default='false'),
             # Wake acknowledgement ON again 2026-07-25: without any cue you
             # cannot tell whether the robot heard you, which the user asked for
             # explicitly ("like Hey Siri"). It was switched off because the old
@@ -1293,9 +1305,9 @@ def generate_launch_description():
         DeclareLaunchArgument('use_stt',       default_value='false'),
         # ‼️ The DECLARED default is the one that wins — the LaunchConfiguration
         # default above is only a fallback for when this line does not exist.
-        # Leaving this at 'false' would have silently kept barge-in off, the
-        # same trap that kept use_doa dark for weeks.
-        DeclareLaunchArgument('allow_barge_in', default_value='true'),
+        # Both say 'false' as of 2026-08-04; the reasoning, with the numbers
+        # measured off a live session, is at the parameter above.
+        DeclareLaunchArgument('allow_barge_in', default_value='false'),
         DeclareLaunchArgument('beep_on_wake',  default_value='true'),
         DeclareLaunchArgument('mic_channel',   default_value='4'),
         DeclareLaunchArgument('stt_channel',   default_value='0'),

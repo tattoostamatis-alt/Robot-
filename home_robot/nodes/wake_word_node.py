@@ -105,6 +105,12 @@ CHUNK_SIZE = 1280  # 80ms @ 16kHz — openWakeWord's expected frame size
 # accumulating a minutes-long backlog. See _enqueue().
 AUDIO_QUEUE_MAX = 30
 
+# Barge-ins in a row that produce no speech before the feature disarms itself.
+# Three, because a person really can interrupt twice and then think better of
+# it, but nobody interrupts three times and says nothing all three times —
+# whereas a loudspeaker does exactly that, indefinitely. See _disarm_barge_in.
+BARGE_IN_DISARM_AFTER = 3
+
 
 # "I'm listening" chime, in the spirit of Hey Siri's two-note acknowledgement.
 # The old cue was a single 880 Hz sine at 0.6 amplitude held for 350 ms, which
@@ -253,6 +259,21 @@ class WakeWordNode(Node):
         # wake word can disable barge-in for its duration.
         self.create_subscription(String, 'speech_response',
                                  self._on_speech_response, 10)
+        # ‼️ Whether a barge-in ever produced words. Measured 2026-08-04: of 81
+        # detections in 20 minutes, 46 landed WHILE THE ROBOT WAS SPEAKING and
+        # not one of them was followed by speech — every single one was the
+        # robot hearing its own loudspeaker and cutting itself off, then
+        # listening to an empty room for 5 s. The comment on allow_barge_in
+        # said this depends on the XVF3800's AEC; it does, and detection reads
+        # ch4, which is a RAW capsule with no echo cancellation on it at all.
+        #
+        # So barge-in disarms itself: if enough of them in a row yield nothing,
+        # the feature is wrong for this hardware and stays off until someone
+        # restarts the node. The alternative — leaving it armed — is a robot
+        # that cannot finish a sentence.
+        self.create_subscription(String, 'speech_text', self._on_speech_text, 10)
+        self._barge_ins_without_speech = 0
+        self._barge_in_disarmed = False
 
         # ‼️ BOUNDED. This was an unbounded Queue fed from the realtime audio
         # callback and drained by the model. Whenever prediction fell behind
@@ -380,6 +401,31 @@ class WakeWordNode(Node):
             # arrives, so a long silence cannot leave the gate clamped shut.
             self._risky_utterance = False
 
+    def _on_speech_text(self, msg: String):
+        """Someone actually said something. Whatever preceded it was real."""
+        if msg.data.strip():
+            self._barge_ins_without_speech = 0
+
+    def _disarm_barge_in(self):
+        """Stop interrupting our own sentences on hardware that cannot do it.
+
+        Nothing here is recoverable at runtime: the detection channel has no
+        echo canceller, and that does not change until the node is restarted
+        with different channels. Said once, at ERROR, with the flag to keep it
+        off — a line the owner can act on, instead of 46 INFO lines that read
+        like the feature working.
+        """
+        if self._barge_in_disarmed:
+            return
+        self._barge_in_disarmed = True
+        self.allow_barge_in = False
+        self.get_logger().error(
+            f'The robot interrupted itself {self._barge_ins_without_speech}x '
+            'with nothing said in between — barge-in is hearing the '
+            'loudspeaker, not a person. Disabling it for this run. The wake '
+            f'channel (ch{self.mic_channel}) has no echo cancellation; start '
+            'with allow_barge_in:=false to keep it off from the start.')
+
     def _on_speech_response(self, msg: String):
         """The text the robot is about to say, straight from llm_bridge.
 
@@ -421,6 +467,9 @@ class WakeWordNode(Node):
                 if decision == BARGE_IN:
                     self.get_logger().info(
                         f'Barge-in: "{name}" ({score:.2f}) while speaking → stopping TTS')
+                    self._barge_ins_without_speech += 1
+                    if self._barge_ins_without_speech >= BARGE_IN_DISARM_AFTER:
+                        self._disarm_barge_in()
                     self.stop_pub.publish(Bool(data=True))
                 self._last_trigger[name] = now
                 self.get_logger().info(f'Wake word "{name}" detected (score={score:.2f})')

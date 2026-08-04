@@ -97,12 +97,19 @@ def test_mic_dead():
 
 
 def test_stt_stuck_from_the_log():
-    h = healthy(log_counts={'Already transcribing': 4})
+    """The busy watchdog's own line, which only prints when a transcription
+    never came back — the actual deaf-robot case."""
+    h = healthy(log_counts={'Transcription has not returned': 1})
     assert 'stt_stuck' in keys(diagnose(h))
 
 
-def test_one_stt_complaint_is_not_stuck():
-    h = healthy(log_counts={'Already transcribing': 1})
+def test_a_repeated_wake_word_is_not_a_stuck_stt():
+    """‼️ 2026-08-04: this check fired on 'Already transcribing', which is what
+    a second wake word inside the 5 s listening window prints. The robot was
+    interrupting itself all evening, printed it 38 times, transcribed
+    everything correctly — and was announced as ΚΟΥΦΟ, at CRITICAL, out loud.
+    A false critical sends the owner to restart the one node that was fine."""
+    h = healthy(log_counts={'Already transcribing': 38})
     assert 'stt_stuck' not in keys(diagnose(h))
 
 

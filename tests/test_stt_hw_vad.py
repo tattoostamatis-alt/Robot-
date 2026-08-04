@@ -61,6 +61,12 @@ def _say_vad(node, on, age=0.0):
         node._vad_true_at = now
 
 
+def _publishers(node, n):
+    """How many nodes the graph says are publishing /voice_activity."""
+    node.count_publishers = lambda topic: n
+    node._vad_checked_at = 0.0          # force a fresh look
+
+
 # ── fail open: the cases that must never make the robot deaf ────────────────
 
 def test_no_vad_publisher_at_all_leaves_the_gate_wide_open(stt):
@@ -88,12 +94,45 @@ def test_a_dead_publisher_stops_gating_instead_of_latching_shut(stt):
     robot never records again.
     """
     mod, node = stt
-    _say_vad(node, False, age=node.vad_stale_s + 5.0)
+    _say_vad(node, False)
+    _publishers(node, 0)                    # doa_node is gone from the graph
 
     assert node._vad_gate_open() is True, (
-        'a stale VAD still gates — the robot would be permanently deaf after '
+        'a dead VAD still gates — the robot would be permanently deaf after '
         'doa_node dies')
 
+    _arm(node)
+    node._on_audio(_chunk(node, LOUD))
+    assert node._state == 'recording'
+
+
+def test_a_quiet_room_is_not_a_dead_publisher(stt):
+    """‼️ THE BUG (2026-08-04): /voice_activity is LATCHED STATE, published only
+    on transitions, so nothing arrives while the room is quiet. The gate used a
+    3 s arrival timeout, so it declared the VAD stale three times in one
+    evening — warning about a doa_node that was running fine, and, far worse,
+    dropping to energy-only within 3 s of every transition. The gate meant to
+    stop a fan from starting a recording was off almost all of the time."""
+    mod, node = stt
+    _say_vad(node, False, age=600.0)        # ten minutes of silence
+    _publishers(node, 1)                    # ...but doa_node is right there
+
+    assert node._vad_gate_open() is False, (
+        'silence on a latched topic was treated as a dead publisher')
+
+    _arm(node)
+    node._on_audio(_chunk(node, LOUD))
+    assert node._state != 'recording', 'a loud fan started a recording'
+
+
+def test_a_stuck_true_stops_being_trusted(stt):
+    """The other way the DSP breaks: the flag latches on and every noise
+    passes. Failing open is right, but not silently forever."""
+    mod, node = stt
+    _say_vad(node, True, age=node.vad_stuck_s + 10.0)
+    _publishers(node, 1)
+
+    assert node._vad_gate_open() is True
     _arm(node)
     node._on_audio(_chunk(node, LOUD))
     assert node._state == 'recording'
@@ -109,7 +148,8 @@ def test_the_stale_fallback_is_logged_once_not_every_chunk(stt):
                  error=lambda *a, **k: None, debug=lambda *a, **k: None,
                  exception=lambda *a, **k: None)
     node.get_logger = lambda: logger
-    _say_vad(node, False, age=node.vad_stale_s + 5.0)
+    _say_vad(node, False)
+    _publishers(node, 0)
 
     for _ in range(50):
         node._vad_gate_open()

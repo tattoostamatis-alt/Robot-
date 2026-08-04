@@ -73,6 +73,11 @@ controller_server:
     # Disable node-side lifecycle bond — see bringup.launch.py nav2 section.
     bond_heartbeat_period: 0.0
     use_sim_time: false
+    # Declared only to stop "Parameter controller_server.verbose not found" on
+    # every bringup. nav2_controller reads it whether or not it is set, and an
+    # unexplained WARN at startup is noise the next real one has to compete
+    # with. false is the value it defaults to anyway.
+    verbose: false
     controller_frequency: 20.0
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.5

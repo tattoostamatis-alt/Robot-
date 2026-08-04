@@ -50,8 +50,11 @@ _WATCH = (
 )
 
 # Log substrings that ARE the signature of a known fault.
-_LOG_SIGNATURES = ('Already transcribing', 'TTS attempt', 'Errno 110',
-                   'serial', 'ΔΕΝ ΑΠΑΝΤΑ')
+# ‼️ 'Already transcribing' was here and is not one of them — it is what a
+# second wake word inside the listening window prints, which happens all the
+# time. See _stt_stuck in diagnostics.py.
+_LOG_SIGNATURES = ('Transcription has not returned', 'TTS attempt', 'Errno 110',
+                   'serial', 'ΔΕΝ ΑΠΑΝΤΑ', 'interrupted itself')
 
 _SPEAK_COOLDOWN = 1800.0        # s, per finding
 

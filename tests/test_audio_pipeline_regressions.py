@@ -348,6 +348,65 @@ def test_lost_microphone_is_retried_not_fatal(wake, monkeypatch):
     assert len(opens) >= 2, 'the stream was never reopened after failing'
 
 
+# ── barge-in that hears the loudspeaker ─────────────────────────────────────
+# ‼️ THE BUG, measured on hardware 2026-08-04: 81 wake detections in a 20-minute
+# session, 46 of them while the robot was speaking, scoring 0.78-1.00, every one
+# followed by "No speech detected after wake word". The wake channel (ch4) is a
+# raw capsule with no echo canceller, so the robot's own loudspeaker arrives as
+# ordinary loud speech and no threshold can tell it from a person. The robot
+# spent the evening cutting itself off and listening to an empty room.
+
+def test_barge_in_disarms_itself_when_nobody_is_talking(wake):
+    mod, node = wake
+    node.allow_barge_in = True
+    for _ in range(mod.BARGE_IN_DISARM_AFTER):
+        node._barge_ins_without_speech += 1
+        if node._barge_ins_without_speech >= mod.BARGE_IN_DISARM_AFTER:
+            node._disarm_barge_in()
+    assert node._barge_in_disarmed
+    assert not node.allow_barge_in, 'it can still interrupt itself'
+
+
+def test_a_real_interruption_resets_the_counter(wake):
+    """Someone who interrupts and then SPEAKS is using the feature correctly;
+    that must not count towards disarming it."""
+    mod, node = wake
+    node.allow_barge_in = True
+    node._barge_ins_without_speech = mod.BARGE_IN_DISARM_AFTER - 1
+    node._on_speech_text(_ns(data='σταμάτα'))
+    assert node._barge_ins_without_speech == 0
+    assert node.allow_barge_in
+
+
+def test_empty_speech_does_not_count_as_someone_talking(wake):
+    mod, node = wake
+    node._barge_ins_without_speech = 2
+    node._on_speech_text(_ns(data='   '))
+    assert node._barge_ins_without_speech == 2
+
+
+def test_disarming_is_announced_once(wake):
+    mod, node = wake
+    errors = []
+    node.get_logger = lambda: _ns(info=lambda *a: None, warn=lambda *a: None,
+                                  debug=lambda *a: None,
+                                  error=lambda m: errors.append(m))
+    node.allow_barge_in = True
+    node._barge_ins_without_speech = mod.BARGE_IN_DISARM_AFTER
+    node._disarm_barge_in()
+    node._disarm_barge_in()
+    assert len(errors) == 1, 'the explanation repeats every detection'
+    assert 'barge-in' in errors[0]
+    assert 'allow_barge_in:=false' in errors[0], 'no way to act on it'
+
+
+def test_the_threshold_leaves_room_for_a_real_person(wake):
+    """Two interruptions with nothing said can be a person changing their
+    mind. Three cannot."""
+    mod, _ = wake
+    assert mod.BARGE_IN_DISARM_AFTER >= 3
+
+
 # ── tts_node ────────────────────────────────────────────────────────────────
 
 def test_mp3_decode_is_bounded():

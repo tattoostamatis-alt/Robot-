@@ -79,7 +79,21 @@ class STTNode(Node):
         # deaf, which is the single worst failure this pipeline has — see the
         # busy-lock bug that did exactly that.
         self.declare_parameter('use_hw_vad', True)
-        self.declare_parameter('vad_stale_s', 3.0)
+        # ‼️ Liveness is "does a publisher exist", NOT "did a message arrive
+        # recently". /voice_activity is LATCHED STATE published only on
+        # transitions (doa_node says so in as many words), so a quiet room
+        # produces nothing for minutes on end. With the old 3 s arrival
+        # timeout, measured 2026-08-04, the gate declared the VAD stale three
+        # times in one evening and warned "Is doa_node still running?" about a
+        # node that was running perfectly — and, far worse, silently fell back
+        # to energy-only within 3 s of every transition. The DSP gate that was
+        # added to stop a fan or a door from starting a recording was therefore
+        # switched off almost all of the time.
+        self.declare_parameter('vad_liveness_period', 2.0)
+        # A True that never drops is the other way this breaks: the DSP flag
+        # sticks and every noise passes the gate. Longer than any real
+        # utterance, short enough to recover the same session.
+        self.declare_parameter('vad_stuck_s', 120.0)
         # The flag is edge-triggered at 10 Hz, and the DSP drops it between
         # words. Hold it open briefly so a normal pause mid-utterance does not
         # re-close the start gate.
@@ -103,13 +117,16 @@ class STTNode(Node):
         self._flush_chunks          = max(1, int(flush_ms / 1000 * SAMPLE_RATE / CHUNK_SIZE))
 
         self.use_hw_vad  = self.get_parameter('use_hw_vad').value
-        self.vad_stale_s = self.get_parameter('vad_stale_s').value
+        self.vad_liveness_period = self.get_parameter('vad_liveness_period').value
+        self.vad_stuck_s = self.get_parameter('vad_stuck_s').value
         self.vad_hold_s  = self.get_parameter('vad_hold_s').value
         self._vad_on     = False
         self._vad_at     = 0.0      # last message (any value)
         self._vad_true_at = 0.0     # last time it said "speech"
         self._vad_seen   = False    # has the topic EVER produced a message?
         self._vad_logged = False    # one-shot "gate active" log
+        self._vad_alive  = True     # cached count_publishers, see _vad_alive_now
+        self._vad_checked_at = 0.0
 
         self._preroll    = collections.deque(maxlen=preroll_chunks)
         self._state      = 'idle'   # idle | flushing | waiting_speech | recording
@@ -310,7 +327,13 @@ class STTNode(Node):
             self.get_logger().warn('Whisper not loaded yet, ignoring wake word')
             return
         if self._begin_turn() is None:
-            self.get_logger().warn('Already transcribing, ignoring wake word')
+            # INFO, not WARN: a second wake word inside the listening window is
+            # ordinary — the person repeated themselves, or the room is noisy.
+            # As a WARN it read like a fault and self_diagnosis treated it as
+            # one, announcing "το ρομπότ είναι ΚΟΥΦΟ" all evening while every
+            # transcription was going through. The genuinely stuck case has its
+            # own line, from _busy_watchdog, and that is what is diagnosed.
+            self.get_logger().info('Already transcribing, ignoring wake word')
             return
         with self._lock:
             self._preroll.clear()
@@ -333,6 +356,48 @@ class STTNode(Node):
                 'Hardware VAD connected — speech onset now needs the DSP to '
                 'agree, not just loudness')
 
+    def _vad_alive_now(self) -> bool:
+        """Is anything still publishing /voice_activity?
+
+        The graph query is the honest test — silence on a latched state topic
+        means "nothing changed", not "the publisher died". Cached, because this
+        is called for every audio chunk (~12 Hz) and a graph lookup is not
+        free.
+        """
+        now = time.monotonic()
+        if now - self._vad_checked_at >= self.vad_liveness_period:
+            self._vad_checked_at = now
+            try:
+                self._vad_alive = self.count_publishers('voice_activity') > 0
+            except Exception:
+                self._vad_alive = True       # cannot tell: do not go deaf
+        return self._vad_alive
+
+    def _vad_trustworthy(self) -> bool:
+        """Whether the DSP flag may gate anything at all right now."""
+        if not self.use_hw_vad or not self._vad_seen:
+            return False                     # never arrived: not our gate
+        if not self._vad_alive_now():
+            # doa_node is gone. Say so once, then get out of the way — a
+            # latched False left in this gate would silently swallow every
+            # command from now on.
+            if not self._vad_logged:
+                self._vad_logged = True
+                self.get_logger().warn(
+                    'Nothing is publishing /voice_activity any more — falling '
+                    'back to the energy threshold. Did doa_node die?')
+            return False
+        if self._vad_on and time.monotonic() - self._vad_true_at > self.vad_stuck_s:
+            if not self._vad_logged:
+                self._vad_logged = True
+                self.get_logger().warn(
+                    f'The hardware VAD has said "speech" for over '
+                    f'{self.vad_stuck_s:.0f}s — treating it as stuck and '
+                    'falling back to the energy threshold.')
+            return False
+        self._vad_logged = False
+        return True
+
     def _vad_gate_open(self) -> bool:
         """May a recording START right now, as far as the hardware VAD knows?
 
@@ -340,22 +405,11 @@ class STTNode(Node):
         or crashed doa_node leaves the old energy-only behaviour intact instead
         of making the robot deaf.
         """
-        if not self.use_hw_vad or not self._vad_seen:
-            return True                      # never arrived: not our gate
-        now = time.monotonic()
-        if now - self._vad_at > self.vad_stale_s:
-            # Publisher died mid-session. Say so once per stall, then get out
-            # of the way — a latched False here would silently swallow every
-            # command from now on.
-            if not self._vad_logged:
-                self._vad_logged = True
-                self.get_logger().warn(
-                    'Hardware VAD went stale — falling back to the energy '
-                    'threshold. Is doa_node still running?')
+        if not self._vad_trustworthy():
             return True
-        self._vad_logged = False
         # Held briefly after the flag drops: the DSP releases it between words.
-        return self._vad_on or (now - self._vad_true_at) < self.vad_hold_s
+        return (self._vad_on
+                or (time.monotonic() - self._vad_true_at) < self.vad_hold_s)
 
     def _on_audio(self, msg: Int16MultiArray):
         chunk = np.array(msg.data, dtype=np.int16).astype(np.float32) / 32768.0
@@ -404,8 +458,7 @@ class STTNode(Node):
                 # keep the window open. The reverse — letting it cut — would
                 # truncate people mid-sentence, and the energy threshold plus
                 # max_record_seconds already bound the recording.
-                if (self.use_hw_vad and self._vad_seen and self._vad_on
-                        and time.monotonic() - self._vad_at <= self.vad_stale_s):
+                if self._vad_on and self._vad_trustworthy():
                     self._sil_count = 0
 
                 if (self._sil_count  >= self._silence_limit_chunks or
