@@ -380,6 +380,8 @@ TRANSLATIONS = {
     # ── 3D pane ───────────────────────────────────────────────────────────
     '3D κάμερα (D435)':  ('3D camera (D435)', '3D-Kamera (D435)'),
     'Επαναφορά όψης':    ('Reset view', 'Ansicht zurücksetzen'),
+    'μικρότερο':         ('smaller', 'kleiner'),
+    'μεγαλύτερο':        ('bigger', 'größer'),
     'Σύρε για περιστροφή · ροδέλα ή τσίμπημα για ζουμ':
         ('Drag to rotate · wheel or pinch to zoom',
          'Ziehen zum Drehen · Rad oder Kneifen zum Zoomen'),

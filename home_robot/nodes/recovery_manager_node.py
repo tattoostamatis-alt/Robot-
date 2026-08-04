@@ -59,6 +59,10 @@ class RecoveryManagerNode(Node):
         self.declare_parameter('drive_speed',      0.05)  # m/s
         self.declare_parameter('spin_angle',       1.571) # radians (π/2 = 90°)
         self.declare_parameter('enabled',          True)
+        # Speak the running commentary («Κόλλησα» / «Ξεκόλλησα»)? Off: it fires
+        # on every pinch point and says nothing the person in the room cannot
+        # already see. The give-up line is spoken regardless — see _speak.
+        self.declare_parameter('announce_progress', False)
         self.declare_parameter('nudge_linear_speed',  0.10)  # m/s — doorway pinch-point creep
         self.declare_parameter('nudge_angular_speed', 0.10)  # rad/s
         self.declare_parameter('nudge_duration',      1.2)   # seconds per phase (turn, then creep)
@@ -89,6 +93,7 @@ class RecoveryManagerNode(Node):
         self._drive_speed     = max(0.01, float(self.get_parameter('drive_speed').value))
         self._spin_angle      = self.get_parameter('spin_angle').value
         self._enabled         = self.get_parameter('enabled').value
+        self._announce_progress = bool(self.get_parameter('announce_progress').value)
         self._nudge_linear    = self.get_parameter('nudge_linear_speed').value
         self._nudge_angular   = self.get_parameter('nudge_angular_speed').value
         self._nudge_duration  = self.get_parameter('nudge_duration').value
@@ -110,6 +115,11 @@ class RecoveryManagerNode(Node):
         self._cmd_active_since: float | None = None
         self._cmd_last_rx: float | None = None  # last cmd_vel_smoothed arrival
         self._status = STATUS_IDLE
+        self._cancelled = False    # set by /mission/cancel; see _on_cancel
+        # Goal handle of the Nav2 behavior currently running, so a cancel can
+        # stop it mid-motion instead of waiting out its time_allowance. BackUp
+        # alone is ~10 s of the robot reversing after the person said stop.
+        self._active_behavior = None
         self._lock = threading.Lock()
 
         # Action clients — the stock nav2_behaviors servers
@@ -133,6 +143,14 @@ class RecoveryManagerNode(Node):
 
         # Manual trigger (Bool True = force a recovery attempt)
         self.create_subscription(Bool, 'recovery/trigger', self._on_trigger, 10)
+        # ‼️ A human cancel must beat the re-issue. This node learns the goal
+        # from /plan and re-sends it after every escape, which is exactly right
+        # for a multi-doorway journey and exactly wrong when someone has just
+        # pressed "✕ Ακύρωση στόχου": the goal came back a few seconds later and
+        # the robot carried on (reported 2026-08-04). Nothing was listening to
+        # /mission/cancel at all — not this node, and not the `cancel` gesture's
+        # publisher either.
+        self.create_subscription(String, '/mission/cancel', self._on_cancel, 10)
         self.create_subscription(Odometry, '/odom', self._on_odom, 10)
         # Teleop that remaps straight onto cmd_vel_safe bypasses this on
         # purpose: no auto-recovery fighting the joystick.
@@ -181,6 +199,29 @@ class RecoveryManagerNode(Node):
             self._last_goal = goal
             self._last_goal_rx = self.get_clock().now().nanoseconds / 1e9
 
+    def _on_cancel(self, _msg: String):
+        """Someone cancelled the navigation. Forget the goal; do not resume it.
+
+        Also clears the no-progress counter: the next goal is a fresh journey
+        and must not inherit the count from the one that was abandoned.
+        """
+        with self._lock:
+            had_goal = self._last_goal is not None
+            self._last_goal = None
+            self._last_goal_rx = None
+        self._reissue_count = 0
+        self._reissue_odom = None
+        self._cancelled = True          # stops a recovery already in flight
+        gh = self._active_behavior
+        if gh is not None:
+            try:
+                gh.cancel_goal_async()
+            except Exception as exc:                      # noqa: BLE001
+                self.get_logger().warn(f'could not cancel the running behavior: {exc!r}')
+        self._nudge_pub.publish(Twist())
+        if had_goal or gh is not None:
+            self.get_logger().info('Navigation cancelled — dropping the goal, not re-issuing')
+
     def _on_trigger(self, msg: Bool):
         if msg.data and self._status == STATUS_IDLE:
             self.get_logger().info('Manual recovery trigger received')
@@ -225,6 +266,7 @@ class RecoveryManagerNode(Node):
             )
             self._status = STATUS_STUCK
             self._publish_status(STATUS_STUCK)
+            self._cancelled = False     # a new pinch, not the cancelled one
             threading.Thread(
                 target=self._run_recovery, args=(self._max_attempts,), daemon=True
             ).start()
@@ -251,7 +293,7 @@ class RecoveryManagerNode(Node):
             return
 
         self._status = STATUS_RECOVERING
-        self._speak('Κόλλησα, προσπαθώ να ξεκολλήσω.')
+        self._speak('Κόλλησα, προσπαθώ να ξεκολλήσω.', progress=True)
 
         # Cancel any active navigation goal
         self._cancel_navigation()
@@ -269,6 +311,13 @@ class RecoveryManagerNode(Node):
             ('Spin',           self._do_spin),
         ]
         for name, step in steps:
+            # Checked between steps, not only at the top: the whole sequence is
+            # ~20 s of the robot shuffling about, and a person who has just
+            # pressed cancel is watching it do that.
+            if self._cancelled:
+                self.get_logger().info('Recovery abandoned — navigation was cancelled')
+                self._abandon_recovery()
+                return
             self.get_logger().info(f'Recovery step: {name}')
             step()
             time.sleep(1.0)
@@ -276,18 +325,28 @@ class RecoveryManagerNode(Node):
                 self._recovered()
                 return
 
+        if self._cancelled:
+            self._abandon_recovery()
+            return
         self.get_logger().warn(f'Still stuck, {attempts_left - 1} attempt(s) left')
         self._run_recovery(attempts_left - 1)
+
+    def _abandon_recovery(self):
+        self._nudge_pub.publish(Twist())        # whatever the last step left running
+        self._publish_status(STATUS_IDLE)
+        self._status = STATUS_IDLE
+        self._reset_cmd_tracking()
 
     def _recovered(self):
         self._status = STATUS_RECOVERED
         self._publish_status(STATUS_RECOVERED)
-        self._speak('Ξεκόλλησα!')
+        self._speak('Ξεκόλλησα!', progress=True)
         self.get_logger().info('Recovery succeeded')
         # Let the body settle, then resume the goal that was cancelled to run
         # the recovery — otherwise the robot just sits free after each pinch.
         time.sleep(2.0)
-        self._maybe_reissue_goal()
+        if not self._cancelled:
+            self._maybe_reissue_goal()
         self._status = STATUS_IDLE
         self._reset_cmd_tracking()
 
@@ -397,8 +456,10 @@ class RecoveryManagerNode(Node):
         if gh is None or not gh.accepted:
             self.get_logger().warn('BackUp goal rejected')
             return False
+        self._active_behavior = gh
         result_future = gh.get_result_async()
         self._await_future(result_future, 15.0)
+        self._active_behavior = None
         self.get_logger().info('BackUp done')
         return True
 
@@ -415,8 +476,10 @@ class RecoveryManagerNode(Node):
         if gh is None or not gh.accepted:
             self.get_logger().warn('DriveOnHeading goal rejected')
             return False
+        self._active_behavior = gh
         result_future = gh.get_result_async()
         self._await_future(result_future, 15.0)
+        self._active_behavior = None
         self.get_logger().info('DriveOnHeading done')
         return True
 
@@ -432,8 +495,10 @@ class RecoveryManagerNode(Node):
         if gh is None or not gh.accepted:
             self.get_logger().warn('Spin goal rejected')
             return False
+        self._active_behavior = gh
         result_future = gh.get_result_async()
         self._await_future(result_future, 15.0)
+        self._active_behavior = None
         self.get_logger().info('Spin done')
         return True
 
@@ -451,7 +516,21 @@ class RecoveryManagerNode(Node):
     def _publish_status(self, status: str):
         self._status_pub.publish(String(data=status))
 
-    def _speak(self, text: str):
+    def _speak(self, text: str, progress: bool = False):
+        """Say something. `progress` marks the running commentary.
+
+        ‼️ 2026-08-04, from the owner: "λέει όλη την ώρα κόλλησα προσπαθώ να
+        ξεκολλήσω, σταμάτα το να το λέει αυτό". One pinch point produced eight
+        announcements in fifteen minutes — «Κόλλησα» and «Ξεκόλλησα» in pairs,
+        every time, while the robot was working the problem perfectly well.
+        The commentary is worthless to a person in the room: they can SEE it is
+        stuck. What is worth saying out loud is the outcome it cannot fix, and
+        that is still spoken. Everything else stays in the log and in
+        recovery_status, which the dashboard shows.
+        """
+        if progress and not self._announce_progress:
+            self.get_logger().info(f'[silent] {text}')
+            return
         self._speech_pub.publish(String(data=text))
         self.get_logger().info(f'[speech] {text}')
 

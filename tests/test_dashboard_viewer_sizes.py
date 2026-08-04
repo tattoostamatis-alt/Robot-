@@ -86,3 +86,31 @@ def test_the_costmap_is_capped_and_centred():
     assert 'align-self:center' in css
     assert 'max-width:100%' in css, 'it must still fit a phone'
     assert 'flex:1;' not in css, 'flex:1 is what stretched it in the first place'
+
+
+# ── costmap − / + (asked for by name, 2026-08-04) ───────────────────────────
+# "στο costmap βάλε συν πλην να το ρυθμίζω μόνος μου". The drag grip already
+# resized it, but it is pointer-only and nothing about a thin bar says drag me.
+
+def test_the_costmap_has_plus_and_minus_buttons():
+    assert 'id="b-cost-smaller"' in _SRC
+    assert 'id="b-cost-bigger"' in _SRC
+    assert "$('b-cost-smaller').onclick" in _SRC
+    assert "$('b-cost-bigger').onclick" in _SRC
+
+
+def test_the_buttons_share_the_grip_store():
+    """Two controls writing different places would disagree the moment you use
+    both — the grip's size would come back on the next reload."""
+    body = _SRC.split('function costResize')[1].split('\nfunction ')[0]
+    assert 'applyViewerHeight' in body
+    assert "loadSizes()" in body and 'saveSizes' in body
+    assert "'cost-wrap'" in body
+
+
+def test_the_steps_are_bounded():
+    """Unbounded, − walks it to nothing and + past the window."""
+    m = re.search(r'const COST_MIN = (\d+), COST_MAX = (\d+)', _SRC)
+    assert m, 'the costmap size limits are gone'
+    lo, hi = int(m.group(1)), int(m.group(2))
+    assert 120 <= lo < hi <= 2000

@@ -59,6 +59,7 @@ from sensor_msgs.msg import Image, Imu, JointState, LaserScan, PointCloud2
 # the service, so none of the service call sites below change meaning.
 from std_msgs.msg import Bool, Float32, Int16MultiArray, String
 from std_msgs.msg import Empty as EmptyMsg
+from action_msgs.srv import CancelGoal
 from std_srvs.srv import Empty
 
 from home_robot.compass import offset_from_known_bearing
@@ -514,6 +515,22 @@ class DashboardNode(Node):
         self._dock_pub = self.create_publisher(Bool, '/dock', 10)
         self._follow_pub = self.create_publisher(Bool, '/follow_command', 10)
         self._nerf_pub = self.create_publisher(Bool, '/nerf/capture', 10)
+        # ── "✕ Ακύρωση στόχου" ────────────────────────────────────────────────
+        # ‼️ This button used to publish ONE empty Twist and nothing else, so it
+        # never cancelled anything: bt_navigator still owned the goal and put a
+        # fresh command on the wire milliseconds later. Reported 2026-08-04 —
+        # "πατάω ακύρωση στόχου και δεν ακυρώνεται". Worse, recovery_manager
+        # re-issues the goal it learned from /plan after every escape, so even a
+        # real cancel came back to life within 30 s.
+        # Cancelling has to reach every layer that can put the robot in motion.
+        self._nav_cancel_cli = self.create_client(
+            CancelGoal, '/navigate_to_pose/_action/cancel_goal')
+        self._mission_pub = self.create_publisher(String, '/mission/start', 10)
+        self._patrol_pub  = self.create_publisher(Bool, '/patrol_command', 10)
+        self._explore_pub = self.create_publisher(Bool, '/explore_command', 10)
+        # The signal recovery_manager listens to so it drops the goal instead of
+        # re-issuing it. A human cancel is the one case its re-issue must lose to.
+        self._cancel_pub = self.create_publisher(String, '/mission/cancel', 10)
         # The gesture "go" button and the timeline search box. Same topics the
         # `goto_pointed` and `recall` voice tools use, so button and voice take
         # one code path.
@@ -1032,6 +1049,40 @@ class DashboardNode(Node):
 
     def _cb_room(self, msg: String):
         self._state.broadcast({'type': 'room', 'name': msg.data})
+
+    def _cancel_navigation(self):
+        """Stop going wherever it was going — every layer, not just the wheels.
+
+        There are five separate things that can be driving the robot, and the
+        old button (one empty Twist) addressed none of them:
+
+          * bt_navigator owns the NavigateToPose goal. An empty CancelGoal
+            request — zero id, zero stamp — cancels every goal on the server;
+            the dashboard never sent the goal itself, so it has no handle.
+          * mission_executor cancels on an empty `mission/start`.
+          * task_planner cancels on `patrol_command=False`.
+          * explore_lite keeps its own frontier goals coming.
+          * person_follower drives directly.
+
+        And recovery_manager re-issues the goal it read off /plan after every
+        escape, which is why a cancel that DID land came back a few seconds
+        later. /mission/cancel is what tells it this one was a human's decision.
+
+        The zero Twist goes last: it is the immediate stop, and sending it
+        before the owners are told just gets overwritten on their next tick.
+        """
+        if self._nav_cancel_cli.service_is_ready():
+            self._nav_cancel_cli.call_async(CancelGoal.Request())
+        else:
+            self.get_logger().warn(
+                'navigate_to_pose cancel service not up — cancelling the rest anyway')
+        self._cancel_pub.publish(String(data='{"source":"dashboard"}'))
+        self._mission_pub.publish(String(data=''))
+        self._patrol_pub.publish(Bool(data=False))
+        self._explore_pub.publish(Bool(data=False))
+        self._follow_pub.publish(Bool(data=False))
+        self._vel_pub.publish(Twist())
+        self.get_logger().info('Navigation cancelled from the dashboard')
 
     # Roughly what a phone on wifi can take: 4000 points x 9 bytes is ~36 kB,
     # ~48 kB once base64'd, three times a second.
@@ -1681,6 +1732,8 @@ class DashboardNode(Node):
             self._vel_pub.publish(tw)
         elif t == 'stop':
             self._vel_pub.publish(Twist())
+        elif t == 'cancel_nav':
+            self._cancel_navigation()
         elif t == 'estop':
             self._estop_pub.publish(Bool(data=bool(msg.get('on'))))
             if msg.get('on'):
@@ -3060,6 +3113,14 @@ button{font:inherit;color:inherit}
 
     <!-- ── Costmap ─────────────────────────────────────────────── -->
     <section class="pane" id="p-cost">
+      <!-- The drag grip underneath does the same job, but it is pointer-only
+           and needs discovering. Two buttons are obvious and work on a phone. -->
+      <div class="row" style="justify-content:center;gap:8px;flex:0 0 auto">
+        <button class="btn" id="b-cost-smaller" title="μικρότερο">−</button>
+        <span style="font-size:11.5px;color:#71717a;min-width:74px;text-align:center"
+              id="cost-size">—</span>
+        <button class="btn" id="b-cost-bigger" title="μεγαλύτερο">+</button>
+      </div>
       <div id="cost-wrap">
         <canvas id="cost-canvas"></canvas>
         <div class="ovl">COSTMAP · 3×3m γύρω από το ρομπότ</div>
@@ -3711,7 +3772,7 @@ function showTab(id){
   if (VNC_APPS[id]) ensureVnc(id);
   cloudSetActive(id === 'cloud');
   costSetActive(id === 'cost');
-  if (id === 'cost') buildCostLegend();
+  if (id === 'cost'){ buildCostLegend(); costShowSize(); }
   if (id === 'set') mapsRefresh();
   // 170 kB of geometry, fetched the first time the tab is opened rather than
   // on every page load — most visits never look at the arm.
@@ -4352,6 +4413,29 @@ function applyViewerHeight(el, h){
   // flex:none is what stops the pane's flex:1 from immediately overriding it.
   el.style.flex = '0 0 auto';
   el.style.height = h + 'px';
+}
+
+// ── costmap − / + ──────────────────────────────────────────────────────────
+// The drag grip already resizes it, but it is pointer-only and nothing about a
+// thin bar says "drag me". Asked for by name: "στο costmap βάλε συν πλην να το
+// ρυθμίζω μόνος μου". Steps by a fixed ratio and remembers, through the same
+// hr_sizes store the grip writes, so the two controls cannot disagree.
+const COST_MIN = 180, COST_MAX = 1200, COST_STEP = 1.18;
+
+function costResize(factor){
+  const el = $('cost-wrap'); if (!el) return;
+  const now = el.getBoundingClientRect().height;
+  const h = Math.round(Math.max(COST_MIN, Math.min(COST_MAX, now * factor)));
+  applyViewerHeight(el, h);
+  const o = loadSizes(); o['cost-wrap'] = h; saveSizes(o);
+  costShowSize();
+  drawCost();
+}
+
+function costShowSize(){
+  const el = $('cost-wrap'), out = $('cost-size');
+  if (!el || !out) return;
+  out.textContent = Math.round(el.getBoundingClientRect().height) + ' px';
 }
 
 // ── foldable cards ─────────────────────────────────────────────────────────
@@ -5415,7 +5499,10 @@ $('tl-q').addEventListener('keydown',e=>{
 const TL_CHIPS = ['σήμερα','σήμερα το πρωί','χθες','πριν από 2 ώρες'];
 
 $('b-loc').addEventListener('click',()=>send({type:'localize'}));
-$('b-xnav').addEventListener('click',()=>{ goal=null; send({type:'stop'}); draw(); });
+// ‼️ 'cancel_nav', not 'stop'. A zero Twist stops the wheels for one tick and
+// bt_navigator writes the next command straight over it — "πατάω ακύρωση στόχου
+// και δεν ακυρώνεται" (2026-08-04). The server cancels the goal itself.
+$('b-xnav').addEventListener('click',()=>{ goal=null; send({type:'cancel_nav'}); draw(); });
 
 // The header stop is a LATCHED e-stop, not a one-shot zero twist: it is the
 // only thing that overrides teleop, which bypasses obstacle_safety entirely.
@@ -5478,6 +5565,8 @@ $('b-arm-init').onclick = ()=>send({type:'arm_raw',cmd:'{"T":210,"cmd":1}'});
 $('b-arm-moveit').onclick = ()=>showTab('moveit');
 $('b-log-clear').onclick  = ()=>{ $('log-list').innerHTML=''; logSeen=0; $('log-count').textContent='0'; };
 $('b-cloud-reset').onclick = cloudReset;
+$('b-cost-smaller').onclick = ()=>costResize(1/COST_STEP);
+$('b-cost-bigger').onclick  = ()=>costResize(COST_STEP);
 $('b-map-new').onclick  = mapNew;
 $('b-map-save').onclick = mapSave;
 cloudBind();

@@ -46,6 +46,9 @@ from home_robot import api_keys
 from home_robot.status_query import (ROOM_NAMES_EL, format_location,
                                      format_status, is_location_query,
                                      is_status_query, wants_battery)
+from home_robot.motion_confirm import (MOTION_TOOLS, PENDING_TTL,
+                                       confirm_question, is_affirmative,
+                                       is_negative)
 from home_robot.stop_command import is_stop_command, strip_accents
 from home_robot.tool_router import select_tools
 from home_robot.vocabulary import greek_for, to_prompt
@@ -363,6 +366,9 @@ class LLMBridgeNode(Node):
         self.declare_parameter('temperature', 0.1)
         self.declare_parameter('history_turns', 4)
         self.declare_parameter('nav_timeout', 60.0)
+        # Ask before driving. ‼️ Most of what reaches speech_text was never
+        # addressed to the robot — see home_robot/motion_confirm.py.
+        self.declare_parameter('confirm_motion', True)
         self.declare_parameter('memory_enabled', False)
         self.declare_parameter('memory_timeout', 5.0)
         self.declare_parameter('jpeg_quality', 70)
@@ -376,6 +382,11 @@ class LLMBridgeNode(Node):
         self.temperature = self.get_parameter('temperature').value
         self.history_turns = self.get_parameter('history_turns').value
         self.nav_timeout = self.get_parameter('nav_timeout').value
+        self.confirm_motion = bool(self.get_parameter('confirm_motion').value)
+        # (tool, args, expires_at) for a motion tool waiting on a yes/no.
+        self._pending_motion = None
+        self._motion_confirmed = False   # set only while running a confirmed call
+        self._confirm_asked = False      # a question was spoken this turn
         self.memory_enabled = self.get_parameter('memory_enabled').value
         self.memory_timeout = self.get_parameter('memory_timeout').value
         self.jpeg_quality = self.get_parameter('jpeg_quality').value
@@ -744,8 +755,16 @@ class LLMBridgeNode(Node):
         # request". Stop must never queue behind the thing it is stopping.
         if is_stop_command(text):
             self.get_logger().warn(f'STOP command (keyword gate): {text}')
+            self._pending_motion = None      # a stop also drops the question
             threading.Thread(target=self._emergency_stop, daemon=True).start()
             return
+
+        # Answering "να πάω στο σαλόνι;". Ahead of the busy lock and the model,
+        # like stop, and for the same reason: the answer must not queue behind
+        # anything, and a yes/no is not a question worth a model call.
+        if self._pending_motion is not None:
+            if self._answer_pending_motion(text):
+                return
 
         # Status questions are answered from telemetry, not by the model. Same
         # failure mode as stop: it replies conversationally instead of calling
@@ -776,6 +795,66 @@ class LLMBridgeNode(Node):
             self.get_logger().warn('Already handling a request, ignoring speech_text')
             return
         threading.Thread(target=self._handle_text, args=(text,), daemon=True).start()
+
+    def _publish_reply(self, reply):
+        """The model's final word — unless a confirmation question replaced it.
+
+        ‼️ When a motion tool asks "Να πάω στο σαλόνι;" the question has already
+        been spoken by _dispatch_tool. Whatever the model composes afterwards is
+        a second sentence on top of it, and the first live test showed what that
+        sentence is: «Πηγαίνω στο σαλόνι» — announcing the trip it was just
+        stopped from taking. Two voices, one of them wrong. The question wins.
+        """
+        if self._confirm_asked:
+            self._confirm_asked = False
+            if reply:
+                self.get_logger().info(f'[suppressed after confirmation] {reply}')
+            return
+        self.get_logger().info(f'Max: {reply}')
+        self.response_pub.publish(String(data=reply))
+
+    def _answer_pending_motion(self, text) -> bool:
+        """Handle a yes/no to a motion question. True if it was consumed here.
+
+        Three outcomes, and the third is the important one: anything that is
+        neither yes nor no means the room moved on to something else, so the
+        pending action is DROPPED rather than left armed waiting for a "ναι"
+        that belongs to a different sentence.
+        """
+        pending = self._pending_motion
+        if pending is None:
+            return False
+        tool, args, expires = pending
+        if time.monotonic() > expires:
+            self._pending_motion = None
+            self.get_logger().info(f'Motion confirmation for {tool} expired')
+            return False
+
+        if is_affirmative(text):
+            self._pending_motion = None
+            self.get_logger().info(f'Motion confirmed by voice: {tool} {args}')
+
+            def _run():
+                try:
+                    self._motion_confirmed = True
+                    result = self._dispatch_tool(tool, args)
+                finally:
+                    self._motion_confirmed = False
+                self.get_logger().info(f'{tool} → {result}')
+
+            threading.Thread(target=_run, daemon=True).start()
+            return True
+
+        if is_negative(text):
+            self._pending_motion = None
+            self.get_logger().info(f'Motion declined by voice: {tool}')
+            self.response_pub.publish(String(data='Εντάξει, δεν πάω.'))
+            return True
+
+        self._pending_motion = None
+        self.get_logger().info(
+            f'No yes/no for {tool} — dropping it and treating this as new speech')
+        return False
 
     def _on_current_room(self, msg: String):
         self._current_room = msg.data.strip()
@@ -823,6 +902,10 @@ class LLMBridgeNode(Node):
         self.response_pub.publish(String(data='Σταμάτησα.'))
 
     def _handle_text(self, text):
+        # Cleared per turn, not only in _publish_reply: a backend that produces
+        # an empty reply returns early and never reaches it, and a flag left set
+        # would swallow the NEXT answer instead of this one.
+        self._confirm_asked = False
         try:
             self._handle_text_inner(text)
         finally:
@@ -1021,8 +1104,7 @@ class LLMBridgeNode(Node):
         turn.append({'role': 'assistant', 'content': reply})
         self._remember_turn(turn, bool(tool_calls))
 
-        self.get_logger().info(f'Max: {reply}')
-        self.response_pub.publish(String(data=reply))
+        self._publish_reply(reply)
 
     # ── ollama backend ─────────────────────────────────────────────────────
 
@@ -1093,8 +1175,7 @@ class LLMBridgeNode(Node):
         turn.append({'role': 'assistant', 'content': reply})
         self._remember_turn(turn, bool(out.tool_calls))
 
-        self.get_logger().info(f'Max: {reply}')
-        self.response_pub.publish(String(data=reply))
+        self._publish_reply(reply)
 
     # ── gemini backend ─────────────────────────────────────────────────────
 
@@ -1173,8 +1254,7 @@ class LLMBridgeNode(Node):
         turn.append(types.Content(role='model', parts=[types.Part(text=reply)]))
         self._remember_turn(turn, bool(function_calls))
 
-        self.get_logger().info(f'Max: {reply}')
-        self.response_pub.publish(String(data=reply))
+        self._publish_reply(reply)
 
     # ── navigation ─────────────────────────────────────────────────────────
 
@@ -1247,6 +1327,37 @@ class LLMBridgeNode(Node):
         return {'status': 'started', 'action': 'dock'}
 
     def _dispatch_tool(self, name, args):
+        # ‼️ Ask before moving. The model is not wrong to read "πάμε στο σαλόνι"
+        # as a goto — it just was not said to the robot. See motion_confirm.py
+        # for the timeline entry that started this. Confirmed calls come back
+        # through here with _motion_confirmed set and fall straight through.
+        if (self.confirm_motion and name in MOTION_TOOLS
+                and not self._motion_confirmed):
+            # ‼️ The question is SPOKEN HERE, not left to the model. First live
+            # test, Gemini, with the tool result carrying an explicit "say
+            # exactly «Να πάω στο σαλόνι;» and nothing else": it answered
+            # «Πηγαίνω στο σαλόνι και μετά στον διάδρομο» — a confident lie
+            # about an action that had just been refused. Exactly the failure
+            # stop_command.py exists for. The gate is only worth anything if
+            # what the person hears is also not the model's choice.
+            if self._pending_motion is not None:
+                # A second motion call in the same turn ("σαλόνι and then
+                # διάδρομο"). One question at a time; the rest are dropped
+                # rather than queued, because a single "ναι" cannot mean yes
+                # to a journey the person never heard described.
+                return {'status': 'ignored', 'action': name,
+                        'reason': 'already waiting on a confirmation'}
+            question = confirm_question(name, args)
+            self._pending_motion = (name, args, time.monotonic() + PENDING_TTL)
+            self._confirm_asked = True
+            self.get_logger().info(f'Motion tool {name} needs confirmation: {question}')
+            self.get_logger().info(f'Max: {question}')
+            self.response_pub.publish(String(data=question))
+            return {'status': 'needs_confirmation', 'action': name,
+                    'question': question,
+                    'instruction': 'The question has already been asked out '
+                                   'loud. Reply with an empty string.'}
+
         if name == 'tidy':
             room = args.get('room', 'all')
             self.tidy_pub.publish(String(data=json.dumps({'room': room})))
