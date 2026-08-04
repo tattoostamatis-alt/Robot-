@@ -224,3 +224,40 @@ def test_audio_context_is_created_from_the_click_not_at_load():
     assert body, 'startListening() is gone'
     assert 'new AC(' in body.group(1), \
         'the AudioContext is no longer created inside startListening()'
+
+
+# ── every element the script wires up must exist ─────────────────────────────
+
+def _html_ids():
+    """Every id="..." in the page markup."""
+    return set(re.findall(r'\bid="([\w-]+)"', _SRC))
+
+
+def _wired_ids():
+    """ids the script calls addEventListener/onclick on at TOP LEVEL.
+
+    Those run as the page parses, so a missing element throws immediately and
+    aborts the rest of the script — the same failure mode as the TDZ bug above.
+    Inside a function the call is deferred and a stale id is merely dead code.
+
+    Top level is detected by INDENTATION, not by brace depth: template literals
+    and regex literals make brace counting unreliable, and every top-level
+    statement in this file starts at column 0.
+    """
+    out = []
+    pattern = re.compile(
+        r"^\$\('([\w-]+)'\)\s*\.(addEventListener|onclick|onchange)", re.M)
+    for m in pattern.finditer(_RAW):
+        out.append(m.group(1))
+    return out
+
+
+def test_every_top_level_wired_element_exists():
+    """‼️ Regression: the face-enrolment card was moved to another tab and its
+    `$('b-fi-enrol').addEventListener` was left behind. That threw on load and
+    took the whole dashboard down with it — zero tabs again."""
+    ids = _html_ids()
+    missing = sorted({i for i in _wired_ids() if i not in ids})
+    assert not missing, (
+        'the script wires elements that do not exist in the markup, which '
+        'throws during parse and kills the page: ' + ', '.join(missing))

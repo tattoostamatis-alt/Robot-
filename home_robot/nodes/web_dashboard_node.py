@@ -468,8 +468,8 @@ class DashboardNode(Node):
         self.create_subscription(String, '/gesture_status', self._cb_gesture, 10)
         self.create_subscription(String, '/observations', self._cb_observations, 10)
         self.create_subscription(String, '/vocab/state', self._cb_vocab, latch)
-        self.create_subscription(String, '/face_identities', self._cb_faces, latch)
         self.create_subscription(String, '/hand_gesture', self._cb_hand, latch)
+        self.create_subscription(String, '/people', self._cb_people, latch)
         self.create_subscription(String, '/self_diagnosis', self._cb_diag, latch)
         self.create_subscription(String, '/sound_events', self._cb_sound, latch)
         # Both latched by their publishers, so a tab opened long after the fact
@@ -508,6 +508,9 @@ class DashboardNode(Node):
         self._forget_pub = self.create_publisher(String, '/faces/forget', 10)
         self._bind_pub = self.create_publisher(
             String, '/gesture_bindings/set', 10)
+        self._people_add_pub = self.create_publisher(String, '/people/add', 10)
+        self._people_rm_pub = self.create_publisher(String, '/people/remove', 10)
+        self._people_enrol_pub = self.create_publisher(String, '/people/enrol', 10)
 
         # Map-referenced compass: one calibrated number per map.
         self._last_yaw = None
@@ -1285,19 +1288,19 @@ class DashboardNode(Node):
             return
         self._state.broadcast({'type': 'sound', **data})
 
-    def _cb_faces(self, msg: String):
-        try:
-            data = json.loads(msg.data)
-        except json.JSONDecodeError:
-            return
-        self._state.broadcast({'type': 'faces', **data})
-
     def _cb_hand(self, msg: String):
         try:
             data = json.loads(msg.data)
         except json.JSONDecodeError:
             return
         self._state.broadcast({'type': 'hand', **data})
+
+    def _cb_people(self, msg: String):
+        try:
+            data = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        self._state.broadcast({'type': 'people', **data})
 
     def _cb_diag(self, msg: String):
         try:
@@ -1677,6 +1680,20 @@ class DashboardNode(Node):
                     self._listen_ws.add(client)
                 else:
                     self._listen_ws.discard(client)
+        elif t == 'people_add':
+            name = str(msg.get('name', '')).strip()
+            if name:
+                self._people_add_pub.publish(String(data=name))
+        elif t == 'people_remove':
+            name = str(msg.get('name', '')).strip()
+            if name:
+                self._people_rm_pub.publish(String(data=name))
+        elif t == 'people_enrol':
+            name = str(msg.get('name', '')).strip()
+            what = str(msg.get('what', '')).strip()
+            if name and what in ('face', 'voice'):
+                self._people_enrol_pub.publish(String(data=json.dumps(
+                    {'name': name, 'what': what})))
         elif t == 'gesture_bind':
             # Relayed as-is; the gesture nodes validate and are the authority on
             # whether motion may be enabled at all.
@@ -2936,6 +2953,48 @@ button{font:inherit;color:inherit}
       </div>
     </section>
 
+    <!-- ── People ──────────────────────────────────────────────── -->
+    <section class="pane" id="p-people">
+      <div class="card" style="margin-bottom:9px">
+        <h3>Ποιος είναι εδώ <span class="badge" id="pp-badge">—</span></h3>
+        <div class="grid2">
+          <span class="k">Βλέπω</span><span class="v" id="pp-seeing">—</span>
+          <span class="k">Ακούω</span><span class="v" id="pp-hearing">—</span>
+          <span class="k">Ύψος</span><span class="v" id="pp-height">—</span>
+          <span class="k">Γιατί</span><span class="v" id="pp-reason">—</span>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:9px">
+        <h3>Πρόσθεσε άτομο</h3>
+        <div class="row">
+          <input id="pp-name" placeholder="όνομα"
+            style="flex:1;min-width:120px;background:#232329;border:1px solid #33333d;
+            border-radius:9px;color:#e4e4e7;padding:8px 11px;font-size:12.5px"
+            autocomplete="off">
+          <button class="btn pri" id="b-pp-add">➕ Πρόσθεσε</button>
+        </div>
+        <div id="pp-msg" style="font-size:11.5px;color:#71717a;margin-top:8px"></div>
+      </div>
+
+      <div class="card" style="flex:1;overflow:auto">
+        <h3>Γνωστά άτομα <span class="badge" id="pp-count">—</span></h3>
+        <div id="pp-list"></div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:12px;line-height:1.6">
+          Τρία σήματα, το καθένα τυφλό αλλού. Το ΠΡΟΣΩΠΟ δουλεύει σιωπηλά και
+          από απόσταση, αλλά όχι στο σκοτάδι ή από πίσω. Η ΦΩΝΗ δουλεύει στο
+          σκοτάδι και πίσω από γωνίες, αλλά μόνο όσο κάποιος μιλάει. Το ΥΨΟΣ
+          υπάρχει πάντα.
+        </p>
+        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+          ‼️ Το ύψος ΔΕΝ αναγνωρίζει από μόνο του — δύο ενήλικες διαφέρουν
+          συχνά λίγα εκατοστά. Χρησιμεύει για να ΑΠΟΚΛΕΙΕΙ: «όποιος κι αν
+          είναι, δεν είναι το παιδί». Μετριέται από το πάτωμα του χάρτη, οπότε
+          θέλει εντοπισμό — χωρίς αυτόν δεν δείχνει ύψος αντί για λάθος ύψος.
+        </p>
+      </div>
+    </section>
+
     <!-- ── Open-vocabulary search ──────────────────────────────── -->
     <section class="pane" id="p-vocab">
       <div class="card" style="margin-bottom:9px">
@@ -3142,25 +3201,6 @@ button{font:inherit;color:inherit}
     <!-- ── Voice / LLM ─────────────────────────────────────────── -->
     <section class="pane" id="p-llm">
       <div class="card" style="margin-bottom:9px">
-        <h3>Ποιος είναι εδώ <span class="badge" id="fi-badge">—</span></h3>
-        <div id="fi-present" style="font-size:12.5px;line-height:1.8"></div>
-        <div class="row" style="margin-top:10px">
-          <input id="fi-name" placeholder="όνομα"
-            style="flex:1;min-width:110px;background:#232329;border:1px solid #2c2c32;
-            border-radius:8px;color:#e4e4e7;padding:7px 10px;font-size:12.5px"
-            autocomplete="off">
-          <button class="btn pri" id="b-fi-enrol">👤 Μάθε το πρόσωπο</button>
-        </div>
-        <div id="fi-msg" style="font-size:11.5px;color:#71717a;margin-top:8px"></div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
-          Γράψε το όνομα, στάσου μπροστά στην κάμερα και πάτα το κουμπί. Το
-          ρομπότ κρατά λίγες λήψεις — κοίτα το από λίγο διαφορετικές γωνίες.
-          Ό,τι δεν αναγνωρίζει μένει «άγνωστος»: ΔΕΝ μαντεύει, γιατί το να
-          φωνάξει ένα παιδί με το όνομα του άλλου είναι χειρότερο από το να
-          σωπάσει. Θέλει <code>use_face_detection:=true</code>.
-        </p>
-      </div>
-      <div class="card" style="margin-bottom:9px">
         <h3>Ποιος μιλάει <span class="badge" id="sp-badge">—</span></h3>
         <div id="sp-detail" style="font-size:11.5px;color:#71717a;line-height:1.55">
           Θέλει use_diarization (ποιος), DoA (από πού), use_face_detection (ποιον βλέπω). Ό,τι λείπει παραλείπεται.
@@ -3334,6 +3374,7 @@ const TABS = [
   ['sound',  '👂', 'Ήχοι'],
   ['obs',    '💡', 'Πρόσεξα'],
   ['time',   '🕐', 'Χρονικό'],
+  ['people', '🧑', 'Άτομα'],
   ['llm',    '💬', 'Φωνή'],
   ['gazebo', '🌍', 'Gazebo'],
   ['sys',    '📊', 'Σύστημα'],
@@ -3698,8 +3739,8 @@ const HANDLERS = {
   gesture(m){ gestureState = m; drawPointRing(); renderGestureBindings(); },
   vocab(m){ renderVocab(m); },
   compass(m){ compassOffset = m.offset; drawCompass2(); },
-  faces(m){ renderFaces(m); },
   hand(m){ handState = m; renderGestureBindings(); },
+  people(m){ renderPeople(m); },
   diagnostics(m){ renderDiagnostics(m); },
   sound(m){ soundState = m; renderSound(m); },
   observations(m){ renderObservations(m); },
@@ -3788,6 +3829,72 @@ const HANDLERS = {
   fall_event(m){ onFallEvent(m); },
   speaker(m){ onSpeaker(m); },
 };
+
+// ── people ─────────────────────────────────────────────────────────────────
+function renderPeople(m){
+  const here = m.here;
+  $('pp-badge').textContent = here || t('άγνωστος');
+  $('pp-seeing').textContent  = (m.seeing && m.seeing.length)
+    ? m.seeing.join(', ') : '—';
+  $('pp-hearing').textContent = m.hearing || '—';
+  $('pp-height').textContent  = m.measured_height
+    ? m.measured_height.toFixed(2) + ' m' : '—';
+  $('pp-reason').textContent  = m.reason
+    ? m.reason + (m.confidence ? ' · ' + Math.round(m.confidence*100) + '%' : '')
+    : '—';
+
+  const list = m.people || [];
+  $('pp-count').textContent = list.length + ' ' + t('άτομα');
+  if(!list.length){
+    $('pp-list').innerHTML = '<span style="color:#71717a">'
+      + esc(t('Κανένα άτομο ακόμη. Γράψε ένα όνομα παραπάνω.')) + '</span>';
+    return;
+  }
+  const tick = ok => ok ? '<span style="color:#4ade80">✓</span>'
+                        : '<span style="color:#52525b">—</span>';
+  $('pp-list').innerHTML = list.map(p => `
+    <div style="padding:10px 11px;margin-bottom:8px;border-radius:11px;
+      background:${p.name===here?'#16281c':'#232329'};
+      border:1px solid ${p.name===here?'#2f6b41':'#2f2f37'}">
+      <div class="row" style="justify-content:space-between">
+        <span style="font-size:13.5px;font-weight:600;
+          ${p.name===here?'color:#7ee2a0':''}">${esc(p.name)}</span>
+        <span style="font-size:11px;color:#71717a">
+          ${p.complete ? esc(t('πλήρες')) : esc(t('ελλιπές'))}</span>
+      </div>
+      <div class="grid2" style="margin-top:7px;font-size:12px">
+        <span class="k">${esc(t('Πρόσωπο'))}</span><span>${tick(p.face)}</span>
+        <span class="k">${esc(t('Φωνή'))}</span><span>${tick(p.voice)}</span>
+        <span class="k">${esc(t('Ύψος'))}</span><span>${
+          p.height ? p.height.toFixed(2)+' m <span style="color:#52525b">('
+                     + p.height_samples + ')</span>'
+                   : '<span style="color:#52525b">—</span>'}</span>
+      </div>
+      <div class="row" style="margin-top:9px">
+        <button class="btn pp-face" data-name="${esc(p.name)}"
+          style="font-size:11.5px;padding:6px 10px">📷 ${esc(t('Μάθε πρόσωπο'))}</button>
+        <button class="btn pp-voice" data-name="${esc(p.name)}"
+          style="font-size:11.5px;padding:6px 10px">🎤 ${esc(t('Μάθε φωνή'))}</button>
+        <button class="btn pp-del" data-name="${esc(p.name)}"
+          style="font-size:11.5px;padding:6px 10px">🗑</button>
+      </div>
+    </div>`).join('');
+
+  const wire = (cls, fn) => {
+    for(const b of document.querySelectorAll('.'+cls)) b.onclick = () => fn(b.dataset.name);
+  };
+  wire('pp-face',  n => { send({type:'people_enrol', name:n, what:'face'});
+    ppMsg(t('Κοίτα την κάμερα: ') + n); });
+  wire('pp-voice', n => { send({type:'people_enrol', name:n, what:'voice'});
+    ppMsg(t('Μίλα τώρα: ') + n); });
+  wire('pp-del',   n => { if(confirm(t('Διαγραφή; ') + n))
+    send({type:'people_remove', name:n}); });
+}
+
+function ppMsg(text){
+  $('pp-msg').textContent = text;
+  setTimeout(()=>{ $('pp-msg').textContent=''; }, 6000);
+}
 
 // ── gesture bindings editor ────────────────────────────────────────────────
 let handState = null;
@@ -3881,42 +3988,6 @@ function renderGestureBindings(){
       $('gb-msg').textContent = t('Αποθηκεύτηκε.');
       setTimeout(()=>{ $('gb-msg').textContent=''; }, 2500);
     };
-  }
-}
-
-// ── who is here ────────────────────────────────────────────────────────────
-function renderFaces(m){
-  const present = m.present || [];
-  $('fi-badge').textContent = !m.ready ? t('φορτώνει…')
-    : (present.length ? present.join(', ') : t('κανείς'));
-
-  if(m.enrolling){
-    $('fi-msg').textContent = t('Μαθαίνω: ') + m.enrolling.name
-      + ' (' + m.enrolling.left + ')';
-  } else if($('fi-msg').textContent.startsWith(t('Μαθαίνω: '))){
-    $('fi-msg').textContent = t('Έτοιμο.');
-  }
-
-  const faces = m.faces || [];
-  const el = $('fi-present');
-  if(!faces.length){
-    el.innerHTML = '<span style="color:#71717a">'
-      + esc(t('Κανένα πρόσωπο στην κάμερα.')) + '</span>';
-  } else {
-    el.innerHTML = faces.map(f=>{
-      const known = f.name && f.name !== 'unknown';
-      const col = known ? '#4ade80' : '#a1a1aa';
-      const label = known ? f.name : t('άγνωστος');
-      return `<div><span style="color:${col}">${esc(label)}</span>`
-        + `<span style="color:#71717a"> ${(f.score*100).toFixed(0)}%</span></div>`;
-    }).join('');
-  }
-
-  // Known people, each with a way to remove them.
-  const enrolled = m.enrolled || [];
-  if(enrolled.length){
-    el.innerHTML += '<div style="margin-top:8px;color:#71717a">'
-      + esc(t('Γνωστοί: ')) + enrolled.map(esc).join(', ') + '</div>';
   }
 }
 
@@ -4620,17 +4691,21 @@ $('b-nerf-stop').addEventListener('click',()=>send({type:'nerf_capture', on:fals
 $('b-follow').addEventListener('click',()=>send({type:'follow', on:true}));
 $('b-follow-stop').addEventListener('click',()=>send({type:'follow', on:false}));
 
+$('b-pp-add').addEventListener('click', ()=>{
+  const n = $('pp-name').value.trim();
+  if(!n){ ppMsg(t('Γράψε πρώτα ένα όνομα.')); return; }
+  send({type:'people_add', name:n});
+  $('pp-name').value = '';
+  ppMsg(t('Προστέθηκε: ') + n);
+});
+$('pp-name').addEventListener('keydown', e => {
+  if(e.key === 'Enter') $('b-pp-add').click();
+});
+
 $('gb-motion').addEventListener('change', e => {
   send({type:'gesture_bind', motion_enabled: e.target.checked});
   $('gb-msg').textContent = t('Αποθηκεύτηκε.');
   setTimeout(()=>{ $('gb-msg').textContent=''; }, 2500);
-});
-
-$('b-fi-enrol').addEventListener('click',()=>{
-  const n=$('fi-name').value.trim();
-  if(!n){ $('fi-msg').textContent = t('Γράψε πρώτα ένα όνομα.'); return; }
-  send({type:'face_enrol', name:n});
-  $('fi-msg').textContent = t('Μαθαίνω: ') + n;
 });
 
 $('b-listen').addEventListener('click', startListening);

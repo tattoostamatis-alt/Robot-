@@ -688,34 +688,62 @@ TRANSLATIONS = {
         ('Body poses read from across the room; fingers need to be close, and',
          'Körperhaltungen sind aus der Ferne lesbar; Finger brauchen Nähe und'),
 
-    # ── who is here (face identity) ───────────────────────────────────────
-    'Ποιος είναι εδώ':   ('Who is here', 'Wer ist hier'),
-    '👤 Μάθε το πρόσωπο': ('👤 Learn this face', '👤 Gesicht lernen'),
-    'όνομα':             ('name', 'Name'),
-    'κανείς':            ('nobody', 'niemand'),
-    'άγνωστος':          ('unknown', 'unbekannt'),
-    'Μαθαίνω: ':         ('Learning: ', 'Lerne: '),
-    'Έτοιμο.':           ('Done.', 'Fertig.'),
-    'Κανένα πρόσωπο στην κάμερα.': ('No face in the camera.',
-                                    'Kein Gesicht in der Kamera.'),
-    'Γνωστοί: ':         ('Known: ', 'Bekannt: '),
+    # ── people tab ────────────────────────────────────────────────────────
+    'Άτομα':             ('People', 'Personen'),
+    'Βλέπω':             ('Seeing', 'Sehe'),
+    'Ακούω':             ('Hearing', 'Höre'),
+    'Ύψος':              ('Height', 'Größe'),
+    'Γιατί':             ('Why', 'Warum'),
+    'Πρόσθεσε άτομο':    ('Add a person', 'Person hinzufügen'),
+    '➕ Πρόσθεσε':       ('➕ Add', '➕ Hinzufügen'),
+    'Γνωστά άτομα':      ('Known people', 'Bekannte Personen'),
+    'άτομα':             ('people', 'Personen'),
+    'Κανένα άτομο ακόμη. Γράψε ένα όνομα παραπάνω.':
+        ('Nobody yet. Type a name above.',
+         'Noch niemand. Gib oben einen Namen ein.'),
+    'πλήρες':            ('complete', 'vollständig'),
+    'ελλιπές':           ('incomplete', 'unvollständig'),
+    'Πρόσωπο':           ('Face', 'Gesicht'),
+    'Μάθε πρόσωπο':      ('Learn face', 'Gesicht lernen'),
+    'Μάθε φωνή':         ('Learn voice', 'Stimme lernen'),
+    'Κοίτα την κάμερα: ': ('Look at the camera: ', 'Schau in die Kamera: '),
+    'Μίλα τώρα: ':       ('Speak now: ', 'Sprich jetzt: '),
+    'Διαγραφή; ':        ('Delete? ', 'Löschen? '),
+    'Προστέθηκε: ':      ('Added: ', 'Hinzugefügt: '),
     'Γράψε πρώτα ένα όνομα.': ('Type a name first.',
                                'Gib zuerst einen Namen ein.'),
-    'Γράψε το όνομα, στάσου μπροστά στην κάμερα και πάτα το κουμπί. Το '
-    'ρομπότ κρατά λίγες λήψεις — κοίτα το από λίγο διαφορετικές γωνίες. '
-    'Ό,τι δεν αναγνωρίζει μένει «άγνωστος»: ΔΕΝ μαντεύει, γιατί το να '
-    'φωνάξει ένα παιδί με το όνομα του άλλου είναι χειρότερο από το να '
-    'σωπάσει. Θέλει':
-        ('Type the name, stand in front of the camera and press the button. '
-         'The robot keeps a few shots — look at it from slightly different '
-         'angles. Anything it does not recognise stays "unknown": it does NOT '
-         'guess, because calling one child by the other\'s name is worse than '
-         'saying nothing. Requires',
-         'Gib den Namen ein, stell dich vor die Kamera und drücke die Taste. '
-         'Der Roboter behält einige Aufnahmen — schau ihn aus leicht '
-         'unterschiedlichen Winkeln an. Was er nicht erkennt, bleibt '
-         '„unbekannt": er rät NICHT, denn ein Kind mit dem Namen des anderen '
-         'zu rufen ist schlimmer als zu schweigen. Benötigt'),
+    'Τρία σήματα, το καθένα τυφλό αλλού. Το ΠΡΟΣΩΠΟ δουλεύει σιωπηλά και '
+    'από απόσταση, αλλά όχι στο σκοτάδι ή από πίσω. Η ΦΩΝΗ δουλεύει στο '
+    'σκοτάδι και πίσω από γωνίες, αλλά μόνο όσο κάποιος μιλάει. Το ΥΨΟΣ '
+    'υπάρχει πάντα.':
+        ('Three signals, each blind somewhere else. The FACE works silently '
+         'and at a distance, but not in the dark or from behind. The VOICE '
+         'works in the dark and around corners, but only while somebody is '
+         'talking. HEIGHT is always there.',
+         'Drei Signale, jedes anderswo blind. Das GESICHT wirkt lautlos und '
+         'auf Distanz, aber nicht im Dunkeln oder von hinten. Die STIMME wirkt '
+         'im Dunkeln und um Ecken, aber nur solange jemand spricht. Die GRÖSSE '
+         'ist immer da.'),
+    '‼️ Το ύψος ΔΕΝ αναγνωρίζει από μόνο του — δύο ενήλικες διαφέρουν '
+    'συχνά λίγα εκατοστά. Χρησιμεύει για να ΑΠΟΚΛΕΙΕΙ: «όποιος κι αν '
+    'είναι, δεν είναι το παιδί». Μετριέται από το πάτωμα του χάρτη, οπότε '
+    'θέλει εντοπισμό — χωρίς αυτόν δεν δείχνει ύψος αντί για λάθος ύψος.':
+        ('‼️ Height does NOT identify on its own — two adults are often within '
+         'a few centimetres. It is there to RULE OUT: "whoever that is, it is '
+         'not the child". It is measured from the map floor, so it needs '
+         'localization — without it there is no height rather than a wrong one.',
+         '‼️ Die Größe identifiziert NICHT allein — zwei Erwachsene liegen oft '
+         'wenige Zentimeter auseinander. Sie dient dem AUSSCHLIESSEN: „wer das '
+         'auch ist, es ist nicht das Kind". Gemessen wird ab dem Kartenboden, '
+         'also braucht es Lokalisierung — ohne sie gibt es keine Größe statt '
+         'einer falschen.'),
+
+    # ── who is here (face identity) ───────────────────────────────────────
+    'Ποιος είναι εδώ':   ('Who is here', 'Wer ist hier'),
+    'όνομα':             ('name', 'Name'),
+    'άγνωστος':          ('unknown', 'unbekannt'),
+    'Γράψε πρώτα ένα όνομα.': ('Type a name first.',
+                               'Gib zuerst einen Namen ein.'),
 
     # ── self-diagnosis ────────────────────────────────────────────────────
     'Αυτοδιάγνωση':      ('Self-diagnosis', 'Selbstdiagnose'),

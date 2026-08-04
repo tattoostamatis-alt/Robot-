@@ -802,6 +802,18 @@ def generate_launch_description():
         condition=IfCondition(use_face_detection),
     )
 
+    # ── People: one identity from face + voice + body ─────────────
+    # Cheap — it joins signals the other nodes already publish and adds one
+    # depth lookup per few frames. Needs use_face_detection and/or
+    # use_diarization to have anything to join.
+    people_node = Node(
+        package='home_robot',
+        executable='people_node.py',
+        name='people_node',
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('use_people', default='true')),
+    )
+
     # ── Self-diagnosis ────────────────────────────────────────────
     # Cheap and always useful: it measures topic RATES and matches /rosout
     # against the signatures of faults this robot has actually had.
@@ -1289,6 +1301,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_open_vocab',         default_value='false'),
         DeclareLaunchArgument('use_sound_events',       default_value='false'),
         DeclareLaunchArgument('use_diagnosis',          default_value='true'),
+        DeclareLaunchArgument('use_people',             default_value='true'),
         DeclareLaunchArgument('gesture_auto_goal',      default_value='false'),
         DeclareLaunchArgument('use_hand_gestures',      default_value='false'),
         # ‼️ Off by default: this is the master switch for gestures that can
@@ -1340,6 +1353,7 @@ def generate_launch_description():
         open_vocab_detector,
         sound_event_node,
         face_identity_node,
+        people_node,
         self_diagnosis_node,
         tracker_node,
         diarization_node_action,
