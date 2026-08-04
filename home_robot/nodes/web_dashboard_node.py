@@ -2483,7 +2483,18 @@ button{font:inherit;color:inherit}
   border-radius:14px;padding:13px 15px;
   box-shadow:0 1px 0 rgba(255,255,255,.03) inset,0 2px 10px rgba(0,0,0,.35)}
 .card h3{font-size:11.5px;font-weight:700;color:#9a9aa4;text-transform:uppercase;
-  letter-spacing:.9px;margin-bottom:11px}
+  letter-spacing:.9px;margin-bottom:11px;cursor:pointer;position:relative;
+  padding-right:18px;user-select:none}
+/* The chevron is the only affordance that a card folds. It rotates rather than
+   swapping glyphs so the state is obvious mid-animation. */
+.card>h3::after{content:'\2304';position:absolute;right:0;top:-2px;
+  color:#5a5a66;font-size:15px;transition:transform .15s}
+.card.collapsed>h3::after{transform:rotate(-90deg)}
+.card.collapsed>h3{margin-bottom:0}
+.card.collapsed>*:not(h3){display:none!important}
+/* Cards holding a viewer can also be dragged taller. Native resize is pointer
+   only — folding is what works on a phone, which is why both exist. */
+.card.sizable{resize:vertical;overflow:auto;min-height:130px}
 .row{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
 .btn{background:linear-gradient(#2e2e36,#26262d);border:1px solid #3d3d48;
   color:#d9d9de;padding:8px 15px;border-radius:10px;cursor:pointer;font-size:13px;
@@ -3830,6 +3841,57 @@ const HANDLERS = {
   speaker(m){ onSpeaker(m); },
 };
 
+// ── foldable cards ─────────────────────────────────────────────────────────
+// Every card folds from its header, and the state survives a reload. On a
+// phone the panes stack several cards deep and the useful one is often third;
+// folding beats scrolling. Cards holding a canvas or an image also get a
+// native drag handle, which is pointer-only — hence both mechanisms.
+function cardKey(card){
+  const pane = card.closest('.pane');
+  const idx = [...(pane ? pane.querySelectorAll('.card') : [])].indexOf(card);
+  return (pane ? pane.id : '?') + ':' + idx;
+}
+
+function loadFolded(){
+  try { return new Set(JSON.parse(localStorage.getItem('hr_folded') || '[]')); }
+  catch(e){ return new Set(); }
+}
+
+function saveFolded(set){
+  try { localStorage.setItem('hr_folded', JSON.stringify([...set])); } catch(e){}
+}
+
+function setupCards(){
+  const folded = loadFolded();
+  for (const card of document.querySelectorAll('.pane .card')){
+    const h = card.querySelector(':scope > h3');
+    if (!h || h.dataset.foldWired) continue;
+    h.dataset.foldWired = '1';
+    if (card.querySelector('canvas, img')) card.classList.add('sizable');
+    if (folded.has(cardKey(card))) card.classList.add('collapsed');
+    h.addEventListener('click', e => {
+      // ‼️ Some headers carry their own controls — the map's "Χρώματα"
+      // checkbox lives inside its h3. Clicking those must not fold the card.
+      if (e.target.closest('input,label,select,button,a')) return;
+      card.classList.toggle('collapsed');
+      const set = loadFolded();
+      card.classList.contains('collapsed') ? set.add(cardKey(card))
+                                           : set.delete(cardKey(card));
+      saveFolded(set);
+      if (!card.classList.contains('collapsed')) redrawVisible();
+    });
+  }
+}
+
+// A canvas inside a folded card has no size; on unfold it needs repainting.
+function redrawVisible(){
+  for (const f of [window.draw, window.armDraw, window.drawCompass2,
+                   window.drawPointRing]){
+    if (typeof f === 'function') { try { f(); } catch(e){} }
+  }
+  window.dispatchEvent(new Event('resize'));
+}
+
 // ── people ─────────────────────────────────────────────────────────────────
 function renderPeople(m){
   const here = m.here;
@@ -4928,6 +4990,7 @@ function applyLang(){
   document.documentElement.lang = LANG;
   renderTabs();
   renderChips();
+  setupCards();
   for(const b of document.querySelectorAll('#lang-buttons .btn'))
     b.classList.toggle('pri', b.dataset.lang === LANG);
   if(document.querySelector('#p-set.active')) mapsRefresh();
