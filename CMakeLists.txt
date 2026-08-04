@@ -46,6 +46,8 @@ install(PROGRAMS
   home_robot/nodes/gesture_node.py
   home_robot/nodes/proactive_observer_node.py
   home_robot/nodes/episodic_memory_node.py
+  home_robot/nodes/open_vocab_detector.py
+  home_robot/nodes/sound_event_node.py
   home_robot/nodes/nerf_capture_node.py
   home_robot/nodes/goto_room.py
   home_robot/nodes/record_location.py

@@ -16,7 +16,9 @@ import re
 import time
 import unicodedata
 
-__all__ = ['Event', 'EpisodicLog', 'parse_time_window', 'strip_accents']
+__all__ = ['Event', 'EpisodicLog', 'parse_time_window', 'strip_accents',
+           'KIND_HEARD', 'KIND_SAID', 'KIND_ROOM', 'KIND_OBSERVED',
+           'KIND_SAW', 'KIND_MISSION', 'KIND_SOUND']
 
 # Event kinds, kept short because they are also the dashboard's filter chips.
 KIND_HEARD    = 'heard'       # somebody said something
@@ -25,6 +27,7 @@ KIND_ROOM     = 'room'        # the robot changed room
 KIND_OBSERVED = 'observed'    # a proactive observation
 KIND_SAW      = 'saw'         # a person was recognised
 KIND_MISSION  = 'mission'     # a mission started or finished
+KIND_SOUND    = 'sound'       # a household sound the robot recognised
 
 _DAY = 86400.0
 _HOUR = 3600.0

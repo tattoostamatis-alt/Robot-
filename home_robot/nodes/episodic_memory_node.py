@@ -35,7 +35,7 @@ from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from std_msgs.msg import String
 
 from home_robot.episodic import (
-    KIND_HEARD, KIND_OBSERVED, KIND_ROOM, KIND_SAID, EpisodicLog,
+    KIND_HEARD, KIND_OBSERVED, KIND_ROOM, KIND_SAID, KIND_SOUND, EpisodicLog,
     parse_time_window,
 )
 from home_robot.status_query import ROOM_LOCATIVE_EL, room_el
@@ -82,6 +82,8 @@ def summarize(events, now=None, max_lines=6):
             lines.append(f'{when}, ήμουν {ROOM_LOCATIVE_EL.get(ev.room, ev.text)}')
         elif ev.kind == KIND_OBSERVED:
             lines.append(f'{when}, παρατήρησα: {ev.text}')
+        elif ev.kind == KIND_SOUND:
+            lines.append(f'{when}, {ev.text}')
         else:
             lines.append(f'{when}, {ev.text}')
 
@@ -115,6 +117,9 @@ class EpisodicMemoryNode(Node):
         self.create_subscription(String, '/speech_response', self._cb_said, 10)
         self.create_subscription(String, '/current_speaker', self._cb_speaker, 10)
         self.create_subscription(String, '/observations', self._cb_observation, 10)
+        # Sound events belong on the timeline as much as speech does — "πότε
+        # χτύπησε το κουδούνι;" is exactly the kind of question this answers.
+        self.create_subscription(String, '/sound_events', self._cb_sound, 10)
 
         latched = QoSProfile(depth=1,
                              durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -200,6 +205,17 @@ class EpisodicMemoryNode(Node):
         text = latest.get('text')
         if text:
             self.log.add(KIND_OBSERVED, text, room=latest.get('room'))
+
+    def _cb_sound(self, msg: String):
+        try:
+            data = json.loads(msg.data) or {}
+        except json.JSONDecodeError:
+            return
+        # Only what cleared the gate. The `candidates` list is everything above
+        # threshold each window and would bury the timeline in near-misses.
+        for entry in (data.get('feed') or [])[-1:]:
+            if entry.get('event') in (data.get('fired') or []):
+                self.log.add(KIND_SOUND, entry.get('text', ''))
 
     # ── recall ────────────────────────────────────────────────────────────────
 

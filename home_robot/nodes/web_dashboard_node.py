@@ -437,6 +437,8 @@ class DashboardNode(Node):
         # ── Gestures / observations / timeline ──────────────────────────────
         self.create_subscription(String, '/gesture_status', self._cb_gesture, 10)
         self.create_subscription(String, '/observations', self._cb_observations, 10)
+        self.create_subscription(String, '/vocab/state', self._cb_vocab, latch)
+        self.create_subscription(String, '/sound_events', self._cb_sound, latch)
         # Both latched by their publishers, so a tab opened long after the fact
         # still paints a full timeline instead of an empty list.
         self.create_subscription(String, '/episodic/timeline', self._cb_timeline, latch)
@@ -468,6 +470,7 @@ class DashboardNode(Node):
         # one code path.
         self._gesture_go_pub = self.create_publisher(EmptyMsg, "/gesture_go", 10)
         self._recall_pub = self.create_publisher(String, '/episodic/query', 10)
+        self._vocab_pub = self.create_publisher(String, '/vocab/set', 10)
         # Same topic the llm_bridge `check` tool publishes, so the button and
         # "πήγαινε να δεις αν…" take one code path.
         self._mission_pub = self.create_publisher(String, '/mission/start', 10)
@@ -1171,6 +1174,20 @@ class DashboardNode(Node):
             return
         self._state.broadcast({'type': 'timeline', **data})
 
+    def _cb_vocab(self, msg: String):
+        try:
+            data = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        self._state.broadcast({'type': 'vocab', **data})
+
+    def _cb_sound(self, msg: String):
+        try:
+            data = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        self._state.broadcast({'type': 'sound', **data})
+
     def _cb_episodic_answer(self, msg: String):
         # Not remembered: an answer belongs to the question that was just asked,
         # so replaying it to a tab that connects later would be confusing.
@@ -1533,6 +1550,10 @@ class DashboardNode(Node):
             self._gesture_go_pub.publish(EmptyMsg())
         elif t == 'recall':
             self._recall_pub.publish(String(data=str(msg.get('when', ''))))
+        elif t == 'vocab':
+            # An empty string clears the vocabulary and idles the detector,
+            # which is how the Stop button releases the GPU.
+            self._vocab_pub.publish(String(data=str(msg.get('what', ''))))
         elif t == 'overlay':
             self._overlay = bool(msg.get('on', True))
         elif t == 'follow':
@@ -2724,6 +2745,77 @@ button{font:inherit;color:inherit}
       </div>
     </section>
 
+    <!-- ── Open-vocabulary search ──────────────────────────────── -->
+    <section class="pane" id="p-vocab">
+      <div class="card" style="margin-bottom:9px">
+        <h3>Ψάξε ό,τι θέλεις <span class="badge" id="vc-badge">—</span></h3>
+        <div class="row">
+          <input id="vc-q" placeholder="π.χ. κλειδιά, γυαλιά, φορτιστής"
+            style="flex:1;min-width:150px;background:#232329;border:1px solid #2c2c32;
+            border-radius:8px;color:#e4e4e7;padding:7px 10px;font-size:12.5px"
+            autocomplete="off">
+          <button class="btn pri" id="b-vc-go">🔎 Ψάξε</button>
+          <button class="btn" id="b-vc-stop" title="Ελευθερώνει το iGPU">■</button>
+        </div>
+        <div class="row" style="margin-top:8px;flex-wrap:wrap;gap:6px" id="vc-chips"></div>
+        <div id="vc-msg" style="font-size:11.5px;color:#71717a;margin-top:9px"></div>
+      </div>
+      <div class="card">
+        <h3>Τι βλέπει <span class="badge" id="vc-count">—</span></h3>
+        <div id="vc-hits" style="font-size:12.5px;line-height:1.7">
+          <span style="color:#71717a">Δεν ψάχνει τίποτα.</span>
+        </div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:12px;line-height:1.6">
+          Το κανονικό YOLO ξέρει 80 σταθερές κατηγορίες — κούπες, καρέκλες,
+          βιβλία. «Κλειδιά», «φορτιστής», «πορτοφόλι» ΔΕΝ υπάρχουν σε αυτές.
+          Το YOLO-World παίρνει τη λίστα ως κείμενο, οπότε ψάχνει ό,τι του πεις.
+        </p>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          ‼️ Ξεκινά ΜΟΝΟ όταν ζητήσεις κάτι και σβήνει μόνο του μετά από 90
+          δευτερόλεπτα. Ένας δεύτερος ανιχνευτής που τρέχει συνέχεια στο ίδιο
+          iGPU είναι ακριβώς το πρόβλημα φόρτου που έχει ξαναχτυπήσει εδώ.
+          Θέλει <code>use_open_vocab:=true</code>.
+        </p>
+      </div>
+    </section>
+
+    <!-- ── Sound events ────────────────────────────────────────── -->
+    <section class="pane" id="p-sound">
+      <div class="card" style="margin-bottom:9px">
+        <h3>Τι ακούω <span class="badge" id="sd-badge">—</span></h3>
+        <div class="row" style="align-items:center;gap:16px">
+          <canvas id="sd-compass" width="120" height="120"
+                  style="width:120px;height:120px;flex:0 0 auto"></canvas>
+          <div class="grid2" style="flex:1;min-width:170px">
+            <span class="k">Κατεύθυνση</span><span class="v" id="sd-bearing">—</span>
+            <span class="k">Γωνία</span><span class="v" id="sd-angle">—</span>
+            <span class="k">Ομιλία</span><span class="v" id="sd-speech">—</span>
+            <span class="k">Παράθυρα</span><span class="v" id="sd-windows">—</span>
+          </div>
+        </div>
+        <div id="sd-cands" style="font-size:11.5px;color:#a1a1aa;margin-top:10px;
+          line-height:1.6"></div>
+      </div>
+      <div class="card">
+        <h3>Ιστορικό ήχων</h3>
+        <div id="sd-feed" style="font-size:12.5px;line-height:1.75">
+          <span style="color:#71717a">Τίποτα ακόμη.</span>
+        </div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:12px;line-height:1.6">
+          Το YAMNet αναγνωρίζει 521 ήχους· εδώ κρατάμε τους δώδεκα που αφορούν
+          ένα σπίτι: κουδούνι, σπασμένο γυαλί, συναγερμός, μωρό που κλαίει,
+          νερό που τρέχει, κάτι που έπεσε. Η ΟΜΙΛΙΑ δεν αναγγέλλεται ποτέ —
+          είναι ο πιο συχνός ήχος σε ένα σπίτι και τον χειρίζεται ήδη η φωνή.
+        </p>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          ‼️ ΔΕΝ ανοίγει το μικρόφωνο. Διαβάζει το <code>/mic/audio</code> που
+          δημοσιεύει ο κόμβος wake word — δεύτερο ALSA stream στην ίδια συσκευή
+          θα τσακωνόταν με το «Έι ρομπότ». Θέλει
+          <code>use_sound_events:=true</code>.
+        </p>
+      </div>
+    </section>
+
     <!-- ── Proactive observations ──────────────────────────────── -->
     <section class="pane" id="p-obs">
       <div class="card" style="margin-bottom:9px">
@@ -2973,6 +3065,8 @@ const TABS = [
   ['cost',   '🧱', 'Costmap'],
   ['nerf',   '✨', 'NeRF'],
   ['point',  '👉', 'Χειρονομίες'],
+  ['vocab',  '🔎', 'Αναζήτηση'],
+  ['sound',  '👂', 'Ήχοι'],
   ['obs',    '💡', 'Παρατηρήσεις'],
   ['time',   '🕐', 'Χρονολόγιο'],
   ['llm',    '💬', 'Φωνή/LLM'],
@@ -3336,6 +3430,8 @@ const HANDLERS = {
   objects(m){ $('objects').textContent = m.text || '—'; },
   situation(m){ $('situation').textContent = m.text || '—'; },
   gesture(m){ gestureState = m; drawPointRing(); },
+  vocab(m){ renderVocab(m); },
+  sound(m){ soundState = m; renderSound(m); },
   observations(m){ renderObservations(m); },
   timeline(m){ renderTimeline(m); },
   recall_answer(m){ $('tl-answer').textContent = m.text || ''; },
@@ -3462,6 +3558,89 @@ function drawPointRing(){
   // The button is only meaningful once a point has been confirmed at least
   // once — `last` survives after the arm drops, which is what it acts on.
   $('b-pt-go').disabled = !m.last;
+}
+
+// ── open-vocabulary search ─────────────────────────────────────────────────
+function renderVocab(m){
+  const active = !!m.active;
+  $('vc-badge').textContent = m.error ? t('άγνωστο')
+    : (!m.ready ? t('φορτώνει…') : (active ? t('ψάχνει') : t('αδρανές')));
+  $('vc-msg').textContent = m.error ? m.error
+    : (active ? t('Ψάχνω: ') + (m.greek||m.vocabulary||[]).join(', ') : '');
+
+  const hits = m.hits || [];
+  $('vc-count').textContent = active ? hits.length + ' ' + t('ευρήματα') : '—';
+  const el = $('vc-hits');
+  if(!active){
+    el.innerHTML = '<span style="color:#71717a">'+esc(t('Δεν ψάχνει τίποτα.'))+'</span>';
+    return;
+  }
+  if(!hits.length){
+    el.innerHTML = '<span style="color:#71717a">'+esc(t('Δεν το βλέπω.'))+'</span>';
+    return;
+  }
+  el.innerHTML = hits.map(h=>{
+    // Distance is null whenever depth was unavailable — show a dash rather
+    // than 0 m, which would read as "right at the camera".
+    const d = (h.z==null) ? '—' : h.z.toFixed(2)+' m';
+    return `<div style="padding:6px 0;border-bottom:1px solid #232329">
+      <span style="color:#4ade80">${esc(h.label)}</span>
+      <span style="color:#71717a"> ${(h.conf*100).toFixed(0)}% · ${esc(d)}</span></div>`;
+  }).join('');
+}
+
+// ── sound events ───────────────────────────────────────────────────────────
+let soundState = null;
+
+function renderSound(m){
+  $('sd-badge').textContent = m.listening ? t('ακούει') : t('σε παύση');
+  $('sd-bearing').textContent = m.bearing || '—';
+  $('sd-angle').textContent   = (m.angle==null) ? '—' : Math.round(m.angle)+'°';
+  $('sd-speech').textContent  = m.speech ? (m.speech*100).toFixed(0)+'%' : '—';
+  $('sd-windows').textContent = m.windows==null ? '—' : m.windows;
+
+  const cands = m.candidates || [];
+  $('sd-cands').textContent = cands.length
+    ? cands.map(c=>`${c.greek} ${(c.score*100).toFixed(0)}%`).join(' · ')
+    : t('ησυχία');
+
+  const feed = (m.feed||[]).slice().reverse();
+  const el = $('sd-feed');
+  if(!feed.length){
+    el.innerHTML = '<span style="color:#71717a">'+esc(t('Τίποτα ακόμη.'))+'</span>';
+  } else {
+    el.innerHTML = feed.map(e=>{
+      const tm = new Date((e.ts||0)*1000).toLocaleTimeString('el-GR',
+        {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+      return `<div style="padding:6px 0;border-bottom:1px solid #232329">
+        <span style="color:#52525b;font-variant-numeric:tabular-nums">${esc(tm)}</span>
+        &nbsp;${esc(e.text||'')}</div>`;
+    }).join('');
+  }
+  drawCompass(m.angle);
+}
+
+function drawCompass(angle){
+  const c=$('sd-compass'); if(!c) return;
+  const g=c.getContext('2d'), S=c.width, R=S/2-10;
+  g.clearRect(0,0,S,S);
+  g.beginPath(); g.arc(S/2,S/2,R,0,Math.PI*2);
+  g.strokeStyle='#2c2c32'; g.lineWidth=2; g.stroke();
+  // Nose of the robot, so the wedge is read relative to something.
+  g.beginPath(); g.moveTo(S/2,S/2-R); g.lineTo(S/2,S/2-R+9);
+  g.strokeStyle='#52525b'; g.lineWidth=3; g.stroke();
+  if(angle==null){
+    g.fillStyle='#52525b'; g.font='600 12px system-ui';
+    g.textAlign='center'; g.textBaseline='middle';
+    g.fillText('—', S/2, S/2);
+    return;
+  }
+  // The XVF3800 grows counter-clockwise from straight ahead; canvas angles run
+  // clockwise from +x, hence the negation and the quarter-turn offset.
+  const rad = -angle*Math.PI/180 - Math.PI/2;
+  g.beginPath(); g.moveTo(S/2,S/2);
+  g.arc(S/2,S/2,R-3, rad-0.35, rad+0.35); g.closePath();
+  g.fillStyle='rgba(96,165,250,.55)'; g.fill();
 }
 
 // ── proactive observations ─────────────────────────────────────────────────
@@ -3884,6 +4063,29 @@ $('b-pt-go').addEventListener('click',()=>{
   send({type:'gesture_go'});
   $('pt-msg').textContent = t('Στάλθηκε.');
   setTimeout(()=>{ $('pt-msg').textContent=''; }, 2500);
+});
+
+// ── open-vocabulary search ─────────────────────────────────────────────────
+function askVocab(q){
+  send({type:'vocab', what:q});
+  $('vc-msg').textContent = t('Ψάχνω: ') + q;
+}
+$('b-vc-go').addEventListener('click',()=>{
+  const q=$('vc-q').value.trim(); if(q) askVocab(q);
+});
+$('vc-q').addEventListener('keydown',e=>{
+  if(e.key==='Enter'){ const q=$('vc-q').value.trim(); if(q) askVocab(q); }
+});
+// Empty string clears the vocabulary, which is what idles the detector.
+$('b-vc-stop').addEventListener('click',()=>send({type:'vocab', what:''}));
+// ‼️ Same rule as the timeline chips: DISPLAY translated, SEND Greek. The
+// vocabulary mapping is Greek-stem based.
+['κλειδιά','γυαλιά','φορτιστής','τηλεκοντρόλ','πορτοφόλι'].forEach(q=>{
+  const b=document.createElement('button');
+  b.className='btn'; b.textContent=t(q);
+  b.style.fontSize='11.5px'; b.style.padding='5px 9px';
+  b.onclick=()=>{ $('vc-q').value=t(q); askVocab(q); };
+  $('vc-chips').appendChild(b);
 });
 
 // ── timeline ───────────────────────────────────────────────────────────────

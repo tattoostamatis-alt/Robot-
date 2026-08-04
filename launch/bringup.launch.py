@@ -738,6 +738,39 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('use_episodic', default='true')),
     )
 
+    # ── Open-vocabulary detection (YOLO-World) ────────────────────
+    # Rides use_perception because it shares the camera and the iGPU, but it is
+    # IDLE until something asks for a word COCO does not have, and returns to
+    # idle after idle_timeout. A second detector running continuously on this
+    # iGPU is precisely the load problem this project keeps hitting.
+    open_vocab_detector = Node(
+        package='home_robot',
+        executable='open_vocab_detector.py',
+        name='open_vocab_detector',
+        output='screen',
+        parameters=[{
+            'idle_timeout': LaunchConfiguration('vocab_idle_timeout', default='90.0'),
+            'conf':         LaunchConfiguration('vocab_conf', default='0.05'),
+        }],
+        condition=IfCondition(LaunchConfiguration('use_open_vocab', default='false')),
+    )
+
+    # ── Sound events (YAMNet over the shared mic topic) ───────────
+    # Needs the wake word node: that is what owns the ALSA stream and
+    # republishes /mic/audio. ~5 ms per window, so it is cheap enough to run
+    # continuously — but only when there is actually audio to read.
+    sound_event_node = Node(
+        package='home_robot',
+        executable='sound_event_node.py',
+        name='sound_event_node',
+        output='screen',
+        parameters=[{
+            'threshold': LaunchConfiguration('sound_threshold', default='0.35'),
+            'speak':     LaunchConfiguration('sound_speak', default='true'),
+        }],
+        condition=IfCondition(LaunchConfiguration('use_sound_events', default='false')),
+    )
+
     # ── Face detection (YuNet on NPU) ─────────────────────────────
     face_detection_node = Node(
         package='home_robot',
@@ -1208,6 +1241,8 @@ def generate_launch_description():
         DeclareLaunchArgument('use_semantic_costmap',   default_value='false'),
         DeclareLaunchArgument('use_object_memory',      default_value='false'),
         DeclareLaunchArgument('use_episodic',           default_value='true'),
+        DeclareLaunchArgument('use_open_vocab',         default_value='false'),
+        DeclareLaunchArgument('use_sound_events',       default_value='false'),
         DeclareLaunchArgument('gesture_auto_goal',      default_value='false'),
         DeclareLaunchArgument('proactive',              default_value='true'),
         DeclareLaunchArgument('use_sim_time',            default_value='false'),
@@ -1251,6 +1286,8 @@ def generate_launch_description():
         gesture_node,
         proactive_observer_node,
         episodic_memory_node,
+        open_vocab_detector,
+        sound_event_node,
         tracker_node,
         diarization_node_action,
         recovery_node,

@@ -112,6 +112,13 @@ _GROUPS = [
     # the trigger is the recall verb ('τι έγινε', 'θυμάσαι τι', 'τι είπε') or
     # the interrogative 'πότε'; the day word only narrows the window later,
     # inside episodic.parse_time_window.
+    # "βρες τα κλειδιά", "ψάξε το πορτοφόλι". Open vocabulary, so it cannot be
+    # keyed on object names — the whole point is that the noun is unknown in
+    # advance. Keyed on the SEARCH verb instead. 'βρε\w*' also matches "βρες"
+    # and "βρήκες"; it is already in ACTION_RE, so no new false-positive class.
+    (['find'],
+     r'\bβρες\b|\bβρε\b|ψαξ\w*|ψαχν\w*|εντοπισ\w*|\bχαθηκ\w*|\bεχασα\b'),
+
     (['recall'],
      r'\bποτε\b|εγινε|εγιναν|συνεβη|θυμασαι\s+τι|τι\s+ειπ\w*|'
      r'ιστορικ\w*|νωριτερα'),

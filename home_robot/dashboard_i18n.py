@@ -568,6 +568,83 @@ TRANSLATIONS = {
     'σήμερα το πρωί':    ('this morning', 'heute Morgen'),
     'χθες':              ('yesterday', 'gestern'),
     'πριν από 2 ώρες':   ('2 hours ago', 'vor 2 Stunden'),
+
+    # ── open-vocabulary search pane ───────────────────────────────────────
+    'Αναζήτηση':         ('Search', 'Suche'),
+    'Ψάξε ό,τι θέλεις':  ('Search for anything', 'Suche irgendetwas'),
+    '🔎 Ψάξε':           ('🔎 Search', '🔎 Suchen'),
+    'π.χ. κλειδιά, γυαλιά, φορτιστής': ('e.g. keys, glasses, charger',
+                                        'z.B. Schlüssel, Brille, Ladegerät'),
+    'Ελευθερώνει το iGPU': ('Releases the iGPU', 'Gibt die iGPU frei'),
+    'Τι βλέπει':         ('What it sees', 'Was er sieht'),
+    'Δεν ψάχνει τίποτα.': ('Not searching for anything.', 'Sucht nach nichts.'),
+    'Δεν το βλέπω.':     ('I do not see it.', 'Ich sehe es nicht.'),
+    'ευρήματα':          ('hits', 'Treffer'),
+    'Ψάχνω: ':           ('Searching for: ', 'Suche nach: '),
+    'φορτώνει…':         ('loading…', 'lädt…'),
+    'ψάχνει':            ('searching', 'sucht'),
+    'άγνωστο':           ('unknown', 'unbekannt'),
+    # Chips: displayed translated, but the Greek is what gets sent.
+    'κλειδιά':           ('keys', 'Schlüssel'),
+    'γυαλιά':            ('glasses', 'Brille'),
+    'φορτιστής':         ('charger', 'Ladegerät'),
+    'τηλεκοντρόλ':       ('remote', 'Fernbedienung'),
+    'πορτοφόλι':         ('wallet', 'Geldbörse'),
+    'Το κανονικό YOLO ξέρει 80 σταθερές κατηγορίες — κούπες, καρέκλες, '
+    'βιβλία. «Κλειδιά», «φορτιστής», «πορτοφόλι» ΔΕΝ υπάρχουν σε αυτές. '
+    'Το YOLO-World παίρνει τη λίστα ως κείμενο, οπότε ψάχνει ό,τι του πεις.':
+        ('Ordinary YOLO knows 80 fixed classes — cups, chairs, books. "Keys", '
+         '"charger" and "wallet" are simply not among them. YOLO-World takes '
+         'the class list as text, so it looks for whatever you name.',
+         'Normales YOLO kennt 80 feste Klassen — Tassen, Stühle, Bücher. '
+         '„Schlüssel“, „Ladegerät“ und „Geldbörse“ sind schlicht nicht dabei. '
+         'YOLO-World nimmt die Klassenliste als Text und sucht daher, was immer '
+         'du nennst.'),
+    '‼️ Ξεκινά ΜΟΝΟ όταν ζητήσεις κάτι και σβήνει μόνο του μετά από 90 '
+    'δευτερόλεπτα. Ένας δεύτερος ανιχνευτής που τρέχει συνέχεια στο ίδιο '
+    'iGPU είναι ακριβώς το πρόβλημα φόρτου που έχει ξαναχτυπήσει εδώ. '
+    'Θέλει':
+        ('‼️ It starts ONLY when you ask for something and idles again after 90 '
+         'seconds. A second detector running continuously on the same iGPU is '
+         'exactly the load problem that has bitten this project before. '
+         'Requires',
+         '‼️ Er startet NUR auf Anfrage und schaltet nach 90 Sekunden wieder ab. '
+         'Ein zweiter Detektor, der dauerhaft auf derselben iGPU läuft, ist '
+         'genau das Lastproblem, das dieses Projekt schon getroffen hat. '
+         'Benötigt'),
+
+    # ── sound events pane ─────────────────────────────────────────────────
+    'Ήχοι':              ('Sounds', 'Geräusche'),
+    'Τι ακούω':          ('What I hear', 'Was ich höre'),
+    'Κατεύθυνση':        ('Direction', 'Richtung'),
+    'Ομιλία':            ('Speech', 'Sprache'),
+    'Παράθυρα':          ('Windows', 'Fenster'),
+    'Ιστορικό ήχων':     ('Sound history', 'Geräuschverlauf'),
+    'Τίποτα ακόμη.':     ('Nothing yet.', 'Noch nichts.'),
+    'ακούει':            ('listening', 'hört zu'),
+    'σε παύση':          ('paused', 'pausiert'),
+    'ησυχία':            ('quiet', 'still'),
+    'Το YAMNet αναγνωρίζει 521 ήχους· εδώ κρατάμε τους δώδεκα που αφορούν '
+    'ένα σπίτι: κουδούνι, σπασμένο γυαλί, συναγερμός, μωρό που κλαίει, '
+    'νερό που τρέχει, κάτι που έπεσε. Η ΟΜΙΛΙΑ δεν αναγγέλλεται ποτέ — '
+    'είναι ο πιο συχνός ήχος σε ένα σπίτι και τον χειρίζεται ήδη η φωνή.':
+        ('YAMNet recognises 521 sounds; we keep the dozen that matter in a '
+         'house: doorbell, breaking glass, alarm, a baby crying, running water, '
+         'something falling. SPEECH is never announced — it is the most common '
+         'sound in a home and the voice stack already handles it.',
+         'YAMNet erkennt 521 Geräusche; wir behalten das Dutzend, das in einem '
+         'Haus zählt: Türklingel, Glasbruch, Alarm, weinendes Baby, laufendes '
+         'Wasser, etwas fällt. SPRACHE wird nie gemeldet — sie ist das '
+         'häufigste Geräusch daheim und die Sprachkette behandelt sie bereits.'),
+    '‼️ ΔΕΝ ανοίγει το μικρόφωνο. Διαβάζει το':
+        ('‼️ It does NOT open the microphone. It reads',
+         '‼️ Er öffnet das Mikrofon NICHT. Er liest'),
+    'που δημοσιεύει ο κόμβος wake word — δεύτερο ALSA stream στην ίδια '
+    'συσκευή θα τσακωνόταν με το «Έι ρομπότ». Θέλει':
+        ('published by the wake word node — a second ALSA stream on the same '
+         'device would fight the wake word for it. Requires',
+         'das vom Wakeword-Knoten veröffentlicht wird — ein zweiter ALSA-Stream '
+         'auf demselben Gerät würde mit dem Wakeword konkurrieren. Benötigt'),
 }
 
 

@@ -131,6 +131,7 @@ def test_every_tool_is_reachable():
         ('μάζεψε τα παιχνίδια', 0),
         ('πήγαινε να δεις αν έκλεισα το παράθυρο', 0),
         ('πήγαινε εκεί', 0), ('τι έγινε σήμερα', 0),
+        ('βρες τα κλειδιά μου', 0),
     ]:
         covered |= names(text)
     # `stop` is gated by stop_command.py before the model, never routed here.
@@ -172,3 +173,15 @@ def test_recall_does_not_fire_on_ordinary_questions():
 def test_here_and_there_do_not_route_other_tools():
     # 'εδώ'/'εκεί' are meaningless to every other tool, so the group is narrow.
     assert names('έλα εδώ') & {'goto_pointed'}
+
+
+def test_search_verb_routes_find():
+    """Open vocabulary means the NOUN cannot be the trigger — the object is
+    unknown in advance — so the search verb is."""
+    assert 'find' in names('βρες τα κλειδιά μου')
+    assert 'find' in names('ψάξε το πορτοφόλι')
+    assert 'find' in names('έχασα τα γυαλιά μου')
+
+
+def test_find_does_not_fire_on_navigation():
+    assert 'find' not in names('πήγαινε στο σαλόνι')

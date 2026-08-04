@@ -15,3 +15,10 @@ maps/*.data
 # Quantized ONNX model — regenerate via scripts/quantize_yolo.sh
 *.onnx
 training/wake_word_hey_robot/rate_sweep_wav/
+
+# Open-vocabulary weights, fetched by scripts/fetch_perception_models.sh.
+# ultralytics writes these into the working directory on first use: the
+# YOLO-World checkpoint (25 MB) and CLIP ViT-B/32 (338 MB), which set_classes
+# downloads to WEIGHTS_DIR to encode the text prompts.
+yolov8s-worldv2.pt
+weights/

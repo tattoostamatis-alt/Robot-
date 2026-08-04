@@ -48,6 +48,7 @@ from home_robot.status_query import (ROOM_NAMES_EL, format_location,
                                      is_status_query, wants_battery)
 from home_robot.stop_command import is_stop_command, strip_accents
 from home_robot.tool_router import select_tools
+from home_robot.vocabulary import greek_for, to_prompt
 from home_robot import desktop
 from nav2_msgs.action import NavigateToPose
 from rclpy.action import ActionClient
@@ -276,6 +277,16 @@ TOOLS = [
         'parameters': {'type': 'object', 'properties': {}},
     }},
     {'type': 'function', 'function': {
+        # Open vocabulary: unlike pick/fetch, which are limited to the COCO-80
+        # object_detector, this one takes ANY noun.
+        'name': 'find',
+        'description': ('Ψάξε με τα μάτια για ΟΠΟΙΟΔΗΠΟΤΕ αντικείμενο, ακόμη κι '
+                        'άγνωστο ("βρες τα κλειδιά", "ψάξε το πορτοφόλι")'),
+        'parameters': {'type': 'object', 'properties': {
+            'object': {'type': 'string', 'description': 'π.χ. κλειδιά, γυαλιά, φορτιστής'},
+        }, 'required': ['object']},
+    }},
+    {'type': 'function', 'function': {
         # The floor point comes from gesture_node, which never drives on its
         # own. Saying "πήγαινε εκεί" is the confirmation.
         'name': 'goto_pointed',
@@ -408,6 +419,7 @@ class LLMBridgeNode(Node):
         self.gesture_go_pub = self.create_publisher(Empty, '/gesture_go', 10)
         self.episodic_query_pub = self.create_publisher(
             String, '/episodic/query', 10)
+        self.vocab_pub = self.create_publisher(String, '/vocab/set', 10)
         self.pick_pub = self.create_publisher(String, 'pick_command', 10)
         self.follow_pub = self.create_publisher(Bool, 'follow_command', 10)
         self.mission_pub = self.create_publisher(String, 'mission/start', 10)
@@ -435,6 +447,15 @@ class LLMBridgeNode(Node):
         self._gesture_point = None
         self._episodic_event = threading.Event()
         self._episodic_answer = None
+        # Open-vocabulary search. `_vocab_baseline` is the inference count at
+        # request time; see _cb_vocab_state.
+        self._vocab_lock = threading.Lock()
+        self._vocab_event = threading.Event()
+        self._vocab_hits = None
+        self._vocab_inferences = 0
+        self._vocab_baseline = None
+        self.declare_parameter('find_timeout', 8.0)
+        self.find_timeout = self.get_parameter('find_timeout').value
 
         # Camera frame — encoded to JPEG once on arrival, reused per message
         self._bridge = CvBridge()
@@ -464,6 +485,8 @@ class LLMBridgeNode(Node):
                                  self._cb_gesture_status, 10)
         self.create_subscription(String, '/episodic/answer',
                                  self._cb_episodic_answer, 10)
+        self.create_subscription(String, '/vocab/state',
+                                 self._cb_vocab_state, 10)
         self.create_subscription(String, 'situation_context', self._on_situation, 10)
         self.create_subscription(Image, '/camera/camera/color/image_raw', self._on_image, 1)
 
@@ -591,6 +614,61 @@ class LLMBridgeNode(Node):
             parts.append(f"Μπαταρία: {s['battery_pct']}%")
         parts.append(f"CPU: {s.get('cpu_pct', '?')}%  RAM: {s.get('ram_pct', '?')}%")
         return 'Τρέχουσα κατάσταση:\n' + '\n'.join(f'- {p}' for p in parts)
+
+    def _find_object(self, name):
+        """Look for an arbitrary object via the open-vocabulary detector.
+
+        Distinct from `pick`/`fetch`, which go through object_detector and are
+        therefore limited to the COCO 80. This one takes any noun — but it only
+        LOOKS; it does not drive or grasp.
+        """
+        prompt = to_prompt(name)
+        if prompt is None:
+            return {'status': 'error', 'action': 'find', 'object': name,
+                    'reason': f'δεν ξέρω τι είναι «{name}»'}
+
+        # ‼️ Wait for an inference that happened AFTER this request. The
+        # detector publishes its state on set too, with hits == [], and
+        # settling on that would answer "δεν το βλέπω" before it had looked.
+        with self._vocab_lock:
+            self._vocab_baseline = self._vocab_inferences
+            self._vocab_hits = None
+        self._vocab_event.clear()
+        self.vocab_pub.publish(String(data=json.dumps([prompt])))
+
+        # The detector has to encode the prompt and then wait for a camera
+        # frame, so give it noticeably longer than the RAG round trip.
+        if not self._vocab_event.wait(timeout=self.find_timeout):
+            return {'status': 'error', 'action': 'find', 'object': name,
+                    'reason': 'open_vocab_detector did not answer — is '
+                              'use_open_vocab:=true?'}
+
+        hits = self._vocab_hits or []
+        if not hits:
+            return {'status': 'ok', 'action': 'find', 'object': name,
+                    'found': False, 'greek': greek_for(prompt)}
+        best = max(hits, key=lambda h: h.get('conf', 0))
+        return {'status': 'ok', 'action': 'find', 'object': name,
+                'found': True, 'greek': greek_for(prompt),
+                'confidence': best.get('conf'),
+                'distance_m': best.get('z')}
+
+    def _cb_vocab_state(self, msg):
+        try:
+            state = json.loads(msg.data) or {}
+        except (json.JSONDecodeError, TypeError):
+            return
+        count = state.get('inferences', 0)
+        with self._vocab_lock:
+            self._vocab_inferences = count
+            baseline = self._vocab_baseline
+            # A miss is a legitimate answer, so settle on the first inference
+            # that ran after the request rather than on a non-empty hit list —
+            # otherwise "δεν το βλέπω" would always time out instead.
+            if baseline is not None and count > baseline:
+                self._vocab_hits = state.get('hits') or []
+                self._vocab_baseline = None
+                self._vocab_event.set()
 
     def _goto_pointed(self):
         """Act on the last confirmed pointing gesture.
@@ -1190,6 +1268,9 @@ class LLMBridgeNode(Node):
 
         elif name == 'dock':
             return self._start_docking()
+
+        elif name == 'find':
+            return self._find_object(args.get('object') or '')
 
         elif name == 'goto_pointed':
             return self._goto_pointed()
