@@ -2442,14 +2442,20 @@ button{font:inherit;color:inherit}
      which looks deliberate.
 
      The basis only has to keep a cell wider than ~45pt on a 320pt iPhone SE —
-     below that the icon and the label collide. 16.66% is 53pt there, and six
-     per row is a comfortable count to scan. */
+     below that the icon and the label collide.
+
+     Was 16.66% (six per row). At 21 tabs that is four rows = 214px, which on a
+     568pt iPhone SE is 38% of the screen given to navigation. 14.28% is seven
+     per row, so the same 21 tabs need three rows (~160px) and a cell is still
+     45.7pt on an SE — measured in WebKit, labels ellipsis rather than collide.
+     Past this the basis cannot shrink further and the dashboard needs real
+     navigation instead of a flat bar. */
   /* The home indicator sits over the last row on a notched iPhone; without the
      inset the bottom row's labels are half-covered by it. */
   #tabs{width:100%;height:auto;display:flex;flex-wrap:wrap;padding:0;
     border-right:none;border-top:1px solid #2c2c32;
     padding-bottom:env(safe-area-inset-bottom,0px)}
-  .tab{flex:0 0 16.66%;flex-direction:column;gap:2px;padding:6px 2px;
+  .tab{flex:0 0 14.28%;flex-direction:column;gap:2px;padding:6px 2px;
     font-size:9.5px;border-left:none;border-top:3px solid transparent;
     justify-content:center;text-align:center;min-width:0}
   /* Long labels (Βραχίονας, Ρυθμίσεις) must shrink, not widen the cell and
@@ -4080,13 +4086,36 @@ $('vc-q').addEventListener('keydown',e=>{
 $('b-vc-stop').addEventListener('click',()=>send({type:'vocab', what:''}));
 // ‼️ Same rule as the timeline chips: DISPLAY translated, SEND Greek. The
 // vocabulary mapping is Greek-stem based.
-['κλειδιά','γυαλιά','φορτιστής','τηλεκοντρόλ','πορτοφόλι'].forEach(q=>{
-  const b=document.createElement('button');
-  b.className='btn'; b.textContent=t(q);
-  b.style.fontSize='11.5px'; b.style.padding='5px 9px';
-  b.onclick=()=>{ $('vc-q').value=t(q); askVocab(q); };
-  $('vc-chips').appendChild(b);
-});
+const VC_CHIPS = ['κλειδιά','γυαλιά','φορτιστής','τηλεκοντρόλ','πορτοφόλι'];
+
+// ‼️ Built from applyLang(), NEVER at top level.
+//
+// These loops used to run inline, calling t() as the page parsed. t() reads
+// LANG, which is declared with `let` further down the file, so the call landed
+// in the temporal dead zone and threw "Cannot access 'LANG' before
+// initialization" — which aborts the WHOLE script. The tab bar is built by
+// renderTabs() further down still, so nothing after the throw ever ran and the
+// dashboard rendered ZERO tabs. Reported from a phone as "δεν μου δείχνει τα
+// κουμπιά"; it was equally broken on desktop.
+//
+// Rebuilding here also means the chips follow a language switch, which the
+// inline version could not do — it painted once, at load.
+function renderChips(){
+  const build = (host, items, onPick) => {
+    const el = $(host);
+    if(!el) return;
+    el.innerHTML = '';
+    items.forEach(q => {
+      const b = document.createElement('button');
+      b.className = 'btn'; b.textContent = t(q);
+      b.style.fontSize = '11.5px'; b.style.padding = '5px 9px';
+      b.onclick = () => onPick(q);
+      el.appendChild(b);
+    });
+  };
+  build('tl-chips', TL_CHIPS, q => { $('tl-q').value = t(q); askRecall(q); });
+  build('vc-chips', VC_CHIPS, q => { $('vc-q').value = t(q); askVocab(q); });
+}
 
 // ── timeline ───────────────────────────────────────────────────────────────
 function askRecall(q){
@@ -4102,13 +4131,7 @@ $('tl-q').addEventListener('keydown',e=>{
 // ‼️ The chip DISPLAYS a translated label but SENDS the Greek phrase:
 // episodic.parse_time_window matches Greek time words, so an English chip on an
 // English UI would silently fall through to "no period named".
-['σήμερα','σήμερα το πρωί','χθες','πριν από 2 ώρες'].forEach(q=>{
-  const b=document.createElement('button');
-  b.className='btn'; b.textContent=t(q);
-  b.style.fontSize='11.5px'; b.style.padding='5px 9px';
-  b.onclick=()=>{ $('tl-q').value=t(q); askRecall(q); };
-  $('tl-chips').appendChild(b);
-});
+const TL_CHIPS = ['σήμερα','σήμερα το πρωί','χθες','πριν από 2 ώρες'];
 
 $('b-loc').addEventListener('click',()=>send({type:'localize'}));
 $('b-xnav').addEventListener('click',()=>{ goal=null; send({type:'stop'}); draw(); });
@@ -4242,6 +4265,7 @@ function applyLang(){
   }
   document.documentElement.lang = LANG;
   renderTabs();
+  renderChips();
   for(const b of document.querySelectorAll('#lang-buttons .btn'))
     b.classList.toggle('pri', b.dataset.lang === LANG);
   if(document.querySelector('#p-set.active')) mapsRefresh();
