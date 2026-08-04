@@ -62,6 +62,9 @@ from std_msgs.msg import Empty as EmptyMsg
 from std_srvs.srv import Empty
 
 from home_robot.compass import offset_from_known_bearing
+from home_robot.system_settings import (
+    bt_args, parse_bt_devices, parse_devices, parse_volume, parse_wifi_list,
+    volume_args, wifi_connect_args)
 from home_robot.dashboard_i18n import LANGUAGES, as_js_table
 
 import uvicorn
@@ -1320,6 +1323,54 @@ class DashboardNode(Node):
             return
         self._state.broadcast({'type': 'touch', **data})
 
+    # ── system settings (wifi / bluetooth / audio / power) ───────────────────
+    # Everything here shells out, so it all runs on a worker thread: an nmcli
+    # scan takes seconds and would stall the ROS executor.
+
+    @staticmethod
+    def _run(args, timeout=20):
+        try:
+            r = subprocess.run(args, capture_output=True, text=True,
+                               timeout=timeout)
+            return r.stdout or '', r.returncode
+        except Exception as exc:                          # noqa: BLE001
+            return f'{exc}', 1
+
+    def _sys_snapshot(self, note=None, error=None):
+        wifi_out, _ = self._run(
+            ['nmcli', '-t', '-f', 'IN-USE,SSID,SIGNAL,SECURITY',
+             'device', 'wifi', 'list'], timeout=25)
+        dev_out, _ = self._run(
+            ['nmcli', '-t', '-f', 'DEVICE,TYPE,STATE,CONNECTION', 'device'])
+        bt_out, _ = self._run(bt_args('devices'))
+        conn_out, _ = self._run(['bluetoothctl', 'devices', 'Connected'])
+        vol_out, _ = self._run(['pactl', 'get-sink-volume', '@DEFAULT_SINK@'])
+        bt_show, _ = self._run(['bluetoothctl', 'show'])
+        ips, _ = self._run(['hostname', '-I'])
+        ts, _ = self._run(['tailscale', 'ip', '-4'])
+
+        connected = [d['mac'] for d in parse_bt_devices(conn_out)]
+        self._state.broadcast({
+            'type': 'sysnet',
+            'wifi': parse_wifi_list(wifi_out)[:14],
+            'devices': parse_devices(dev_out),
+            'bt_on': 'Powered: yes' in bt_show,
+            'bt': parse_bt_devices(bt_out, connected)[:14],
+            'volume': parse_volume(vol_out),
+            'ips': (ips or '').split(),
+            'tailscale': (ts or '').strip().splitlines()[:1],
+            'note': note,
+            'error': error,
+        }, remember=False)
+
+    def _sys_task(self, args, note, refresh=True, timeout=45):
+        out, rc = self._run(args, timeout=timeout)
+        # ‼️ Never log `args` — a wifi password is in there.
+        self.get_logger().info(f'system settings: {note} (rc={rc})')
+        if refresh:
+            self._sys_snapshot(note=note if rc == 0 else None,
+                               error=None if rc == 0 else (out or '')[:200])
+
     def _cb_echo(self, msg: String):
         try:
             data = json.loads(msg.data)
@@ -1705,6 +1756,39 @@ class DashboardNode(Node):
                     self._listen_ws.add(client)
                 else:
                     self._listen_ws.discard(client)
+        elif t == 'sys_refresh':
+            threading.Thread(target=self._sys_snapshot, daemon=True).start()
+        elif t == 'sys_wifi_connect':
+            args = wifi_connect_args(str(msg.get('ssid', '')),
+                                     msg.get('password') or None)
+            if args:
+                threading.Thread(
+                    target=self._sys_task,
+                    args=(args, f"wifi -> {msg.get('ssid')}"),
+                    daemon=True).start()
+        elif t == 'sys_bt':
+            args = bt_args(str(msg.get('action', '')), msg.get('mac'))
+            if args:
+                threading.Thread(
+                    target=self._sys_task,
+                    args=(args, f"bluetooth {msg.get('action')}"),
+                    daemon=True).start()
+        elif t == 'sys_volume':
+            args = volume_args(msg.get('percent'))
+            if args:
+                threading.Thread(target=self._sys_task,
+                                 args=(args, 'volume'), daemon=True).start()
+        elif t == 'sys_power':
+            # Reboot and shutdown are one tap from losing a running robot, so
+            # the UI confirms and the action is spelled out here explicitly
+            # rather than passed through from the browser.
+            action = str(msg.get('action', ''))
+            cmd = {'reboot': ['sudo', 'systemctl', 'reboot'],
+                   'poweroff': ['sudo', 'systemctl', 'poweroff']}.get(action)
+            if cmd:
+                self.get_logger().warn(f'{action} requested from the dashboard')
+                threading.Thread(target=self._sys_task,
+                                 args=(cmd, action, False), daemon=True).start()
         elif t == 'echo_probe':
             self._echo_pub.publish(String(data=str(msg.get('room', ''))))
         elif t == 'people_add':
@@ -3387,6 +3471,52 @@ button{font:inherit;color:inherit}
         </div>
       </div>
 
+      <div class="card" style="margin-bottom:9px">
+        <h3>Δίκτυο <span class="badge" id="sn-badge">—</span></h3>
+        <div class="grid2" style="margin-bottom:9px">
+          <span class="k">Σύνδεση</span><span class="v" id="sn-conn">—</span>
+          <span class="k">Διευθύνσεις</span><span class="v" id="sn-ips">—</span>
+          <span class="k">Tailscale</span><span class="v" id="sn-ts">—</span>
+        </div>
+        <div id="sn-wifi"></div>
+        <div class="row" style="margin-top:9px">
+          <input id="sn-pass" type="password" placeholder="κωδικός δικτύου"
+            style="flex:1;min-width:130px;background:#232329;border:1px solid #33333d;
+            border-radius:9px;color:#e4e4e7;padding:8px 11px;font-size:12.5px"
+            autocomplete="off">
+          <button class="btn" id="b-sn-scan">🔄 Σάρωση</button>
+        </div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:9px;line-height:1.6">
+          ‼️ Ο κωδικός ταξιδεύει μέσα από αυτή τη σελίδα. Το token του πίνακα
+          είναι αδύναμο και ακούει σε ΟΛΟ το τοπικό δίκτυο — σύνδεσε νέο WiFi
+          από εδώ μόνο αν εμπιστεύεσαι όποιον είναι στο ίδιο δίκτυο.
+        </p>
+      </div>
+
+      <div class="card" style="margin-bottom:9px">
+        <h3>Bluetooth <span class="badge" id="sb-badge">—</span></h3>
+        <div id="sb-list"></div>
+        <div class="row" style="margin-top:9px">
+          <button class="btn" id="b-sb-on">⏻ Ενεργό</button>
+          <button class="btn" id="b-sb-scan">🔍 Αναζήτηση (10s)</button>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:9px">
+        <h3>Ήχος & σύστημα</h3>
+        <div class="row" style="align-items:center">
+          <span class="k" style="flex:0 0 60px">Ένταση</span>
+          <input type="range" id="sv-vol" min="0" max="150" step="5"
+            style="flex:1;min-width:120px">
+          <span class="v" id="sv-val" style="flex:0 0 46px;text-align:right">—</span>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <button class="btn warn" id="b-sys-reboot">↻ Επανεκκίνηση</button>
+          <button class="btn warn" id="b-sys-off">⏻ Τερματισμός</button>
+        </div>
+        <div id="sn-msg" style="font-size:11.5px;color:#71717a;margin-top:9px"></div>
+      </div>
+
       <div class="card" style="flex:1;overflow:auto">
         <h3>Χάρτες <span class="badge" id="map-active">—</span></h3>
         <div id="map-list" style="margin:8px 0"></div>
@@ -3850,6 +3980,7 @@ const HANDLERS = {
   sound(m){ soundState = m; renderSound(m); },
   acoustic(m){ renderAcoustic(m); },
   echo(m){ renderEcho(m); },
+  sysnet(m){ renderSysNet(m); },
   touch(m){ renderTouch(m); },
   observations(m){ renderObservations(m); },
   timeline(m){ renderTimeline(m); },
@@ -3948,6 +4079,75 @@ function renderTouch(m){
   $('tc-weight').textContent = (m.weight === null || m.weight === undefined)
     ? (m.have_reference ? '—' : t('χωρίς αναφορά'))
     : m.weight_el + ' (' + m.weight + ')';
+}
+
+// ── system settings ────────────────────────────────────────────────────────
+function bars(signal){
+  const n = Math.max(1, Math.min(4, Math.ceil(signal / 25)));
+  return '▂▄▆█'.slice(0, n);
+}
+
+function renderSysNet(m){
+  const wifiDev = (m.devices || []).find(d => d.type === 'wifi');
+  $('sn-badge').textContent = wifiDev && wifiDev.state.startsWith('connected')
+    ? t('συνδεδεμένο') : t('εκτός');
+  $('sn-conn').textContent = wifiDev ? (wifiDev.connection || '—') : '—';
+  $('sn-ips').textContent = (m.ips || []).join(', ') || '—';
+  $('sn-ts').textContent = (m.tailscale || []).join(', ') || '—';
+
+  const nets = m.wifi || [];
+  $('sn-wifi').innerHTML = nets.length ? nets.map(n => `
+    <div class="row" style="justify-content:space-between;padding:5px 0;
+      border-bottom:1px solid #232329">
+      <span style="${n.active ? 'color:#4ade80;font-weight:600' : ''}">
+        ${n.secure ? '🔒' : '🔓'} ${esc(n.ssid)}</span>
+      <span style="display:flex;gap:9px;align-items:center">
+        <span style="color:#71717a">${bars(n.signal)} ${n.signal}%</span>
+        ${n.active ? '' : `<button class="btn sn-join" data-ssid="${esc(n.ssid)}"
+           style="font-size:11px;padding:4px 9px">${esc(t('Σύνδεση'))}</button>`}
+      </span></div>`).join('')
+    : '<span style="color:#71717a">' + esc(t('Πάτα σάρωση.')) + '</span>';
+
+  for(const b of document.querySelectorAll('.sn-join')){
+    b.onclick = () => {
+      send({type:'sys_wifi_connect', ssid: b.dataset.ssid,
+            password: $('sn-pass').value});
+      $('sn-pass').value = '';
+      snMsg(t('Συνδέομαι…'));
+    };
+  }
+
+  $('sb-badge').textContent = m.bt_on ? t('ενεργό') : t('ανενεργό');
+  const bt = m.bt || [];
+  $('sb-list').innerHTML = bt.length ? bt.map(d => `
+    <div class="row" style="justify-content:space-between;padding:5px 0;
+      border-bottom:1px solid #232329">
+      <span style="${d.connected ? 'color:#4ade80;font-weight:600' : ''}">
+        ${esc(d.name)}</span>
+      <button class="btn sb-act" data-mac="${esc(d.mac)}"
+        data-act="${d.connected ? 'disconnect' : 'connect'}"
+        style="font-size:11px;padding:4px 9px">
+        ${esc(d.connected ? t('Αποσύνδεση') : t('Σύνδεση'))}</button>
+    </div>`).join('')
+    : '<span style="color:#71717a">' + esc(t('Καμία συσκευή.')) + '</span>';
+
+  for(const b of document.querySelectorAll('.sb-act')){
+    b.onclick = () => { send({type:'sys_bt', action:b.dataset.act,
+                              mac:b.dataset.mac}); snMsg('…'); };
+  }
+
+  if(m.volume !== null && m.volume !== undefined && !volDragging){
+    $('sv-vol').value = m.volume;
+    $('sv-val').textContent = m.volume + '%';
+  }
+  if(m.error) snMsg(m.error);
+  else if(m.note) snMsg(m.note);
+}
+
+function snMsg(text){
+  $('sn-msg').textContent = text;
+  setTimeout(()=>{ if($('sn-msg').textContent === text)
+    $('sn-msg').textContent = ''; }, 8000);
 }
 
 // ── echolocation ───────────────────────────────────────────────────────────
@@ -4980,6 +5180,40 @@ $('b-nerf-go').addEventListener('click',()=>send({type:'nerf_capture', on:true})
 $('b-nerf-stop').addEventListener('click',()=>send({type:'nerf_capture', on:false}));
 $('b-follow').addEventListener('click',()=>send({type:'follow', on:true}));
 $('b-follow-stop').addEventListener('click',()=>send({type:'follow', on:false}));
+
+let volDragging = false;
+$('b-sn-scan').addEventListener('click', ()=>{
+  send({type:'sys_refresh'}); snMsg(t('Σάρωση…'));
+});
+$('b-sb-on').addEventListener('click', ()=>send({type:'sys_bt', action:'on'}));
+$('b-sb-scan').addEventListener('click', ()=>{
+  send({type:'sys_bt', action:'scan'}); snMsg(t('Αναζήτηση…'));
+});
+$('sv-vol').addEventListener('input', e => {
+  volDragging = true; $('sv-val').textContent = e.target.value + '%';
+});
+$('sv-vol').addEventListener('change', e => {
+  volDragging = false;
+  send({type:'sys_volume', percent: parseInt(e.target.value, 10)});
+});
+// Losing a running robot is one tap away, so both of these confirm.
+$('b-sys-reboot').addEventListener('click', ()=>{
+  if(confirm(t('Επανεκκίνηση του υπολογιστή;')))
+    send({type:'sys_power', action:'reboot'});
+});
+$('b-sys-off').addEventListener('click', ()=>{
+  if(confirm(t('Τερματισμός; Θα χρειαστεί να το ανάψεις με το χέρι.')))
+    send({type:'sys_power', action:'poweroff'});
+});
+// Populate when the Settings tab is first opened, not at page load: an nmcli
+// scan takes seconds and nobody is looking at it yet.
+document.addEventListener('click', e => {
+  const tab = e.target.closest('#tabs .tab');
+  if(tab && tab.dataset.pane === 'set' && !window.__sysLoaded){
+    window.__sysLoaded = true;
+    send({type:'sys_refresh'});
+  }
+}, true);
 
 $('b-ec-probe').addEventListener('click', ()=>{
   send({type:'echo_probe'});

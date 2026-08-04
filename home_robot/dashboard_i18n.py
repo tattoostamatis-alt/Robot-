@@ -814,6 +814,42 @@ TRANSLATIONS = {
          '„schwer" und nicht „180 Gramm". Die Messung ist PASSIV: sie steuert '
          'den Arm nie.'),
 
+    # ── system settings (network / bluetooth / audio / power) ─────────────
+    'Δίκτυο':            ('Network', 'Netzwerk'),
+    'Διευθύνσεις':       ('Addresses', 'Adressen'),
+    '🔄 Σάρωση':         ('🔄 Scan', '🔄 Suchen'),
+    'κωδικός δικτύου':   ('network password', 'Netzwerk-Passwort'),
+    'συνδεδεμένο':       ('connected', 'verbunden'),
+    'εκτός':             ('offline', 'offline'),
+    'Πάτα σάρωση.':      ('Press scan.', 'Suchen drücken.'),
+    'Συνδέομαι…':        ('Connecting…', 'Verbinde…'),
+    'Σάρωση…':           ('Scanning…', 'Suche…'),
+    'Αναζήτηση…':        ('Searching…', 'Suche…'),
+    '⏻ Ενεργό':          ('⏻ On', '⏻ Ein'),
+    '🔍 Αναζήτηση (10s)': ('🔍 Search (10s)', '🔍 Suchen (10s)'),
+    'ενεργό':            ('on', 'ein'),
+    'ανενεργό':          ('off', 'aus'),
+    'Αποσύνδεση':        ('Disconnect', 'Trennen'),
+    'Καμία συσκευή.':    ('No devices.', 'Keine Geräte.'),
+    'Ήχος & σύστημα':    ('Audio & system', 'Audio & System'),
+    'Ένταση':            ('Volume', 'Lautstärke'),
+    '↻ Επανεκκίνηση':    ('↻ Reboot', '↻ Neustart'),
+    '⏻ Τερματισμός':     ('⏻ Shut down', '⏻ Herunterfahren'),
+    'Επανεκκίνηση του υπολογιστή;': ('Reboot the computer?',
+                                     'Rechner neu starten?'),
+    'Τερματισμός; Θα χρειαστεί να το ανάψεις με το χέρι.':
+        ('Shut down? You will have to switch it back on by hand.',
+         'Herunterfahren? Du musst ihn von Hand wieder einschalten.'),
+    '‼️ Ο κωδικός ταξιδεύει μέσα από αυτή τη σελίδα. Το token του πίνακα '
+    'είναι αδύναμο και ακούει σε ΟΛΟ το τοπικό δίκτυο — σύνδεσε νέο WiFi '
+    'από εδώ μόνο αν εμπιστεύεσαι όποιον είναι στο ίδιο δίκτυο.':
+        ('‼️ The password travels through this page. The dashboard token is '
+         'weak and it listens on the WHOLE local network — only join a new '
+         'WiFi from here if you trust everyone on that network.',
+         '‼️ Das Passwort läuft über diese Seite. Das Dashboard-Token ist '
+         'schwach und lauscht im GESAMTEN lokalen Netz — verbinde ein neues '
+         'WLAN nur von hier, wenn du allen im Netz vertraust.'),
+
     # ── echolocation ──────────────────────────────────────────────────────
     'Ηχοεντοπισμός':     ('Echolocation', 'Echoortung'),
     'Αντήχηση':          ('Reverberation', 'Nachhall'),
