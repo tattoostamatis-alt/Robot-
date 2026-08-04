@@ -53,7 +53,12 @@ from rcl_interfaces.srv import SetParameters
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from sensor_msgs.msg import Image, Imu, JointState, LaserScan, PointCloud2
+# ‼️ std_msgs/Empty (a message) and std_srvs/Empty (a service) collide by name,
+# and this file needs both — the localize/rtabmap service clients and the
+# gesture_go publisher. Aliasing the message keeps the pre-existing `Empty` as
+# the service, so none of the service call sites below change meaning.
 from std_msgs.msg import Bool, Float32, String
+from std_msgs.msg import Empty as EmptyMsg
 from std_srvs.srv import Empty
 
 from home_robot.dashboard_i18n import LANGUAGES, as_js_table
@@ -429,6 +434,15 @@ class DashboardNode(Node):
         self.create_subscription(Bool, '/tts/speaking', self._cb_speaking, 10)
         self.create_subscription(String, '/situation_context', self._cb_situation, 10)
 
+        # ── Gestures / observations / timeline ──────────────────────────────
+        self.create_subscription(String, '/gesture_status', self._cb_gesture, 10)
+        self.create_subscription(String, '/observations', self._cb_observations, 10)
+        # Both latched by their publishers, so a tab opened long after the fact
+        # still paints a full timeline instead of an empty list.
+        self.create_subscription(String, '/episodic/timeline', self._cb_timeline, latch)
+        self.create_subscription(String, '/episodic/answer',
+                                 self._cb_episodic_answer, 10)
+
         # ── Publishers ──────────────────────────────────────────────────────
         # ‼️ cmd_vel_safe, NOT cmd_vel — the D-pad published to /cmd_vel and the
         # robot never moved, because nothing on this graph relays it: Nav2 drives
@@ -449,6 +463,11 @@ class DashboardNode(Node):
         self._dock_pub = self.create_publisher(Bool, '/dock', 10)
         self._follow_pub = self.create_publisher(Bool, '/follow_command', 10)
         self._nerf_pub = self.create_publisher(Bool, '/nerf/capture', 10)
+        # The gesture "go" button and the timeline search box. Same topics the
+        # `goto_pointed` and `recall` voice tools use, so button and voice take
+        # one code path.
+        self._gesture_go_pub = self.create_publisher(EmptyMsg, "/gesture_go", 10)
+        self._recall_pub = self.create_publisher(String, '/episodic/query', 10)
         # Same topic the llm_bridge `check` tool publishes, so the button and
         # "πήγαινε να δεις αν…" take one code path.
         self._mission_pub = self.create_publisher(String, '/mission/start', 10)
@@ -1128,6 +1147,36 @@ class DashboardNode(Node):
     def _cb_situation(self, msg: String):
         self._state.broadcast({'type': 'situation', 'text': msg.data})
 
+    # ── Gestures / observations / timeline ───────────────────────────────────
+
+    def _cb_gesture(self, msg: String):
+        """Live pointing state. Broadcast as-is; the pane renders the ring."""
+        try:
+            data = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        self._state.broadcast({'type': 'gesture', **data})
+
+    def _cb_observations(self, msg: String):
+        try:
+            data = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        self._state.broadcast({'type': 'observations', **data})
+
+    def _cb_timeline(self, msg: String):
+        try:
+            data = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        self._state.broadcast({'type': 'timeline', **data})
+
+    def _cb_episodic_answer(self, msg: String):
+        # Not remembered: an answer belongs to the question that was just asked,
+        # so replaying it to a tab that connects later would be confusing.
+        self._state.broadcast({'type': 'recall_answer', 'text': msg.data},
+                              remember=False)
+
     # ── System panel ─────────────────────────────────────────────────────────
 
     # Which hwmon chip is which piece of hardware, and what to call it in the
@@ -1478,6 +1527,12 @@ class DashboardNode(Node):
                              daemon=True).start()
         elif t == 'nerf_capture':
             self._nerf_pub.publish(Bool(data=bool(msg.get('on'))))
+        elif t == 'gesture_go':
+            # gesture_node holds the point; it re-checks that one exists, so an
+            # eager click before any gesture is a logged warning, not a goal.
+            self._gesture_go_pub.publish(EmptyMsg())
+        elif t == 'recall':
+            self._recall_pub.publish(String(data=str(msg.get('when', ''))))
         elif t == 'overlay':
             self._overlay = bool(msg.get('on', True))
         elif t == 'follow':
@@ -2632,6 +2687,92 @@ button{font:inherit;color:inherit}
       </div>
     </section>
 
+    <!-- ── Pointing gestures ───────────────────────────────────── -->
+    <section class="pane" id="p-point">
+      <div class="card" style="margin-bottom:9px">
+        <h3>Δείξε με το χέρι <span class="badge" id="pt-badge">—</span></h3>
+        <div class="row" style="align-items:center;gap:16px">
+          <canvas id="pt-ring" width="120" height="120"
+                  style="width:120px;height:120px;flex:0 0 auto"></canvas>
+          <div class="grid2" style="flex:1;min-width:170px">
+            <span class="k">Στόχος X</span><span class="v" id="pt-x">—</span>
+            <span class="k">Στόχος Y</span><span class="v" id="pt-y">—</span>
+            <span class="k">Χέρι</span><span class="v" id="pt-side">—</span>
+            <span class="k">Ευθύτητα</span><span class="v" id="pt-straight">—</span>
+          </div>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <button class="btn pri" id="b-pt-go">👉 Πήγαινε εκεί</button>
+          <span id="pt-msg" style="font-size:11.5px;color:#71717a"></span>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Πώς δουλεύει</h3>
+        <p style="font-size:11.5px;color:#71717a;line-height:1.6">
+          Τεντώνεις το χέρι και δείχνεις στο ΠΑΤΩΜΑ. Το ρομπότ παίρνει τον ώμο και
+          τον καρπό σου από τον σκελετό (pose_node), τα ανεβάζει σε 3D με το βάθος
+          της D435, και προεκτείνει τη γραμμή ώσπου να συναντήσει το δάπεδο.
+          Ο κύκλος γεμίζει καθώς μαζεύονται καρέ που συμφωνούν· γίνεται πράσινος
+          όταν κλειδώσει.
+        </p>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          ‼️ ΔΕΝ οδηγεί μόνο του. Το να δείξεις κάτι γίνεται πολύ εύκολα κατά λάθος
+          — απλώνοντας το χέρι για μια κούπα γράφεις την ίδια γεωμετρία — οπότε
+          χρειάζεται ρητή επιβεβαίωση: αυτό το κουμπί ή «πήγαινε εκεί» με τη φωνή.
+          Θέλει <code>use_pose:=true</code> και ευθυγραμμισμένο βάθος.
+        </p>
+      </div>
+    </section>
+
+    <!-- ── Proactive observations ──────────────────────────────── -->
+    <section class="pane" id="p-obs">
+      <div class="card" style="margin-bottom:9px">
+        <h3>Τι πρόσεξε <span class="badge" id="ob-badge">—</span></h3>
+        <div id="ob-feed" style="font-size:12.5px;line-height:1.7;color:#e4e4e7">
+          <span style="color:#71717a">Καμία παρατήρηση ακόμη.</span>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Πώς μαθαίνει</h3>
+        <p style="font-size:11.5px;color:#71717a;line-height:1.6">
+          Το ρομπότ χτίζει μόνο του μια βάση αναφοράς: πού «ζει» κανονικά κάθε
+          αντικείμενο. Ένα αντικείμενο μετράει ως μόνιμο μόνο αφού το δει στο ίδιο
+          σημείο σε ΞΕΧΩΡΙΣΤΕΣ επισκέψεις, με απόσταση μεταξύ τους — αλλιώς μια
+          παρατεταμένη ματιά σε ένα δωμάτιο θα γινόταν «κανονικότητα» και όλα μετά
+          θα έμοιαζαν μετακινημένα.
+        </p>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          Σε καινούριο χάρτη θα σιωπά για μέρες. Αυτό είναι το σωστό: δεν ξέρει
+          ακόμη τι σημαίνει «κανονικά». Μιλάει ΜΟΝΟ όταν υπάρχει άνθρωπος μπροστά
+          του, το πολύ 4 φορές την ώρα, ποτέ 23:00–08:00, και ποτέ την ίδια
+          παρατήρηση δύο φορές σε 2 ώρες.
+        </p>
+      </div>
+    </section>
+
+    <!-- ── Episodic timeline ───────────────────────────────────── -->
+    <section class="pane" id="p-time">
+      <div class="card" style="margin-bottom:9px">
+        <h3>Ρώτα τη μνήμη <span class="badge" id="tl-count">—</span></h3>
+        <div class="row">
+          <input id="tl-q" placeholder="π.χ. τι έγινε σήμερα το πρωί;"
+            style="flex:1;min-width:150px;background:#232329;border:1px solid #2c2c32;
+            border-radius:8px;color:#e4e4e7;padding:7px 10px;font-size:12.5px"
+            autocomplete="off">
+          <button class="btn pri" id="b-tl-ask">Ρώτα</button>
+        </div>
+        <div class="row" style="margin-top:8px;flex-wrap:wrap;gap:6px" id="tl-chips"></div>
+        <div id="tl-answer" style="font-size:12.5px;color:#a1a1aa;margin-top:10px;
+          line-height:1.6"></div>
+      </div>
+      <div class="card">
+        <h3>Χρονολόγιο</h3>
+        <div id="tl-feed" style="font-size:12.5px;line-height:1.75">
+          <span style="color:#71717a">Άδειο.</span>
+        </div>
+      </div>
+    </section>
+
     <!-- ── IMU (BNO085) ────────────────────────────────────────── -->
     <section class="pane" id="p-imu">
       <div class="card">
@@ -2810,6 +2951,14 @@ let ws=null, mapInfo=null, mapImg=null, pose=null, scan=null, goal=null, plan=nu
 let driveTimer=null, vx=0, wz=0, estop=false, armPos={};
 const $ = id => document.getElementById(id);
 
+// Escape before interpolating anything into innerHTML. The observation feed and
+// the timeline render TRANSCRIBED SPEECH and object labels — text the robot
+// heard, not text we wrote — so a stray '<' would otherwise be parsed as markup.
+// Everything older in this file builds untrusted strings with textContent, which
+// is safe by construction; these two panes need markup per row, so they escape.
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => (
+  {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
 // ── tabs ───────────────────────────────────────────────────────────────────
 const TABS = [
   ['map',    '🗺️', 'Χάρτης'],
@@ -2823,6 +2972,9 @@ const TABS = [
   ['rtabmap','🏠', '3D Χάρτης'],
   ['cost',   '🧱', 'Costmap'],
   ['nerf',   '✨', 'NeRF'],
+  ['point',  '👉', 'Χειρονομίες'],
+  ['obs',    '💡', 'Παρατηρήσεις'],
+  ['time',   '🕐', 'Χρονολόγιο'],
   ['llm',    '💬', 'Φωνή/LLM'],
   ['gazebo', '🌍', 'Gazebo'],
   ['sys',    '📊', 'Σύστημα'],
@@ -3183,6 +3335,10 @@ const HANDLERS = {
   },
   objects(m){ $('objects').textContent = m.text || '—'; },
   situation(m){ $('situation').textContent = m.text || '—'; },
+  gesture(m){ gestureState = m; drawPointRing(); },
+  observations(m){ renderObservations(m); },
+  timeline(m){ renderTimeline(m); },
+  recall_answer(m){ $('tl-answer').textContent = m.text || ''; },
   arm(m){
     m.names.forEach((n,i)=>{
       armPos[n]=m.pos[i];
@@ -3266,6 +3422,85 @@ const HANDLERS = {
   fall_event(m){ onFallEvent(m); },
   speaker(m){ onSpeaker(m); },
 };
+
+// ── pointing gestures ──────────────────────────────────────────────────────
+let gestureState = null;
+
+function drawPointRing(){
+  const m = gestureState || {};
+  const c = $('pt-ring'); if(!c) return;
+  const g = c.getContext('2d');
+  const S = c.width, R = S/2 - 10;
+  g.clearRect(0,0,S,S);
+
+  // Track.
+  g.beginPath(); g.arc(S/2,S/2,R,0,Math.PI*2);
+  g.strokeStyle='#2c2c32'; g.lineWidth=9; g.stroke();
+
+  const locked = !!(m.confirmed);
+  const prog = locked ? 1 : (m.progress || 0);
+  if(prog > 0){
+    g.beginPath();
+    g.arc(S/2,S/2,R,-Math.PI/2,-Math.PI/2 + prog*Math.PI*2);
+    // Amber while gathering agreeing frames, green once it locks — the same
+    // colours the RViz marker uses, so the two views read alike.
+    g.strokeStyle = locked ? '#22c55e' : '#f59e0b';
+    g.lineWidth=9; g.lineCap='round'; g.stroke();
+  }
+  g.fillStyle = locked ? '#22c55e' : (m.pointing ? '#f59e0b' : '#52525b');
+  g.font='600 15px system-ui'; g.textAlign='center'; g.textBaseline='middle';
+  g.fillText(locked ? '✓' : (m.pointing ? Math.round(prog*100)+'%' : '—'), S/2, S/2);
+
+  const pt = m.confirmed || m.candidate || m.last || null;
+  $('pt-x').textContent = pt ? pt.x.toFixed(2)+' m' : '—';
+  $('pt-y').textContent = pt ? pt.y.toFixed(2)+' m' : '—';
+  $('pt-side').textContent = m.side ? (m.side==='right'?t('δεξί'):t('αριστερό')) : '—';
+  $('pt-straight').textContent = m.straightness!=null ? Math.round(m.straightness)+'°' : '—';
+
+  const b=$('pt-badge');
+  b.textContent = locked ? t('κλείδωσε') : (m.pointing ? t('δείχνεις…') : t('αδρανές'));
+  // The button is only meaningful once a point has been confirmed at least
+  // once — `last` survives after the arm drops, which is what it acts on.
+  $('b-pt-go').disabled = !m.last;
+}
+
+// ── proactive observations ─────────────────────────────────────────────────
+function renderObservations(m){
+  const feed = (m.feed||[]).slice().reverse();
+  $('ob-badge').textContent = (m.learned!=null)
+    ? m.learned+' '+t('γνωστά αντικείμενα') : '—';
+  const el = $('ob-feed');
+  if(!feed.length){
+    el.innerHTML = '<span style="color:#71717a">'+esc(t('Καμία παρατήρηση ακόμη.'))+'</span>';
+    return;
+  }
+  el.innerHTML = feed.map(o=>{
+    const t = new Date((o.ts||0)*1000).toLocaleTimeString('el-GR',
+      {hour:'2-digit',minute:'2-digit'});
+    return `<div style="padding:7px 0;border-bottom:1px solid #232329">
+      <span style="color:#52525b;font-variant-numeric:tabular-nums">${t}</span>
+      &nbsp;${esc(o.text||'')}</div>`;
+  }).join('');
+}
+
+// ── episodic timeline ──────────────────────────────────────────────────────
+const TL_ICON = {heard:'🗣️', said:'🤖', room:'🚪', observed:'💡',
+                 saw:'👤', mission:'🎯'};
+
+function renderTimeline(m){
+  $('tl-count').textContent = (m.count!=null) ? m.count+' '+t('γεγονότα') : '—';
+  const ev = (m.events||[]).slice().reverse();
+  const el = $('tl-feed');
+  if(!ev.length){
+    el.innerHTML='<span style="color:#71717a">'+esc(t('Άδειο.'))+'</span>'; return;
+  }
+  el.innerHTML = ev.map(e=>{
+    const who = e.who ? `<span style="color:#a78bfa">${esc(e.who)}</span> ` : '';
+    return `<div style="padding:6px 0;border-bottom:1px solid #232329">
+      <span style="color:#52525b;font-variant-numeric:tabular-nums">${esc(e.clock||'')}</span>
+      &nbsp;${TL_ICON[e.kind]||'•'}&nbsp;${who}${esc(e.text||'')}</div>`;
+  }).join('');
+}
 
 function connect(){
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -3641,6 +3876,37 @@ $('b-nerf-go').addEventListener('click',()=>send({type:'nerf_capture', on:true})
 $('b-nerf-stop').addEventListener('click',()=>send({type:'nerf_capture', on:false}));
 $('b-follow').addEventListener('click',()=>send({type:'follow', on:true}));
 $('b-follow-stop').addEventListener('click',()=>send({type:'follow', on:false}));
+
+// ── gestures ───────────────────────────────────────────────────────────────
+// Acting on a gesture is deliberately a separate, explicit press — gesture_node
+// never drives on its own. See the note in the pane.
+$('b-pt-go').addEventListener('click',()=>{
+  send({type:'gesture_go'});
+  $('pt-msg').textContent = t('Στάλθηκε.');
+  setTimeout(()=>{ $('pt-msg').textContent=''; }, 2500);
+});
+
+// ── timeline ───────────────────────────────────────────────────────────────
+function askRecall(q){
+  $('tl-answer').textContent = '…';
+  send({type:'recall', when:q});
+}
+$('b-tl-ask').addEventListener('click',()=>askRecall($('tl-q').value.trim()));
+$('tl-q').addEventListener('keydown',e=>{
+  if(e.key==='Enter') askRecall($('tl-q').value.trim());
+});
+// Shortcuts for the periods people actually ask about, so the common case is
+// one tap on a phone rather than typing Greek into a tiny box.
+// ‼️ The chip DISPLAYS a translated label but SENDS the Greek phrase:
+// episodic.parse_time_window matches Greek time words, so an English chip on an
+// English UI would silently fall through to "no period named".
+['σήμερα','σήμερα το πρωί','χθες','πριν από 2 ώρες'].forEach(q=>{
+  const b=document.createElement('button');
+  b.className='btn'; b.textContent=t(q);
+  b.style.fontSize='11.5px'; b.style.padding='5px 9px';
+  b.onclick=()=>{ $('tl-q').value=t(q); askRecall(q); };
+  $('tl-chips').appendChild(b);
+});
 
 $('b-loc').addEventListener('click',()=>send({type:'localize'}));
 $('b-xnav').addEventListener('click',()=>{ goal=null; send({type:'stop'}); draw(); });

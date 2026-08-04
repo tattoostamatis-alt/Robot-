@@ -684,6 +684,60 @@ def generate_launch_description():
         condition=IfCondition(use_pose),
     )
 
+    # ── Pointing gestures (geometry over pose_node's skeletons) ───
+    # Free on the GPU like fall_monitor — it reads pose_detections and the
+    # aligned depth image. Gated on use_pose for the same reason: without
+    # skeletons it can only sit silent.
+    # ‼️ auto_goal stays false. Pointing is far too easy to do by accident
+    # (reaching for a cup traces the same arc) to wire straight into Nav2; a
+    # confirmed gesture is published and drawn, and the dashboard button or the
+    # `goto_pointed` voice tool decides whether to act on it.
+    gesture_node = Node(
+        package='home_robot',
+        executable='gesture_node.py',
+        name='gesture_node',
+        output='screen',
+        parameters=[{
+            'auto_goal':     LaunchConfiguration('gesture_auto_goal', default='false'),
+            'confirm_hits':  LaunchConfiguration('gesture_confirm_hits', default='5'),
+            'max_distance':  LaunchConfiguration('gesture_max_distance', default='8.0'),
+        }],
+        condition=IfCondition(use_pose),
+    )
+
+    # ── Proactive observations (the robot speaks first) ───────────
+    # Needs object_memory for the "where things normally are" baseline, so it
+    # rides the same flag. Says nothing at all until it has learned a room over
+    # several separate visits — silence on a fresh map is correct.
+    proactive_observer_node = Node(
+        package='home_robot',
+        executable='proactive_observer_node.py',
+        name='proactive_observer_node',
+        output='screen',
+        parameters=[{
+            'enabled':        LaunchConfiguration('proactive', default='true'),
+            'min_interval':   LaunchConfiguration('proactive_min_interval', default='180.0'),
+            'max_per_hour':   LaunchConfiguration('proactive_max_per_hour', default='4'),
+            'require_person': LaunchConfiguration('proactive_require_person', default='true'),
+        }],
+        condition=IfCondition(use_object_memory),
+    )
+
+    # ── Episodic memory (the time axis) ───────────────────────────
+    # Cheap and independent of perception: it listens to speech, room changes
+    # and observations. On by default because its whole value is having been
+    # recording before you thought to ask.
+    episodic_memory_node = Node(
+        package='home_robot',
+        executable='episodic_memory_node.py',
+        name='episodic_memory_node',
+        output='screen',
+        parameters=[{
+            'max_age_days': LaunchConfiguration('episodic_days', default='14'),
+        }],
+        condition=IfCondition(LaunchConfiguration('use_episodic', default='true')),
+    )
+
     # ── Face detection (YuNet on NPU) ─────────────────────────────
     face_detection_node = Node(
         package='home_robot',
@@ -1153,6 +1207,9 @@ def generate_launch_description():
         DeclareLaunchArgument('use_mission',            default_value='true'),
         DeclareLaunchArgument('use_semantic_costmap',   default_value='false'),
         DeclareLaunchArgument('use_object_memory',      default_value='false'),
+        DeclareLaunchArgument('use_episodic',           default_value='true'),
+        DeclareLaunchArgument('gesture_auto_goal',      default_value='false'),
+        DeclareLaunchArgument('proactive',              default_value='true'),
         DeclareLaunchArgument('use_sim_time',            default_value='false'),
         DeclareLaunchArgument('use_roomba',              default_value='true'),
         DeclareLaunchArgument('rtabmap_db',
@@ -1191,6 +1248,9 @@ def generate_launch_description():
         pose_node,
         fall_monitor_node,
         face_detection_node,
+        gesture_node,
+        proactive_observer_node,
+        episodic_memory_node,
         tracker_node,
         diarization_node_action,
         recovery_node,

@@ -135,14 +135,27 @@ def test_every_entry_has_english_and_german():
         assert all(isinstance(v, str) and v.strip() for v in val), src
 
 
+# Text the user has to SAY OUT LOUD stays Greek in every UI language: the wake
+# word is a trained model and the voice tools match Greek keywords, so an
+# English rendering would be an instruction that does not work. Such phrases are
+# always quoted in the copy, so strip quoted spans before checking — that keeps
+# the rule honest (prose must be translated) without special-casing each string.
+_QUOTED = re.compile(r'«[^»]*»|"[^"]*"|„[^“]*“')
+
+
+def _greek_outside_quotes(text):
+    return GREEK.search(_QUOTED.sub('', text))
+
+
 def test_no_translation_is_left_as_greek():
     """Copy-pasting the Greek into the English column is how a table silently
     does nothing."""
     for src, (en, de) in TRANSLATIONS.items():
         if not GREEK.search(src):
             continue
-        assert not GREEK.search(en) or 'ρομπότ' in src.lower(), f'en still Greek: {src!r}'
-        assert not GREEK.search(de) or 'ρομπότ' in src.lower(), f'de still Greek: {src!r}'
+        exempt = 'ρομπότ' in src.lower()
+        assert not _greek_outside_quotes(en) or exempt, f'en still Greek: {src!r}'
+        assert not _greek_outside_quotes(de) or exempt, f'de still Greek: {src!r}'
 
 
 def test_emoji_prefixes_are_preserved():

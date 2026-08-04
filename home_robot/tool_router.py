@@ -97,6 +97,24 @@ _GROUPS = [
     # out on purpose: "έλα κοντά μου" is a movement command, not a measurement.
     (['distance_to'],
      r'αποστασ\w*|μακρι\w*|ποσα\s+μετρα|ποσο\s+ψηλ\w*'),
+
+    # "πήγαινε εκεί" while pointing. The deictic word is the whole signal —
+    # 'εκει'/'εδω' mean nothing to any other tool, so this group is narrow and
+    # safe. It rides with `goto` because the STT often drops the demonstrative
+    # ("πήγαινε ↴ εκεί" → "πήγαινε"), and then only the model, seeing both
+    # tools, can tell a pointed spot from a named room.
+    (['goto_pointed', 'goto'],
+     r'\bεκει\b|\bεδω\b|\bαυτο\s+το\s+σημειο\b|\bδειχν\w*'),
+
+    # "τι έγινε σήμερα;", "πότε ήρθε ο Μαξ;", "τι είπα χθες;".
+    # ‼️ A bare day word is NOT enough. Routing on 'σημερα' alone caught
+    # "τι μέρα έχουμε σήμερα;" — chitchat that must send no tools at all. So
+    # the trigger is the recall verb ('τι έγινε', 'θυμάσαι τι', 'τι είπε') or
+    # the interrogative 'πότε'; the day word only narrows the window later,
+    # inside episodic.parse_time_window.
+    (['recall'],
+     r'\bποτε\b|εγινε|εγιναν|συνεβη|θυμασαι\s+τι|τι\s+ειπ\w*|'
+     r'ιστορικ\w*|νωριτερα'),
 ]
 
 _COMPILED = [(names, re.compile(pat)) for names, pat in _GROUPS]

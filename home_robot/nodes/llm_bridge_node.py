@@ -54,7 +54,7 @@ from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from sensor_msgs.msg import BatteryState, Image
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, Empty, String
 
 load_dotenv(os.path.expanduser('~/.env'))
 
@@ -275,6 +275,24 @@ TOOLS = [
         'description': 'Σταμάτα να ακολουθείς τον χρήστη',
         'parameters': {'type': 'object', 'properties': {}},
     }},
+    {'type': 'function', 'function': {
+        # The floor point comes from gesture_node, which never drives on its
+        # own. Saying "πήγαινε εκεί" is the confirmation.
+        'name': 'goto_pointed',
+        'description': 'Πήγαινε εκεί που δείχνει ο χρήστης με το χέρι ("πήγαινε εκεί")',
+        'parameters': {'type': 'object', 'properties': {}},
+    }},
+    {'type': 'function', 'function': {
+        # Distinct from the RAG `remember`/recall of facts: this one is indexed
+        # by TIME, so it can answer "when".
+        'name': 'recall',
+        'description': ('Τι έγινε σε κάποια στιγμή/μέρα ("τι έγινε σήμερα", '
+                        '"πότε ήρθε ο Μαξ", "τι είπα χθες")'),
+        'parameters': {'type': 'object', 'properties': {
+            'when': {'type': 'string',
+                     'description': 'π.χ. "σήμερα το πρωί", "χθες", "πριν από 2 ώρες"'},
+        }},
+    }},
 ]
 
 
@@ -385,6 +403,11 @@ class LLMBridgeNode(Node):
         self.explore_pub = self.create_publisher(Bool, 'explore_command', 10)
         self.memory_store_pub = self.create_publisher(String, 'memory/store', 10)
         self.memory_query_pub = self.create_publisher(String, 'memory/query', 10)
+        # Gestures and the time-indexed timeline, both request/response like
+        # memory/query above.
+        self.gesture_go_pub = self.create_publisher(Empty, '/gesture_go', 10)
+        self.episodic_query_pub = self.create_publisher(
+            String, '/episodic/query', 10)
         self.pick_pub = self.create_publisher(String, 'pick_command', 10)
         self.follow_pub = self.create_publisher(Bool, 'follow_command', 10)
         self.mission_pub = self.create_publisher(String, 'mission/start', 10)
@@ -408,6 +431,10 @@ class LLMBridgeNode(Node):
         self._memory_event = threading.Event()
         self._memory_answer = None
         self._situation: dict = {}
+        # Last floor point someone pointed at, and the episodic recall channel.
+        self._gesture_point = None
+        self._episodic_event = threading.Event()
+        self._episodic_answer = None
 
         # Camera frame — encoded to JPEG once on arrival, reused per message
         self._bridge = CvBridge()
@@ -433,6 +460,10 @@ class LLMBridgeNode(Node):
         self.create_subscription(String, 'detected_objects', self._on_detected_objects, 10)
         self.create_subscription(BatteryState, 'battery/state', self._on_battery_state, 10)
         self.create_subscription(String, 'memory/answer', self._on_memory_answer, 10)
+        self.create_subscription(String, '/gesture_status',
+                                 self._cb_gesture_status, 10)
+        self.create_subscription(String, '/episodic/answer',
+                                 self._cb_episodic_answer, 10)
         self.create_subscription(String, 'situation_context', self._on_situation, 10)
         self.create_subscription(Image, '/camera/camera/color/image_raw', self._on_image, 1)
 
@@ -560,6 +591,44 @@ class LLMBridgeNode(Node):
             parts.append(f"Μπαταρία: {s['battery_pct']}%")
         parts.append(f"CPU: {s.get('cpu_pct', '?')}%  RAM: {s.get('ram_pct', '?')}%")
         return 'Τρέχουσα κατάσταση:\n' + '\n'.join(f'- {p}' for p in parts)
+
+    def _goto_pointed(self):
+        """Act on the last confirmed pointing gesture.
+
+        gesture_node deliberately never drives itself, so this tool IS the
+        confirmation step — the user pointed, then said "πήγαινε εκεί".
+        """
+        if self._gesture_point is None:
+            return {'status': 'error', 'action': 'goto_pointed',
+                    'reason': 'no gesture seen — δείξε με το χέρι στο πάτωμα '
+                              'και κράτα το για λίγο'}
+        self.gesture_go_pub.publish(Empty())
+        x, y = self._gesture_point
+        return {'status': 'started', 'action': 'goto_pointed',
+                'x': round(x, 2), 'y': round(y, 2)}
+
+    def _recall(self, when):
+        """Ask episodic_memory_node what happened in a period."""
+        self._episodic_answer = None
+        self._episodic_event.clear()
+        self.episodic_query_pub.publish(String(data=when))
+        if not self._episodic_event.wait(timeout=self.memory_timeout):
+            self.get_logger().warn('episodic_memory_node did not respond (timeout)')
+            return {'status': 'error', 'action': 'recall',
+                    'reason': 'episodic memory unavailable'}
+        return {'status': 'ok', 'action': 'recall', 'when': when,
+                'answer': self._episodic_answer}
+
+    def _cb_gesture_status(self, msg):
+        try:
+            last = (json.loads(msg.data) or {}).get('last')
+        except (json.JSONDecodeError, TypeError):
+            return
+        self._gesture_point = (last['x'], last['y']) if last else None
+
+    def _cb_episodic_answer(self, msg):
+        self._episodic_answer = msg.data
+        self._episodic_event.set()
 
     def _retrieve_memories(self, text):
         if not self.memory_enabled:
@@ -1121,6 +1190,12 @@ class LLMBridgeNode(Node):
 
         elif name == 'dock':
             return self._start_docking()
+
+        elif name == 'goto_pointed':
+            return self._goto_pointed()
+
+        elif name == 'recall':
+            return self._recall(args.get('when') or '')
 
         elif name == 'open_app':
             return desktop.open_app(args.get('app'))

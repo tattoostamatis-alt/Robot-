@@ -130,7 +130,45 @@ def test_every_tool_is_reachable():
         ('κλείσε όλα', 0), ('πόσο μακριά είναι ο άνθρωπος', 0),
         ('μάζεψε τα παιχνίδια', 0),
         ('πήγαινε να δεις αν έκλεισα το παράθυρο', 0),
+        ('πήγαινε εκεί', 0), ('τι έγινε σήμερα', 0),
     ]:
         covered |= names(text)
     # `stop` is gated by stop_command.py before the model, never routed here.
     assert ALL_NAMES - covered == {'stop'}, ALL_NAMES - covered
+
+
+# ── gestures and episodic recall ──────────────────────────────────────────────
+
+def test_pointing_routes_goto_pointed():
+    got = names('πήγαινε εκεί')
+    assert 'goto_pointed' in got
+    # `goto` rides along on purpose: the STT often drops the demonstrative, and
+    # only the model can tell a pointed spot from a named room.
+    assert 'goto' in got
+
+
+def test_pointing_does_not_drag_the_arm_along():
+    assert not names('πήγαινε εκεί') & {'pick', 'fetch', 'sort', 'open_app'}
+
+
+def test_recall_routes_on_the_verb():
+    assert 'recall' in names('τι έγινε σήμερα')
+    assert 'recall' in names('πότε ήρθε ο Μαξ')
+    assert 'recall' in names('τι είπα χθες')
+
+
+def test_bare_day_word_is_not_a_recall():
+    """‼️ Regression: routing on 'σήμερα' alone caught "τι μέρα έχουμε σήμερα;",
+    which is chitchat and must send no tools at all."""
+    assert 'recall' not in names('τι μέρα έχουμε σήμερα;')
+    assert names('τι μέρα έχουμε σήμερα;') == set()
+
+
+def test_recall_does_not_fire_on_ordinary_questions():
+    for text in ('τι κάνεις;', 'πώς σε λένε;', 'τι ώρα είναι;'):
+        assert 'recall' not in names(text), text
+
+
+def test_here_and_there_do_not_route_other_tools():
+    # 'εδώ'/'εκεί' are meaningless to every other tool, so the group is narrow.
+    assert names('έλα εδώ') & {'goto_pointed'}

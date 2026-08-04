@@ -475,6 +475,99 @@ TRANSLATIONS = {
     'Σταμάτησε.':        ('Stopped.', 'Gestoppt.'),
     'Η συνεδρία δεν τρέχει.': ('The session is not running.',
                                'Die Sitzung läuft nicht.'),
+
+    # ── gestures pane ─────────────────────────────────────────────────────
+    'Χειρονομίες':       ('Gestures', 'Gesten'),
+    'Δείξε με το χέρι':  ('Point with your hand', 'Mit der Hand zeigen'),
+    'Στόχος X':          ('Target X', 'Ziel X'),
+    'Στόχος Y':          ('Target Y', 'Ziel Y'),
+    'Χέρι':              ('Arm', 'Arm'),
+    'Ευθύτητα':          ('Straightness', 'Streckung'),
+    '👉 Πήγαινε εκεί':   ('👉 Go there', '👉 Geh dorthin'),
+    'δεξί':              ('right', 'rechts'),
+    'αριστερό':          ('left', 'links'),
+    'κλείδωσε':          ('locked', 'fixiert'),
+    'δείχνεις…':         ('pointing…', 'zeigt…'),
+    'αδρανές':           ('idle', 'inaktiv'),
+    'Στάλθηκε.':         ('Sent.', 'Gesendet.'),
+    'Πώς δουλεύει':      ('How it works', 'So funktioniert es'),
+    'Τεντώνεις το χέρι και δείχνεις στο ΠΑΤΩΜΑ. Το ρομπότ παίρνει τον ώμο και '
+    'τον καρπό σου από τον σκελετό (pose_node), τα ανεβάζει σε 3D με το βάθος '
+    'της D435, και προεκτείνει τη γραμμή ώσπου να συναντήσει το δάπεδο. '
+    'Ο κύκλος γεμίζει καθώς μαζεύονται καρέ που συμφωνούν· γίνεται πράσινος '
+    'όταν κλειδώσει.':
+        ('Extend your arm and point at the FLOOR. The robot takes your shoulder '
+         'and wrist from the skeleton (pose_node), lifts them into 3D using the '
+         "D435's depth, and extends the line until it meets the floor. The ring "
+         'fills as agreeing frames accumulate; it turns green when it locks.',
+         'Strecke den Arm aus und zeige auf den BODEN. Der Roboter nimmt Schulter '
+         'und Handgelenk aus dem Skelett (pose_node), hebt sie mit der Tiefe der '
+         'D435 ins 3D und verlängert die Linie bis zum Boden. Der Ring füllt '
+         'sich, während übereinstimmende Bilder gesammelt werden; er wird grün, '
+         'sobald er fixiert.'),
+    '‼️ ΔΕΝ οδηγεί μόνο του. Το να δείξεις κάτι γίνεται πολύ εύκολα κατά λάθος '
+    '— απλώνοντας το χέρι για μια κούπα γράφεις την ίδια γεωμετρία — οπότε '
+    'χρειάζεται ρητή επιβεβαίωση: αυτό το κουμπί ή «πήγαινε εκεί» με τη φωνή. '
+    'Θέλει':
+        ("‼️ It does NOT drive on its own. Pointing is far too easy to do by "
+         'accident — reaching for a cup traces the same geometry — so it needs '
+         'explicit confirmation: this button, or "πήγαινε εκεί" by voice. '
+         'Requires',
+         '‼️ Er fährt NICHT von selbst. Zeigen passiert viel zu leicht '
+         'versehentlich — nach einer Tasse greifen ergibt dieselbe Geometrie — '
+         'daher braucht es eine ausdrückliche Bestätigung: diese Taste oder '
+         '„πήγαινε εκεί“ per Sprache. Benötigt'),
+    'και ευθυγραμμισμένο βάθος.': ('and aligned depth.',
+                                   'und ausgerichtete Tiefe.'),
+
+    # ── observations pane ─────────────────────────────────────────────────
+    'Παρατηρήσεις':      ('Observations', 'Beobachtungen'),
+    'Τι πρόσεξε':        ('What it noticed', 'Was aufgefallen ist'),
+    'Καμία παρατήρηση ακόμη.': ('No observations yet.',
+                                'Noch keine Beobachtungen.'),
+    'γνωστά αντικείμενα': ('known objects', 'bekannte Objekte'),
+    'Πώς μαθαίνει':      ('How it learns', 'So lernt er'),
+    'Το ρομπότ χτίζει μόνο του μια βάση αναφοράς: πού «ζει» κανονικά κάθε '
+    'αντικείμενο. Ένα αντικείμενο μετράει ως μόνιμο μόνο αφού το δει στο ίδιο '
+    'σημείο σε ΞΕΧΩΡΙΣΤΕΣ επισκέψεις, με απόσταση μεταξύ τους — αλλιώς μια '
+    'παρατεταμένη ματιά σε ένα δωμάτιο θα γινόταν «κανονικότητα» και όλα μετά '
+    'θα έμοιαζαν μετακινημένα.':
+        ('The robot builds its own baseline of where each object normally '
+         'lives. An object counts as settled only after being seen in the same '
+         'spot on SEPARATE visits, well apart in time — otherwise one long look '
+         'at a room would become "normal" and everything after it would look '
+         'moved.',
+         'Der Roboter baut selbst eine Referenz auf, wo jedes Objekt '
+         'normalerweise liegt. Ein Objekt gilt erst als fest, wenn es an '
+         'derselben Stelle bei GETRENNTEN Besuchen gesehen wurde — sonst würde '
+         'ein einziger langer Blick in einen Raum zur „Normalität“ und alles '
+         'Spätere sähe verschoben aus.'),
+    'Σε καινούριο χάρτη θα σιωπά για μέρες. Αυτό είναι το σωστό: δεν ξέρει '
+    'ακόμη τι σημαίνει «κανονικά». Μιλάει ΜΟΝΟ όταν υπάρχει άνθρωπος μπροστά '
+    'του, το πολύ 4 φορές την ώρα, ποτέ 23:00–08:00, και ποτέ την ίδια '
+    'παρατήρηση δύο φορές σε 2 ώρες.':
+        ('On a fresh map it will stay silent for days. That is correct: it does '
+         'not yet know what "normal" means. It speaks ONLY with a person in '
+         'view, at most 4 times an hour, never between 23:00 and 08:00, and '
+         'never the same remark twice within 2 hours.',
+         'Auf einer neuen Karte schweigt er tagelang. Das ist richtig: er weiß '
+         'noch nicht, was „normal“ heißt. Er spricht NUR, wenn eine Person zu '
+         'sehen ist, höchstens 4-mal pro Stunde, nie zwischen 23:00 und 08:00, '
+         'und nie dieselbe Bemerkung zweimal in 2 Stunden.'),
+
+    # ── timeline pane ─────────────────────────────────────────────────────
+    'Χρονολόγιο':        ('Timeline', 'Zeitleiste'),
+    'Ρώτα τη μνήμη':     ('Ask the memory', 'Frag das Gedächtnis'),
+    'Ρώτα':              ('Ask', 'Fragen'),
+    'π.χ. τι έγινε σήμερα το πρωί;': ('e.g. what happened this morning?',
+                                      'z.B. was ist heute Morgen passiert?'),
+    'γεγονότα':          ('events', 'Ereignisse'),
+    'Άδειο.':            ('Empty.', 'Leer.'),
+    # The chips display these but SEND the Greek — parse_time_window is Greek.
+    'σήμερα':            ('today', 'heute'),
+    'σήμερα το πρωί':    ('this morning', 'heute Morgen'),
+    'χθες':              ('yesterday', 'gestern'),
+    'πριν από 2 ώρες':   ('2 hours ago', 'vor 2 Stunden'),
 }
 
 
