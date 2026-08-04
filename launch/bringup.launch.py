@@ -827,6 +827,17 @@ def generate_launch_description():
         condition=IfCondition(use_arm),
     )
 
+    # ── Echolocation ──────────────────────────────────────────────
+    # Needs the wake word node for /mic/audio and a speaker. Never fires on a
+    # timer: the chirp is audible, and a robot that chirps at 3am gets unplugged.
+    echo_node = Node(
+        package='home_robot',
+        executable='echo_node.py',
+        name='echo_node',
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('use_echo', default='false')),
+    )
+
     # ── Acoustic map: where sounds come from ──────────────────────
     # Rides use_sound_events, which is what gives it something to place. Costs
     # almost nothing — it only wakes when a sound actually fires.
@@ -992,6 +1003,8 @@ def generate_launch_description():
         # seconds and appears to never answer. On ch4: 0 false triggers in 30 s.
         # Left as a launch arg only for experiments; the default is the one to use.
         parameters=[{
+            # echo_node needs the un-cancelled beam; see its docstring.
+            'publish_raw': LaunchConfiguration('use_echo', default='false'),
             'threshold': 0.50,
             'device_name': 'XVF3800',
             'mic_channels': 6,
@@ -1327,6 +1340,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sound_events',       default_value='false'),
         DeclareLaunchArgument('use_diagnosis',          default_value='true'),
         DeclareLaunchArgument('use_people',             default_value='true'),
+        DeclareLaunchArgument('use_echo',               default_value='false'),
         DeclareLaunchArgument('gesture_auto_goal',      default_value='false'),
         DeclareLaunchArgument('use_hand_gestures',      default_value='false'),
         # ‼️ Off by default: this is the master switch for gestures that can
@@ -1381,6 +1395,7 @@ def generate_launch_description():
         people_node,
         acoustic_map_node,
         tactile_node,
+        echo_node,
         self_diagnosis_node,
         tracker_node,
         diarization_node_action,

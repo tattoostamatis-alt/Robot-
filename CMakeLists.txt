@@ -54,6 +54,7 @@ install(PROGRAMS
   home_robot/nodes/people_node.py
   home_robot/nodes/acoustic_map_node.py
   home_robot/nodes/tactile_node.py
+  home_robot/nodes/echo_node.py
   home_robot/nodes/nerf_capture_node.py
   home_robot/nodes/goto_room.py
   home_robot/nodes/record_location.py

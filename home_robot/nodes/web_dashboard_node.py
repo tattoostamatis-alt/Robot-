@@ -472,6 +472,7 @@ class DashboardNode(Node):
         self.create_subscription(String, '/people', self._cb_people, latch)
         self.create_subscription(String, '/acoustic_map', self._cb_acoustic, latch)
         self.create_subscription(String, '/arm/touch', self._cb_touch, latch)
+        self.create_subscription(String, '/echo', self._cb_echo, latch)
         self.create_subscription(String, '/self_diagnosis', self._cb_diag, latch)
         self.create_subscription(String, '/sound_events', self._cb_sound, latch)
         # Both latched by their publishers, so a tab opened long after the fact
@@ -513,6 +514,7 @@ class DashboardNode(Node):
         self._people_add_pub = self.create_publisher(String, '/people/add', 10)
         self._people_rm_pub = self.create_publisher(String, '/people/remove', 10)
         self._people_enrol_pub = self.create_publisher(String, '/people/enrol', 10)
+        self._echo_pub = self.create_publisher(String, '/echo/probe', 10)
 
         # Map-referenced compass: one calibrated number per map.
         self._last_yaw = None
@@ -1318,6 +1320,13 @@ class DashboardNode(Node):
             return
         self._state.broadcast({'type': 'touch', **data})
 
+    def _cb_echo(self, msg: String):
+        try:
+            data = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        self._state.broadcast({'type': 'echo', **data})
+
     def _cb_diag(self, msg: String):
         try:
             data = json.loads(msg.data)
@@ -1696,6 +1705,8 @@ class DashboardNode(Node):
                     self._listen_ws.add(client)
                 else:
                     self._listen_ws.discard(client)
+        elif t == 'echo_probe':
+            self._echo_pub.publish(String(data=str(msg.get('room', ''))))
         elif t == 'people_add':
             name = str(msg.get('name', '')).strip()
             if name:
@@ -3113,6 +3124,31 @@ button{font:inherit;color:inherit}
         </p>
       </div>
       <div class="card" style="margin-bottom:9px">
+        <h3>Ηχοεντοπισμός <span class="badge" id="ec-badge">—</span></h3>
+        <div class="grid2">
+          <span class="k">Αντήχηση</span><span class="v" id="ec-rt60">—</span>
+          <span class="k">Πρώτη ανάκλαση</span><span class="v" id="ec-dist">—</span>
+          <span class="k">Ετυμηγορία</span><span class="v" id="ec-verdict">—</span>
+        </div>
+        <div class="row" style="margin-top:11px">
+          <button class="btn pri" id="b-ec-probe">📡 Μέτρησε τον χώρο</button>
+          <span id="ec-msg" style="font-size:11.5px;color:#71717a"></span>
+        </div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          Το ρομπότ βγάζει ένα σύντομο τσίρπισμα και ακούει την απάντηση του
+          δωματίου. Το XVF3800 έχει ακύρωση ηχούς ακριβώς για να ακούει ΕΝΩ
+          μιλάει — γι' αυτό γίνεται. Ένας γυμνός διάδρομος αντηχεί· ένα σαλόνι
+          με καναπέδες όχι.
+        </p>
+        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+          ‼️ Αυτό που εμπιστεύεσαι είναι η ΑΛΛΑΓΗ, όχι οι απόλυτοι αριθμοί. Το
+          ηχείο, το μικρόφωνο και το ίδιο το σώμα του ρομπότ μπαίνουν το ίδιο
+          σε δύο μετρήσεις από το ίδιο σημείο και αλληλοαναιρούνται. Δεν τρέχει
+          ΠΟΤΕ μόνο του: το τσίρπισμα ακούγεται, και ρομπότ που τσιρίζει στις
+          3 τα ξημερώματα το ξεσυνδέεις. Θέλει <code>use_echo:=true</code>.
+        </p>
+      </div>
+      <div class="card" style="margin-bottom:9px">
         <h3>Από πού ακούγονται <span class="badge" id="am-badge">—</span></h3>
         <div id="am-last" style="font-size:12.5px;line-height:1.7;
           color:#e4e4e7;margin-bottom:9px"></div>
@@ -3813,6 +3849,7 @@ const HANDLERS = {
   diagnostics(m){ renderDiagnostics(m); },
   sound(m){ soundState = m; renderSound(m); },
   acoustic(m){ renderAcoustic(m); },
+  echo(m){ renderEcho(m); },
   touch(m){ renderTouch(m); },
   observations(m){ renderObservations(m); },
   timeline(m){ renderTimeline(m); },
@@ -3911,6 +3948,19 @@ function renderTouch(m){
   $('tc-weight').textContent = (m.weight === null || m.weight === undefined)
     ? (m.have_reference ? '—' : t('χωρίς αναφορά'))
     : m.weight_el + ' (' + m.weight + ')';
+}
+
+// ── echolocation ───────────────────────────────────────────────────────────
+function renderEcho(m){
+  $('ec-badge').textContent = m.busy ? t('μετράει…')
+    : ((m.rooms || []).length + ' ' + t('δωμάτια'));
+  const l = m.last;
+  $('ec-rt60').textContent = (l && l.rt60) ? l.rt60.toFixed(2) + ' s' : '—';
+  $('ec-dist').textContent = (l && l.distance) ? l.distance.toFixed(1) + ' m' : '—';
+  const v = m.verdict;
+  $('ec-verdict').innerHTML = v
+    ? `<span style="color:${v.changed ? '#f59e0b' : '#4ade80'}">${esc(v.why)}</span>`
+    : '—';
 }
 
 // ── acoustic map ───────────────────────────────────────────────────────────
@@ -4930,6 +4980,12 @@ $('b-nerf-go').addEventListener('click',()=>send({type:'nerf_capture', on:true})
 $('b-nerf-stop').addEventListener('click',()=>send({type:'nerf_capture', on:false}));
 $('b-follow').addEventListener('click',()=>send({type:'follow', on:true}));
 $('b-follow-stop').addEventListener('click',()=>send({type:'follow', on:false}));
+
+$('b-ec-probe').addEventListener('click', ()=>{
+  send({type:'echo_probe'});
+  $('ec-msg').textContent = t('Τσιρίζει…');
+  setTimeout(()=>{ $('ec-msg').textContent=''; }, 4000);
+});
 
 $('b-pp-add').addEventListener('click', ()=>{
   const n = $('pp-name').value.trim();

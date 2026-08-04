@@ -814,6 +814,43 @@ TRANSLATIONS = {
          '„schwer" und nicht „180 Gramm". Die Messung ist PASSIV: sie steuert '
          'den Arm nie.'),
 
+    # ── echolocation ──────────────────────────────────────────────────────
+    'Ηχοεντοπισμός':     ('Echolocation', 'Echoortung'),
+    'Αντήχηση':          ('Reverberation', 'Nachhall'),
+    'Πρώτη ανάκλαση':    ('First reflection', 'Erste Reflexion'),
+    'Ετυμηγορία':        ('Verdict', 'Ergebnis'),
+    '📡 Μέτρησε τον χώρο': ('📡 Measure the room', '📡 Raum messen'),
+    'Τσιρίζει…':         ('Chirping…', 'Zirpt…'),
+    'μετράει…':          ('measuring…', 'misst…'),
+    'δωμάτια':           ('rooms', 'Räume'),
+    'Το ρομπότ βγάζει ένα σύντομο τσίρπισμα και ακούει την απάντηση του '
+    'δωματίου. Το XVF3800 έχει ακύρωση ηχούς ακριβώς για να ακούει ΕΝΩ '
+    'μιλάει — γι\' αυτό γίνεται. Ένας γυμνός διάδρομος αντηχεί· ένα σαλόνι '
+    'με καναπέδες όχι.':
+        ('The robot emits a short chirp and listens to the room answer. The '
+         'XVF3800 has echo cancellation precisely so it can hear WHILE it '
+         'speaks — which is what makes this possible. A bare corridor rings; a '
+         'living room full of sofas does not.',
+         'Der Roboter gibt einen kurzen Chirp aus und hört der Antwort des '
+         'Raums zu. Der XVF3800 hat Echounterdrückung genau dafür, WÄHREND des '
+         'Sprechens zu hören — deshalb geht das. Ein kahler Flur hallt; ein '
+         'Wohnzimmer voller Sofas nicht.'),
+    '‼️ Αυτό που εμπιστεύεσαι είναι η ΑΛΛΑΓΗ, όχι οι απόλυτοι αριθμοί. Το '
+    'ηχείο, το μικρόφωνο και το ίδιο το σώμα του ρομπότ μπαίνουν το ίδιο '
+    'σε δύο μετρήσεις από το ίδιο σημείο και αλληλοαναιρούνται. Δεν τρέχει '
+    'ΠΟΤΕ μόνο του: το τσίρπισμα ακούγεται, και ρομπότ που τσιρίζει στις '
+    '3 τα ξημερώματα το ξεσυνδέεις. Θέλει':
+        ('‼️ What you trust is the CHANGE, not the absolute numbers. The '
+         'speaker, the microphone and the robot\'s own body enter two '
+         'measurements from the same spot identically and cancel out. It never '
+         'runs by itself: the chirp is audible, and a robot that chirps at 3am '
+         'gets unplugged. Requires',
+         '‼️ Vertrauen kannst du der VERÄNDERUNG, nicht den absoluten Zahlen. '
+         'Lautsprecher, Mikrofon und der Roboterkörper gehen in zwei Messungen '
+         'vom selben Ort identisch ein und heben sich auf. Es läuft nie von '
+         'selbst: der Chirp ist hörbar, und ein Roboter, der um 3 Uhr zirpt, '
+         'wird ausgesteckt. Benötigt'),
+
     # ── acoustic map ──────────────────────────────────────────────────────
     'Από πού ακούγονται': ('Where they come from', 'Woher sie kommen'),
     'εντοπισμένα':       ('located', 'geortet'),

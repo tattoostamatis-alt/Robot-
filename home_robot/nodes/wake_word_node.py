@@ -237,6 +237,17 @@ class WakeWordNode(Node):
         self.wake_pub = self.create_publisher(String, 'wake_word', 10)
         self.stop_pub = self.create_publisher(Bool, STOP_TOPIC, 10)
         self.audio_pub = self.create_publisher(Int16MultiArray, 'mic/audio', 200)
+        # ‼️ The RAW beam as well, when asked for. mic/audio carries the
+        # PROCESSED channel, where the XVF3800's echo canceller has removed the
+        # robot's own output — which is what STT wants and exactly what
+        # echolocation cannot use, since the robot's own chirp IS the signal
+        # there. Off by default: it doubles the publish work in the realtime
+        # audio callback for something only echo_node reads.
+        self.declare_parameter('publish_raw', False)
+        self._publish_raw = self.get_parameter('publish_raw').value
+        self.raw_audio_pub = (
+            self.create_publisher(Int16MultiArray, 'mic/audio_raw', 200)
+            if self._publish_raw else None)
         self.create_subscription(Bool, SPEAKING_TOPIC, self._on_tts_speaking, 10)
         # The same text tts_node is about to speak, so a reply containing the
         # wake word can disable barge-in for its duration.
@@ -333,6 +344,10 @@ class WakeWordNode(Node):
         msg = Int16MultiArray()
         msg.data = stt_chunk.tolist()
         self.audio_pub.publish(msg)
+        if self.raw_audio_pub is not None:
+            raw = Int16MultiArray()
+            raw.data = chunk.tolist()          # the detection channel, unfiltered
+            self.raw_audio_pub.publish(raw)
 
     def _enqueue(self, chunk):
         """Hand a chunk to the detector, dropping the OLDEST if it is behind.
