@@ -37,8 +37,21 @@ _NMS_THR     = 0.3
 
 
 def _build_session():
-    # YuNet is 158 KB — CPU inference is <3ms, no benefit mapping to NPU.
-    return ort.InferenceSession(_MODEL_PATH, providers=['CPUExecutionProvider']), 'CPU'
+    # YuNet is 158 KB, but the graph is 640x640 float32 NCHW, so a pass is ~30ms,
+    # not the <3ms the 320x320 model would cost. No benefit mapping it to the NPU.
+    #
+    # ‼️ Cap the threads. onnxruntime defaults intra_op to every core, and on this
+    # 16-core box that is a hard loss: measured 136ms/pass at the default against
+    # 55ms on one thread and 29ms on four — the tiny per-op tensors spend all their
+    # time in barrier sync. It also pinned ~9.5 cores at 10fps and drove load past
+    # 60, which starved the rest of the stack. Four threads is the knee of the
+    # curve; two is within 30% of it for a quarter of the cores, and at
+    # process_every_n=3 that leaves the 100ms frame budget with room to spare.
+    opts = ort.SessionOptions()
+    opts.intra_op_num_threads = 2
+    opts.inter_op_num_threads = 1
+    return ort.InferenceSession(
+        _MODEL_PATH, opts, providers=['CPUExecutionProvider']), 'CPU (2 threads)'
 
 
 def _decode_multiscale(outputs, img_w, img_h, score_thr, nms_thr):
