@@ -4893,6 +4893,12 @@ async function mapSave(){
 // carries the real URDF joint chain — origins, axes and limits — so what is
 // drawn matches where the arm actually is, not an artist's impression.
 let armModel = null, armYaw = -0.9, armPitch = -0.35, armZoom = 1;
+// The arm's reach in metres, measured from the model itself at zero pose.
+// ‼️ Do NOT hard-code a scale divisor here. The old one was tuned against a
+// model file that was 1000x too large (micrometres labelled as millimetres),
+// so when the units were fixed the arm rendered as a single pixel. Measuring
+// makes the view correct for whatever geometry is loaded.
+let armReach = null;
 let armAngles = {};          // joint name -> radians, live from /joint_states
 let armLoading = false;
 
@@ -4944,6 +4950,7 @@ function armLoad(){
     .then(r => r.ok ? r.json() : Promise.reject(r.status))
     .then(m => {
       armModel = m;
+      armReach = null;                  // remeasure for the new geometry
       const n = Object.values(m.links).reduce((a,v)=>a+v.length/9, 0);
       $('arm3d-info').textContent = Math.round(n) + ' ' + t('τρίγωνα');
       armDraw();
@@ -4956,6 +4963,23 @@ function armLoad(){
 }
 
 // Walk the joint chain, accumulating each link's world transform.
+function armMeasureReach(){
+  const saved = armAngles;
+  armAngles = {};                       // zero pose, so it is pose-independent
+  const tf = armLinkTransforms();
+  let r = 0;
+  for (const [link, flat] of Object.entries(armModel.links)){
+    const m = tf[link]; if (!m) continue;
+    for (let i=0;i<flat.length;i+=3){
+      const v = m4apply(m, [flat[i]/1000, flat[i+1]/1000, flat[i+2]/1000]);
+      const d = Math.hypot(v[0], v[1], v[2]);
+      if (d > r) r = d;
+    }
+  }
+  armAngles = saved;
+  return r > 1e-4 ? r : 0.5;
+}
+
 function armLinkTransforms(){
   const out = {world: m4id()};
   for (const j of armModel.joints){
@@ -4975,6 +4999,29 @@ function armLinkTransforms(){
   return out;
 }
 
+// Per-link palette. The gripper stays blue so the business end is obvious;
+// the segments alternate slightly so adjacent links do not merge into one
+// grey mass when they fold over each other.
+const ARM_COLORS = {
+  base_link:         [96, 100, 112],
+  link1:             [150, 155, 168],
+  link2:             [132, 138, 152],
+  link3:             [150, 155, 168],
+  link4:             [132, 138, 152],
+  link5:             [150, 155, 168],
+  gripper_link:      [ 70, 140, 232],
+  gripper_left_link: [ 70, 140, 232],
+};
+
+// Light fixed in VIEW space — a headlight up and to the left. World-fixed light
+// leaves a permanently dark side that orbiting cannot inspect; this way the arm
+// is always readable whichever way you turn it.
+const ARM_LIGHT = (() => {
+  const v = [-0.42, 0.78, -0.46];
+  const n = Math.hypot(v[0], v[1], v[2]);
+  return [v[0]/n, v[1]/n, v[2]/n];
+})();
+
 function armDraw(){
   const cv = $('arm3d'); if (!cv) return;
   const ctx = cv.getContext('2d');
@@ -4988,55 +5035,156 @@ function armDraw(){
   if (!armModel){ return; }
 
   const tf = armLinkTransforms();
-  // Camera: orbit yaw/pitch, orthographic. Arm is ~400 mm tall.
   const cy = Math.cos(armYaw), sy = Math.sin(armYaw);
   const cp = Math.cos(armPitch), sp = Math.sin(armPitch);
-  const scale = Math.min(w, h) / 520 * armZoom * 1.35;
-  const ox = w/2, oy = h*0.72;
+  if (armReach === null) armReach = armMeasureReach();
+  // Fit the arm to ~80% of the smaller canvas dimension.
+  const scale = (Math.min(w, h) * 1.25 / armReach) * armZoom;
+  // Origin is resolved AFTER the geometry is projected — see the centring pass
+  // below. Fixed offsets were guesswork and left the gripper off the bottom.
+  let ox = 0, oy = 0;
 
+  // World -> view. Screen x is xv, screen up is yv, into-the-screen is zv.
+  const toView = v => {
+    const xr =  v[0]*cy + v[1]*sy;
+    const yr = -v[0]*sy + v[1]*cy;
+    return [xr, yr*sp + v[2]*cp, yr*cp - v[2]*sp];
+  };
+  // Gentle perspective. FOCAL is in metres and the arm is ~0.4 m, so this adds
+  // depth without the wide-angle distortion a short focal length would give.
+  const FOCAL = 2.2;
+  const project = p => {
+    const k = FOCAL / (FOCAL + p[2]);
+    return [ox + p[0]*scale*k, oy - p[1]*scale*k, k];
+  };
+
+  // ── build faces with view-space normals ───────────────────────────────────
   const faces = [];
+  let minX = 1e9, maxX = -1e9, minY = 1e9, maxY = -1e9;
   for (const [link, flat] of Object.entries(armModel.links)){
     const m = tf[link]; if (!m) continue;
+    const col = ARM_COLORS[link] || [150,155,165];
     for (let i=0;i<flat.length;i+=9){
-      const p = [];
-      let depth = 0;
+      const vv = [];
       for (let k=0;k<3;k++){
-        // mm -> m, into world, then into view space.
-        const v = m4apply(m, [flat[i+k*3]/1000, flat[i+k*3+1]/1000, flat[i+k*3+2]/1000]);
-        const xr =  v[0]*cy + v[1]*sy;
-        const yr = -v[0]*sy + v[1]*cy;
-        const zr =  v[2];
-        const ys = yr*sp + zr*cp;
-        depth += yr*cp - zr*sp;
-        p.push([ox + xr*scale, oy - ys*scale]);
+        const world = m4apply(m, [flat[i+k*3]/1000, flat[i+k*3+1]/1000,
+                                  flat[i+k*3+2]/1000]);
+        if (world[0] < minX) minX = world[0];
+        if (world[0] > maxX) maxX = world[0];
+        if (world[1] < minY) minY = world[1];
+        if (world[1] > maxY) maxY = world[1];
+        vv.push(toView(world));
       }
-      faces.push([depth/3, p, link]);
+      // Surface normal in view space. THIS is what was missing: the old
+      // renderer shaded by depth alone, which reads as a flat silhouette
+      // because every face of a cylinder at the same distance got the same
+      // grey. A normal gives each face its own tilt towards the light.
+      const ux = vv[1][0]-vv[0][0], uy = vv[1][1]-vv[0][1], uz = vv[1][2]-vv[0][2];
+      const wx = vv[2][0]-vv[0][0], wy = vv[2][1]-vv[0][1], wz = vv[2][2]-vv[0][2];
+      let nx = uy*wz - uz*wy, ny = uz*wx - ux*wz, nz = ux*wy - uy*wx;
+      const nl = Math.hypot(nx, ny, nz) || 1;
+      nx/=nl; ny/=nl; nz/=nl;
+      // Backface cull: the mesh winds consistently (every link has a positive
+      // signed volume), so a face pointing away from the camera is inside the
+      // solid. Dropping it halves the fill work AND removes the painter's
+      // -algorithm artefacts where a far face overwrote a near one.
+      if (nz > 0) continue;
+
+      const p = vv.map(project);
+      faces.push([(vv[0][2]+vv[1][2]+vv[2][2])/3, p, col, [nx,ny,nz]]);
     }
   }
-  // Painter's algorithm: far to near. With a convex-ish arm this is enough,
-  // and it costs one sort instead of a depth buffer.
-  faces.sort((a,b) => a[0]-b[0]);
+  faces.sort((a,b) => b[0]-a[0]);          // far (large z) first
 
-  const zs = faces.length ? [faces[0][0], faces[faces.length-1][0]] : [0,1];
-  const span = (zs[1]-zs[0]) || 1;
-  for (const [d, p, link] of faces){
-    // Cheap depth shading — nearer is brighter. Real lighting would need
-    // normals through the transform; this reads as solid and costs nothing.
-    const tshade = (d - zs[0]) / span;
-    const base = link.startsWith('gripper') ? [90,150,230] : [150,155,165];
-    const f = 0.45 + 0.55*tshade;
-    ctx.fillStyle = `rgb(${base[0]*f|0},${base[1]*f|0},${base[2]*f|0})`;
-    ctx.beginPath();
-    ctx.moveTo(p[0][0], p[0][1]);
-    ctx.lineTo(p[1][0], p[1][1]);
-    ctx.lineTo(p[2][0], p[2][1]);
-    ctx.closePath();
-    ctx.fill();
+  // ── centre on what was actually drawn ─────────────────────────────────────
+  // The projected bounding box, not a world-space guess: the arm folds and
+  // extends, and a fixed origin put the gripper off the bottom of the canvas.
+  let bx0 = 1e9, by0 = 1e9, bx1 = -1e9, by1 = -1e9;
+  for (const f of faces) for (const q of f[1]){
+    if (q[0] < bx0) bx0 = q[0];
+    if (q[0] > bx1) bx1 = q[0];
+    if (q[1] < by0) by0 = q[1];
+    if (q[1] > by1) by1 = q[1];
+  }
+  if (bx1 > bx0){
+    ox = w/2 - (bx0 + bx1)/2;
+    oy = h/2 - (by0 + by1)/2;
+  } else { ox = w/2; oy = h/2; }
+
+  // ── ground: grid, then contact shadow, both before the arm ────────────────
+  // Grid squares sized to the arm, not to a fixed 5 cm, so the ground reads
+  // the same whatever the model's dimensions turn out to be.
+  const gridStep = armReach / 2.5, gridN = 2;
+  ctx.lineWidth = 1;
+  for (let i = -gridN; i <= gridN; i++){
+    for (const axis of [0, 1]){
+      const a = [], b = [];
+      for (let j = -gridN; j <= gridN; j++){
+        const p = axis === 0 ? [i*gridStep, j*gridStep, 0]
+                             : [j*gridStep, i*gridStep, 0];
+        const q = project(toView(p));
+        (j === -gridN ? a : b).push(q);
+      }
+      const p0 = project(toView(axis === 0 ? [i*gridStep, -gridN*gridStep, 0]
+                                           : [-gridN*gridStep, i*gridStep, 0]));
+      const p1 = project(toView(axis === 0 ? [i*gridStep,  gridN*gridStep, 0]
+                                           : [ gridN*gridStep, i*gridStep, 0]));
+      ctx.strokeStyle = (i === 0) ? '#33333d' : '#1e1e24';
+      ctx.beginPath(); ctx.moveTo(p0[0], p0[1]); ctx.lineTo(p1[0], p1[1]);
+      ctx.stroke();
+    }
   }
 
-  // Ground line, so the arm does not float in nothing.
-  ctx.strokeStyle = '#27272e'; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(0, oy); ctx.lineTo(w, oy); ctx.stroke();
+
+  // ── contact shadow, sized to the real footprint ───────────────────────────
+  if (minX < maxX){
+    const c  = project(toView([(minX+maxX)/2, (minY+maxY)/2, 0]));
+    const ex = project(toView([maxX + 0.03, (minY+maxY)/2, 0]));
+    const ey = project(toView([(minX+maxX)/2, maxY + 0.03, 0]));
+    const rx = Math.max(6, Math.hypot(ex[0]-c[0], ex[1]-c[1]));
+    const ry = Math.max(4, Math.hypot(ey[0]-c[0], ey[1]-c[1]) * 0.55);
+    const g = ctx.createRadialGradient(c[0], c[1], 0, c[0], c[1], Math.max(rx,ry));
+    g.addColorStop(0, 'rgba(0,0,0,0.45)');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.save();
+    ctx.translate(c[0], c[1]); ctx.scale(1, ry/Math.max(rx,ry));
+    ctx.translate(-c[0], -c[1]);
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(c[0], c[1], Math.max(rx,ry), 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // ── shade and fill ────────────────────────────────────────────────────────
+  const L = ARM_LIGHT;
+  for (const [, p, col, n] of faces){
+    // Lambert diffuse. Two-sided via abs so a stray inward-wound triangle
+    // shows as lit rather than as a black hole.
+    const diff = Math.abs(n[0]*L[0] + n[1]*L[1] + n[2]*L[2]);
+    // Blinn-Phong specular against the view direction (0,0,-1).
+    let hx = L[0], hy = L[1], hz = L[2] - 1;
+    const hl = Math.hypot(hx, hy, hz) || 1;
+    const spec = Math.pow(Math.abs((n[0]*hx + n[1]*hy + n[2]*hz)/hl), 24) * 0.45;
+    const f = 0.30 + 0.70*diff;             // ambient + diffuse
+    const r = Math.min(255, col[0]*f + 255*spec)|0;
+    const g2= Math.min(255, col[1]*f + 255*spec)|0;
+    const b = Math.min(255, col[2]*f + 255*spec)|0;
+    ctx.fillStyle = ctx.strokeStyle = `rgb(${r},${g2},${b})`;
+    // ‼️ ox/oy are added HERE, not inside project(): the centring pass needs
+    // the raw projected box first, and it only exists once every face has been
+    // projected. Applying the offset in project() would need the answer before
+    // the question.
+    ctx.beginPath();
+    ctx.moveTo(p[0][0]+ox, p[0][1]+oy);
+    ctx.lineTo(p[1][0]+ox, p[1][1]+oy);
+    ctx.lineTo(p[2][0]+ox, p[2][1]+oy);
+    ctx.closePath();
+    ctx.fill();
+    // Stroking with the fill colour closes the hairline seams that appear
+    // between separately-filled adjacent triangles on a 2D canvas.
+    ctx.lineWidth = 0.6;
+    ctx.stroke();
+  }
 }
 
 (function armWireInteraction(){

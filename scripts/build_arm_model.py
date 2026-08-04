@@ -119,9 +119,17 @@ def main():
         total_in += len(tris)
         kept = reduce_tris(tris, BUDGET.get(link, DEFAULT_BUDGET))
         total_out += len(kept)
-        # Millimetres as integers: the viewport is a few hundred pixels across
-        # a ~0.4 m arm, so sub-millimetre precision cannot be displayed.
-        links[link] = np.round(kept * 1000.0).astype(int).reshape(-1).tolist()
+        # ‼️ The STLs are ALREADY in millimetres — measured: base_link is 98.5
+        # units across, and the real part is ~98 mm. This used to multiply by
+        # 1000 "to convert metres to millimetres", which made the file
+        # MICROmetres: link2 came out 246815, i.e. a 247-metre forearm. The
+        # dashboard divided by 1000 and drew a 247 m arm, which orthographic
+        # projection hid as an abstract grey blob and perspective turned into
+        # spikes across the canvas.
+        #
+        # Integers, because the viewport is a few hundred pixels across a
+        # ~0.4 m arm and sub-millimetre precision cannot be displayed.
+        links[link] = np.round(kept).astype(int).reshape(-1).tolist()
         print(f'  {link:20s} {len(tris):6d} -> {len(kept):5d} triangles')
 
     model = {
