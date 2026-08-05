@@ -103,6 +103,14 @@ class SlipMonitorNode(Node):
         # problem — and those look identical on a live readout.
         self.declare_parameter('slip_map', True)
         self.declare_parameter('slip_map_cell', 0.5)
+        # ‼️ Ignore corrections for the first half minute. AMCL's initial
+        # convergence is a correction like any other — the first live run
+        # recorded 11.7 cm / 3.7° eleven seconds after boot — but it is the
+        # filter finding itself, not the floor stealing anything. Left in, every
+        # startup would mark wherever the robot was switched on, which is
+        # usually the dock, and after fifty boots the dock would be the worst
+        # spot in the house.
+        self.declare_parameter('slip_map_settle_seconds', 30.0)
         self.declare_parameter('slip_map_min_shift', 0.03)
         self.declare_parameter('slip_map_half_life_days', 14.0)
         self._map_pub = self.create_publisher(String, 'slip_map', latched)
@@ -118,6 +126,8 @@ class SlipMonitorNode(Node):
                 cell=p('slip_map_cell').value,
                 half_life_days=p('slip_map_half_life_days').value)
             self._slipmap.load()
+            self._settle_until = (time.monotonic()
+                                  + float(p('slip_map_settle_seconds').value))
             # ‼️ 5 Hz, not 1 Hz. The mark lands where the robot was WHEN THE
             # CORRECTION WAS SEEN, not where it was when AMCL made it, so the
             # sampling period is a position error: at 1 Hz and 0.2 m/s that is
@@ -231,6 +241,22 @@ class SlipMonitorNode(Node):
         absolute transform also carries wherever the odom origin happened to be
         at boot, which on a healthy robot reads as metres.
         """
+        if time.monotonic() < self._settle_until:
+            # Still settling. The transform is READ anyway, so _corr_prev is
+            # current when the window closes — otherwise the first real sample
+            # would measure against nothing and the whole convergence would be
+            # attributed to wherever the robot happened to be standing then.
+            try:
+                c = self._tf_buffer.lookup_transform('map', 'odom',
+                                                     rclpy.time.Time())
+                t, r = c.transform.translation, c.transform.rotation
+                self._corr_prev = (t.x, t.y,
+                                   math.atan2(2.0 * (r.w * r.z + r.x * r.y),
+                                              1.0 - 2.0 * (r.y * r.y + r.z * r.z)))
+            except tf2_ros.TransformException:
+                pass
+            return
+
         try:
             corr = self._tf_buffer.lookup_transform('map', 'odom',
                                                     rclpy.time.Time())
