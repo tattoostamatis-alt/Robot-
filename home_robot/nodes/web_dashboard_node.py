@@ -335,7 +335,7 @@ class DashboardNode(Node):
 
         # ── Sensor fusion tabs ──────────────────────────────────────────────
         # Two questions the rest of the dashboard cannot answer:
-        #   1. "Σύντηξη": the EKF takes vx from the wheels and yaw from the
+        #   1. "Sensor fusion": the EKF takes vx from the wheels and yaw from the
         #      BNO085 (see config/ekf.yaml) and AMCL corrects what is left. When
         #      the pose walks off, the only useful question is WHICH input lied,
         #      and that needs the three headings side by side — the IMU tab
@@ -4539,7 +4539,9 @@ const TABS = [
   ['arm',    '🦾', 'Χέρι'],
   ['base',   '🧹', 'Σκούπα'],
   ['imu',    '🧭', 'IMU'],
-  ['fuse',   '🔀', 'Σύντηξη'],
+  // Left in English on purpose, in both languages: "Σύντηξη" alone reads as
+  // nuclear fusion, and this is the name the user asked for.
+  ['fuse',   '🔀', 'Sensor fusion'],
   ['rtabmap','🏠', 'Σπίτι 3D'],
   ['cost',   '🧱', 'Costmap'],
   ['nerf',   '✨', 'NeRF'],
