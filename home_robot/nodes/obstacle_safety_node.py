@@ -32,6 +32,7 @@ import time
 
 import rclpy
 from geometry_msgs.msg import Twist
+from rcl_interfaces.msg import SetParametersResult
 from rclpy.node import Node
 from std_msgs.msg import Bool, Float32, String
 
@@ -48,6 +49,12 @@ class ObstacleSafetyNode(Node):
         self.safety_distance = self.get_parameter('safety_distance').value
         self.center_fraction = self.get_parameter('center_fraction').value
         self.detection_timeout = self.get_parameter('detection_timeout').value
+
+        # These three were read once, here, and never again — so the web
+        # dashboard's safety tab (and `ros2 param set`) could write a new
+        # stopping distance, get "successful", and change nothing at all. The
+        # callback is what makes the slider mean something without a restart.
+        self.add_on_set_parameters_callback(self._on_set_parameters)
 
         self.obstacle_blocking = False
         self.obstacle_info = ''
@@ -68,6 +75,38 @@ class ObstacleSafetyNode(Node):
         self.distance_pub = self.create_publisher(Float32, 'obstacle_safety/min_distance', 1)
 
         self.create_timer(0.5, self._check_staleness)
+
+    _LIMITS = {'safety_distance': (0.05, 3.0),
+               'center_fraction': (0.05, 1.0),
+               'detection_timeout': (0.5, 30.0)}
+
+    def _on_set_parameters(self, params):
+        """Accept a new clearance live, but refuse one that disables the guard.
+
+        The dashboard clamps too, and it is not the only caller: `ros2 param
+        set` and anything else on the graph reach the same service. A rejected
+        parameter leaves the old value in place, which for a safety node is the
+        right direction to fail in.
+        """
+        for p in params:
+            limits = self._LIMITS.get(p.name)
+            if limits is None:
+                continue
+            try:
+                value = float(p.value)
+            except (TypeError, ValueError):
+                return SetParametersResult(
+                    successful=False, reason=f'{p.name} must be a number')
+            lo, hi = limits
+            if not lo <= value <= hi:
+                return SetParametersResult(
+                    successful=False,
+                    reason=f'{p.name} must be between {lo} and {hi}')
+        for p in params:
+            if p.name in self._LIMITS:
+                setattr(self, p.name, float(p.value))
+                self.get_logger().info(f'{p.name} is now {float(p.value):.2f}')
+        return SetParametersResult(successful=True)
 
     def _detections_cb(self, msg: String):
         self._last_detection_time = time.monotonic()

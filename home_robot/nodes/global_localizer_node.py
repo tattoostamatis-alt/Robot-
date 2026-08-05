@@ -33,6 +33,7 @@ from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import OccupancyGrid
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
+from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, Image, LaserScan
 from std_srvs.srv import Empty
 import tf2_ros
@@ -914,7 +915,21 @@ class GlobalLocalizerNode(Node):
 
     def _publish(self, x: float, y: float, yaw: float, tight: bool = False):
         msg = PoseWithCovarianceStamped()
-        msg.header.stamp    = self.get_clock().now().to_msg()
+        # ‼️ Stamp 0 = "use the latest transform you have", NOT now().
+        #
+        # AMCL transforms every initial pose from map into base_link AT THE
+        # STAMP IT CARRIES. Stamped with now(), that asks the TF buffer for a
+        # transform a few milliseconds into the future, and under load odom is
+        # exactly that far behind — measured 2026-08-05 at boot, 55 ms:
+        #
+        #   Failed to transform initial pose in time (Lookup would require
+        #   extrapolation into the future)
+        #
+        # AMCL then DROPS the pose. It is not a cosmetic warning: the whole
+        # exhaustive scan match is thrown away and the robot keeps whatever
+        # pose it happened to boot with, silently, because nothing here ever
+        # hears that the message was refused. Stamp 0 cannot extrapolate.
+        msg.header.stamp    = Time().to_msg()
         msg.header.frame_id = 'map'
         msg.pose.pose.position.x = x
         msg.pose.pose.position.y = y

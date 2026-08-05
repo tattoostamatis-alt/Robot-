@@ -108,7 +108,13 @@ def _install_stubs():
                       spin=lambda *a, **k: None,
                       try_shutdown=lambda *a, **k: None),
         'rclpy.node': _mod('rclpy.node', Node=_Node),
-        'rclpy.time': _mod('rclpy.time', Time=lambda *a, **k: None),
+        # Time() has to answer to_msg(): /initialpose is deliberately stamped
+        # with a zero Time rather than now(), because AMCL refuses a stamp in
+        # the future. See test_log_tab_noise.py.
+        'rclpy.time': _mod(
+            'rclpy.time',
+            Time=lambda *a, **k: types.SimpleNamespace(
+                to_msg=lambda: types.SimpleNamespace(sec=0, nanosec=0))),
         'rclpy.qos': _mod('rclpy.qos',
                           QoSProfile=lambda **kw: types.SimpleNamespace(**kw),
                           QoSDurabilityPolicy=types.SimpleNamespace(TRANSIENT_LOCAL=1),

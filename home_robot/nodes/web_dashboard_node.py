@@ -49,7 +49,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 from rcl_interfaces.msg import Log as RosoutLog
 from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
-from rcl_interfaces.srv import SetParameters
+from rcl_interfaces.srv import GetParameters, SetParameters
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from sensor_msgs.msg import Image, Imu, JointState, LaserScan, PointCloud2
@@ -63,6 +63,7 @@ from action_msgs.srv import CancelGoal
 from std_srvs.srv import Empty
 
 from home_robot.compass import offset_from_known_bearing
+from home_robot import safety_settings
 from home_robot.system_settings import (
     bt_args, parse_bt_devices, parse_devices, parse_volume, parse_wifi_list,
     volume_args, wifi_connect_args)
@@ -595,7 +596,144 @@ class DashboardNode(Node):
         # but pointless to hold for the whole life of the dashboard.
         self._rtab_clients: dict = {}
 
+        # ── safety clearances ────────────────────────────────────────────────
+        # The saved settings, the parameter clients that carry them, and the
+        # set of nodes they have already been pushed to since this dashboard
+        # started. Applying is not a one-shot at boot: the dashboard usually
+        # comes up before Nav2 has finished configuring its costmaps, and
+        # roomba_driver restarts on its own after a serial drop. So the timer
+        # keeps trying until each node has actually taken its values once.
+        self._safety = safety_settings.load()
+        self._safety_set: dict = {}
+        self._safety_get: dict = {}
+        self._safety_applied: set = set()
+        self._safety_live: dict = {}     # what the nodes report back
+        self.create_timer(3.0, self._safety_tick)
+
         self.create_timer(2.0, self._publish_system)
+
+    # ── safety clearances ────────────────────────────────────────────────────
+
+    def _safety_client(self, cache, srv_type, node_name, suffix):
+        cli = cache.get(node_name)
+        if cli is None:
+            cli = self.create_client(srv_type, f'{node_name}/{suffix}')
+            cache[node_name] = cli
+        return cli
+
+    def _safety_tick(self):
+        """Push settings to any node that has not taken them, then read back.
+
+        Read-back is the point of the whole loop: a launch argument
+        (`obstacle_safety_distance`) or a hand-edited nav2_params.yaml can
+        disagree with the saved file, and a panel that showed the file would be
+        showing a number the robot is not using. What gets displayed is always
+        what the live node answered.
+        """
+        for node, params in safety_settings.targets(self._safety).items():
+            cli = self._safety_client(self._safety_set, SetParameters,
+                                      node, 'set_parameters')
+            if not cli.service_is_ready():
+                # Node not up (or restarted) — drop it back to un-applied so it
+                # gets its values again when it returns.
+                self._safety_applied.discard(node)
+                continue
+            if node not in self._safety_applied:
+                self._safety_applied.add(node)
+                cli.call_async(self._safety_request(params))
+        self._safety_read()
+        self._state.broadcast({'type': 'safety', 'v': self._safety_payload()})
+
+    @staticmethod
+    def _safety_request(params: dict) -> SetParameters.Request:
+        req = SetParameters.Request()
+        for name, value in params.items():
+            if isinstance(value, bool):
+                pv = ParameterValue(type=ParameterType.PARAMETER_BOOL,
+                                    bool_value=value)
+            else:
+                pv = ParameterValue(type=ParameterType.PARAMETER_DOUBLE,
+                                    double_value=float(value))
+            req.parameters.append(Parameter(name=name, value=pv))
+        return req
+
+    def _safety_read(self):
+        by_node: dict = {}
+        for spec in safety_settings.SPECS:
+            for node, param in spec.targets:
+                by_node.setdefault(node, []).append(param)
+        for node, names in by_node.items():
+            cli = self._safety_client(self._safety_get, GetParameters,
+                                      node, 'get_parameters')
+            if not cli.service_is_ready():
+                for name in names:
+                    self._safety_live.pop((node, name), None)
+                continue
+            req = GetParameters.Request()
+            req.names = names
+            fut = cli.call_async(req)
+            fut.add_done_callback(
+                lambda f, n=node, ns=list(names): self._safety_got(n, ns, f))
+
+    def _safety_got(self, node, names, fut):
+        try:
+            values = fut.result().values
+        except Exception:                                     # noqa: BLE001
+            return
+        for name, val in zip(names, values):
+            if val.type == ParameterType.PARAMETER_DOUBLE:
+                self._safety_live[(node, name)] = val.double_value
+            elif val.type == ParameterType.PARAMETER_BOOL:
+                self._safety_live[(node, name)] = val.bool_value
+            elif val.type == ParameterType.PARAMETER_INTEGER:
+                self._safety_live[(node, name)] = float(val.integer_value)
+
+    def _safety_payload(self) -> dict:
+        """{key: {'set':…, 'live':…, 'nodes': n_up}} for the browser.
+
+        `live` is None where no node answered, which is how the panel greys a
+        row out instead of showing a stale number as if it were in force —
+        obstacle_safety_node is off in half the launch configurations, and a
+        slider that looks active while nothing reads it is a lie about what is
+        guarding the robot.
+        """
+        out = {}
+        for spec in safety_settings.SPECS:
+            live = [self._safety_live.get(t) for t in spec.targets]
+            answered = [v for v in live if v is not None]
+            out[spec.key] = {
+                'set': self._safety.get(spec.key, spec.default),
+                # Where a knob writes two nodes (the costmaps) they can be out
+                # of step — one configured, one not. Report the minimum, i.e.
+                # the least clearance actually in force.
+                'live': (min(answered) if len(answered) == len(live) else None),
+                'nodes': len(answered),
+                'total': len(spec.targets),
+            }
+        return out
+
+    def _safety_apply(self, key, value):
+        """One knob, from the browser. Saved first, then pushed."""
+        clamped = safety_settings.clamp(key, value)
+        if clamped is None:
+            return
+        self._safety[key] = clamped
+        try:
+            safety_settings.save(self._safety)
+        except OSError as exc:
+            self.get_logger().warn(f'could not save safety settings: {exc}')
+        spec = safety_settings.BY_KEY[key]
+        for node, param in spec.targets:
+            cli = self._safety_client(self._safety_set, SetParameters,
+                                      node, 'set_parameters')
+            if cli.service_is_ready():
+                cli.call_async(self._safety_request({param: clamped}))
+        self.get_logger().info(f'safety: {key} = {clamped}')
+        self._state.broadcast({'type': 'safety', 'v': self._safety_payload()})
+
+    def _safety_reset(self):
+        for key, value in safety_settings.defaults().items():
+            self._safety_apply(key, value)
 
     # ── ROS callbacks ────────────────────────────────────────────────────────
 
@@ -1925,6 +2063,10 @@ class DashboardNode(Node):
                 payload['motion_enabled'] = bool(msg['motion_enabled'])
             if payload:
                 self._bind_pub.publish(String(data=json.dumps(payload)))
+        elif t == 'safety_set':
+            self._safety_apply(str(msg.get('key', '')), msg.get('value'))
+        elif t == 'safety_reset':
+            self._safety_reset()
         elif t == 'doa_rotate':
             # doa_node echoes the new value back on /doa/rotate_state, which is
             # what actually moves the checkbox — so a node that is not running
@@ -2652,6 +2794,12 @@ def _make_html(rooms: list, token: str = '') -> str:
             .replace('__ARM_LIMITS__', json.dumps(ARM_LIMITS))
             .replace('__ARM_JOINTS__', json.dumps(ARM_JOINTS))
             .replace('__HAS_NOVNC__', json.dumps(os.path.isdir(NOVNC_DIR)))
+            .replace('__SAFETY_SPECS__', json.dumps(
+                {s.key: {'kind': s.kind, 'def': s.default, 'lo': s.lo,
+                         'hi': s.hi, 'step': s.step,
+                         'warn_above': s.warn_above, 'warn_below': s.warn_below}
+                 for s in safety_settings.SPECS}))
+            .replace('__SAFETY_INFO__', json.dumps(safety_settings.INFO_ONLY))
             .replace('__I18N__', json.dumps(as_js_table(), ensure_ascii=False))
             .replace('__LANGS__', json.dumps(LANGUAGES, ensure_ascii=False)))
 
@@ -2762,6 +2910,33 @@ button{font:inherit;color:inherit}
   background:#27272e;color:#a1a1aa}
 .pill.ok{background:#052e1a;color:#4ade80}
 .pill.bad{background:#450a0a;color:#f87171}
+/* ── Safety tab: one row per clearance ──
+   ‼️ sf- prefixed, NOT .srow/.slab. `.srow` is already the map tab's speed
+   sliders (a 96px/1fr/74px grid, right above); reusing the name put every
+   label in a 96px column with the help text beside it as a second column, and
+   the whole card read as broken on a phone. Measured in WebKit at 390x664 —
+   test_dashboard_safety_tab.py::test_the_safety_rows_do_not_reuse_map_classes.
+   The value sits on the label's line (right-aligned, monospace) so a column of
+   numbers is scannable; the slider gets the full width underneath, because on
+   a phone a slider sharing a line with text is too short to aim. */
+.sfrow{padding:11px 0;border-top:1px solid #27272e}
+.sfrow:first-of-type{border-top:none}
+.sfrow.off{opacity:.45}
+.sflab{display:flex;justify-content:space-between;align-items:baseline;gap:10px;
+  font-size:12.5px;color:#e4e4e7}
+.sfval{font-family:ui-monospace,Menlo,monospace;color:#7cccff;font-size:12px;
+  white-space:nowrap;flex:0 0 auto}
+.sfrow input[type=range]{width:100%;margin:9px 0 0;-webkit-appearance:none;
+  appearance:none;height:6px;border-radius:4px;background:#3f3f46;outline:none}
+.sfrow input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;
+  appearance:none;width:20px;height:20px;border-radius:50%;background:#3b82f6;
+  cursor:pointer;border:2px solid #18181b}
+.sfrow input[type=range]::-moz-range-thumb{width:20px;height:20px;
+  border-radius:50%;background:#3b82f6;cursor:pointer;border:2px solid #18181b}
+.sfhelp{font-size:11.5px;color:#71717a;line-height:1.6;margin-top:6px}
+.sfwarn{font-size:11.5px;color:#fbbf24;line-height:1.6;margin-top:6px;display:none}
+.sfrow.warned .sfwarn{display:block}
+.sftog{display:flex;align-items:center;gap:9px;cursor:pointer;user-select:none}
 /* ── System tab: bars, temperatures, disks ── */
 .mrow{display:grid;grid-template-columns:64px 1fr auto;gap:10px;align-items:center;
   margin-bottom:9px;font-size:12.5px}
@@ -3717,7 +3892,7 @@ button{font:inherit;color:inherit}
       </div>
 
       <div class="card" style="margin-bottom:9px">
-        <h3>Ασφάλεια <span class="badge" id="tk-badge">—</span></h3>
+        <h3>Κλειδί πρόσβασης <span class="badge" id="tk-badge">—</span></h3>
         <div id="tk-out" style="font-size:12px;line-height:1.6;
           word-break:break-all;color:#a1a1aa"></div>
         <div class="row" style="margin-top:10px">
@@ -3732,6 +3907,99 @@ button{font:inherit;color:inherit}
         </p>
       </div>
 
+    </section>
+
+    <!-- Every row here writes a LIVE ROS parameter the moment the slider is
+         released; nothing waits for a restart. The rows are static markup (not
+         built from the spec table in JS) so the translation extractor can see
+         every label — see tests/test_dashboard_i18n.py. -->
+    <section class="pane" id="p-safe">
+      <div class="card">
+        <h3>Απόσταση από εμπόδια <span class="badge" id="sf-cam-badge">—</span></h3>
+        <div class="sfrow" data-key="stop_distance">
+          <div class="sflab">Πόσο κοντά πλησιάζει πριν σταματήσει</div>
+          <div class="sfhelp">Το ρομπότ κόβει την ευθεία κίνηση όταν δει κάτι
+            πιο κοντά από αυτό. Συνεχίζει να στρίβει και να κάνει όπισθεν, ώστε
+            να μπορεί να ξεφύγει.</div>
+        </div>
+        <div class="sfrow" data-key="center_width">
+          <div class="sflab">Πόσο φαρδιά κοιτάει μπροστά του</div>
+          <div class="sfhelp">Ποιο κομμάτι της εικόνας μετράει ως «μπροστά». Στο
+            1.00 τον σταματά ο,τιδήποτε φαίνεται στην άκρη του κάδρου — σε
+            διάδρομο αυτό σημαίνει ότι δεν ξεκινά ποτέ.</div>
+        </div>
+        <div class="sfrow" data-key="detector_timeout">
+          <div class="sflab">Σε πόση σιωπή της κάμερας φρενάρει</div>
+          <div class="sfhelp">Αν η ανίχνευση σταματήσει (κόλλησε η κάμερα,
+            τερμάτισε ο detector), η ευθεία κίνηση μπλοκάρεται μετά από τόση
+            ώρα αντί να θεωρηθεί ο δρόμος καθαρός.</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Απόσταση από τοίχους <span class="badge" id="sf-nav-badge">—</span></h3>
+        <div class="sfrow" data-key="inflation_radius">
+          <div class="sflab">Πόσο μακριά από τοίχους σχεδιάζει τη διαδρομή</div>
+          <div class="sfhelp">Ζώνη γύρω από κάθε εμπόδιο που ο planner αποφεύγει.
+            Μεγαλύτερη = περνά πιο κεντραρισμένο.</div>
+          <div class="sfwarn">‼️ Οι πόρτες εδώ είναι ~0.78 m. Πάνω από 0.30 m οι
+            ζώνες των δύο παραστάδων ενώνονται και το ρομπότ αρνείται να περάσει
+            από άνοιγμα που στον χάρτη φαίνεται καθαρό.</div>
+        </div>
+        <div class="sfrow" data-key="cost_scaling">
+          <div class="sflab">Πόσο απότομα χαλαρώνει αυτή η ζώνη</div>
+          <div class="sfhelp">Μεγαλύτερο = η αποφυγή σβήνει πιο γρήγορα με την
+            απόσταση, άρα δέχεται να περάσει πιο κοντά στον τοίχο.</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Αισθητήρες επαφής <span class="badge" id="sf-base-badge">—</span></h3>
+        <p class="sfhelp" style="margin:0 0 10px">
+          ‼️ Η βάση τρέχει σε FULL mode: το ίδιο το Roomba ΔΕΝ σταματά μόνο του
+          σε προφυλακτήρα ή σε σκαλί. Αυτοί οι τρεις διακόπτες είναι το μόνο που
+          το κάνει. Κλείσ' τους μόνο για χαλασμένο αισθητήρα.
+        </p>
+        <!-- The checkbox is injected into [data-box]; the label text stays
+             here as ordinary markup so i18nCollect() sees a text node it owns.
+             Moving it in JS produced a node the translator had not collected,
+             and the row stayed Greek in every language. -->
+        <div class="sfrow" data-key="bump_stop">
+          <div class="sflab"><label class="sftog"><span data-box></span><span
+            >Στοπ στον προφυλακτήρα</span></label></div>
+        </div>
+        <div class="sfrow" data-key="cliff_stop">
+          <div class="sflab"><label class="sftog"><span data-box></span><span
+            >Στοπ στον γκρεμό (σκαλί)</span></label></div>
+        </div>
+        <div class="sfrow" data-key="wheel_drop_stop">
+          <div class="sflab"><label class="sftog"><span data-box></span><span
+            >Στοπ όταν πέφτει τροχός στο κενό</span></label></div>
+        </div>
+        <div class="sfrow" data-key="bump_block_s">
+          <div class="sflab">Πόσο μένει μπλοκαρισμένο μετά από χτύπημα</div>
+          <div class="sfhelp">Κρατά την ευθεία κλειστή τόση ώρα αφού ελευθερωθεί
+            ο προφυλακτήρας, ώστε το ρομπότ να μην ξαναμπεί στο ίδιο έπιπλο.</div>
+        </div>
+        <div class="sfrow" data-key="cliff_block_s">
+          <div class="sflab">Πόσο μένει μπλοκαρισμένο μετά από γκρεμό</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Σκληρά όρια <span class="badge">σταθερά</span></h3>
+        <div id="sf-info" class="grid2"></div>
+        <p class="sfhelp" style="margin-top:10px">
+          Αυτά ΔΕΝ αλλάζουν από εδώ. Ο collision_monitor τα διαβάζει μία φορά
+          στην εκκίνηση, οπότε ένας διακόπτης εδώ θα έδειχνε νούμερο που το
+          ρομπότ δεν χρησιμοποιεί. Αλλάζουν στο config/nav2_params.yaml και
+          θέλουν πλήρη επανεκκίνηση.
+        </p>
+        <div class="row" style="margin-top:12px">
+          <button class="btn warn" id="b-sf-reset">↺ Επαναφορά προεπιλογών</button>
+        </div>
+        <div id="sf-msg" class="sfhelp" style="margin-top:9px"></div>
+      </div>
     </section>
 
     <section class="pane" id="p-log">
@@ -3816,6 +4084,7 @@ const TABS = [
   ['llm',    '💬', 'Φωνή'],
   ['gazebo', '🌍', 'Gazebo'],
   ['sys',    '📊', 'Σύστημα'],
+  ['safe',   '🛡️', 'Ασφάλεια'],
   ['log',    '📜', 'Log'],
   ['set',    '⚙️', 'Ρύθμιση'],
 ];
@@ -4273,7 +4542,110 @@ const HANDLERS = {
   fall_event(m){ onFallEvent(m); },
   speaker(m){ onSpeaker(m); },
   doa_rotate(m){ onDoaRotate(m); },
+  safety(m){ onSafety(m.v); },
 };
+
+// ── safety clearances ──────────────────────────────────────────────────────
+// Two numbers per row and they are not the same thing: what this page ASKED
+// for (saved to disk, survives `robot max`) and what the live node ANSWERED.
+// They differ whenever a launch argument overrides the file, or the owning node
+// is not running at all — and a panel that showed only the first would be a
+// picture of a guard that may not exist. The control is greyed out and the
+// badge says so rather than moving a slider nothing reads.
+const SAFETY_SPECS = __SAFETY_SPECS__;
+const SAFETY_INFO  = __SAFETY_INFO__;
+
+function safetyBuild(){
+  document.querySelectorAll('#p-safe .sfrow').forEach(row => {
+    const key = row.dataset.key, spec = SAFETY_SPECS[key];
+    if (!spec) return;
+    const lab = row.querySelector('.sflab');
+    if (spec.kind === 'bool'){
+      // The <label> and its text are already in the markup (so the translator
+      // owns that text node) — only the input itself is injected here.
+      const box = document.createElement('input');
+      box.type = 'checkbox'; box.dataset.input = key;
+      row.querySelector('[data-box]').appendChild(box);
+      const val = document.createElement('span');
+      val.className = 'sfval'; val.dataset.val = key;
+      lab.appendChild(val);
+      box.addEventListener('change', () =>
+        send({type:'safety_set', key, value: box.checked}));
+    } else {
+      const val = document.createElement('span');
+      val.className = 'sfval'; val.dataset.val = key;
+      lab.appendChild(val);
+      const sl = document.createElement('input');
+      sl.type = 'range'; sl.dataset.input = key;
+      sl.min = spec.lo; sl.max = spec.hi; sl.step = spec.step;
+      sl.value = spec.def;
+      row.insertBefore(sl, lab.nextSibling);
+      // 'input' paints while dragging (no traffic), 'change' commits on
+      // release — one parameter write per gesture instead of forty.
+      sl.addEventListener('input',  () => safetyPaintRow(key, +sl.value, null));
+      sl.addEventListener('change', () =>
+        send({type:'safety_set', key, value:+sl.value}));
+    }
+  });
+  const info = $('sf-info');
+  SAFETY_INFO.forEach(row => {
+    const k = document.createElement('span');
+    k.className = 'k'; k.textContent = row.source;
+    const v = document.createElement('span');
+    v.className = 'v'; v.textContent = row.value.toFixed(2) + ' ' + row.unit;
+    info.appendChild(k); info.appendChild(v);
+  });
+}
+
+// Decimals that match the step, so 0.5 does not render as "0.5" next to "0.22".
+function safetyFmt(key, v){
+  const spec = SAFETY_SPECS[key];
+  return v.toFixed(spec.step < 0.05 ? 2 : (spec.step < 1 ? 2 : 1));
+}
+
+function safetyPaintRow(key, asked, live){
+  const spec = SAFETY_SPECS[key];
+  const row = document.querySelector('#p-safe .sfrow[data-key="' + key + '"]');
+  if (!row || !spec) return;
+  const val = row.querySelector('[data-val="' + key + '"]');
+  if (spec.kind === 'bool'){
+    if (val) val.textContent = asked ? t('ΕΝΕΡΓΟ') : t('ΚΛΕΙΣΤΟ');
+  } else {
+    // Show the live value beside the asked one only when they disagree —
+    // otherwise every row would carry the same number twice.
+    const same = live === null || live === undefined
+                 || Math.abs(live - asked) < 1e-6;
+    if (val) val.textContent = safetyFmt(key, asked)
+      + (same ? '' : ' → ' + t('ενεργό') + ' ' + safetyFmt(key, live));
+    row.classList.toggle('warned',
+      (spec.warn_above !== null && asked > spec.warn_above) ||
+      (spec.warn_below !== null && asked < spec.warn_below));
+  }
+}
+
+function onSafety(v){
+  let camUp = 0, navUp = 0, baseUp = 0;
+  Object.keys(SAFETY_SPECS).forEach(key => {
+    const st = v[key];
+    if (!st) return;
+    const row = document.querySelector('#p-safe .sfrow[data-key="' + key + '"]');
+    const inp = document.querySelector('[data-input="' + key + '"]');
+    // Never fight the user's finger: a slider being dragged keeps its value.
+    if (inp && document.activeElement !== inp){
+      if (SAFETY_SPECS[key].kind === 'bool') inp.checked = !!st.set;
+      else inp.value = st.set;
+    }
+    if (inp) inp.disabled = st.nodes === 0;
+    if (row) row.classList.toggle('off', st.nodes === 0);
+    safetyPaintRow(key, st.set, st.live);
+    if (key === 'inflation_radius' || key === 'cost_scaling') navUp = Math.max(navUp, st.nodes);
+    else if (key.startsWith('bump') || key.startsWith('cliff') || key.startsWith('wheel')) baseUp = Math.max(baseUp, st.nodes);
+    else camUp = Math.max(camUp, st.nodes);
+  });
+  $('sf-cam-badge').textContent  = camUp  ? t('ενεργό') : t('δεν τρέχει');
+  $('sf-nav-badge').textContent  = navUp  ? t('ενεργό') : t('δεν τρέχει');
+  $('sf-base-badge').textContent = baseUp ? t('ενεργό') : t('δεν τρέχει');
+}
 
 // ── turn-toward-the-speaker switch ─────────────────────────────────────────
 // doa_node owns this bit; we only ever paint what it reports. Ticking the box
@@ -5472,6 +5844,12 @@ $('b-nerf-stop').addEventListener('click',()=>send({type:'nerf_capture', on:fals
 $('b-follow').addEventListener('click',()=>send({type:'follow', on:true}));
 $('b-follow-stop').addEventListener('click',()=>send({type:'follow', on:false}));
 
+$('b-sf-reset').addEventListener('click', ()=>{
+  if(!confirm(t('Επαναφορά όλων των ρυθμίσεων ασφαλείας στις προεπιλογές;'))) return;
+  send({type:'safety_reset'});
+  $('sf-msg').textContent = t('Επαναφέρθηκαν.');
+});
+
 let volDragging = false;
 $('b-tk-new').addEventListener('click', ()=>{
   if(confirm(t('Νέο κλειδί; Ο παλιός σύνδεσμος θα πάψει να δουλεύει.')))
@@ -5694,7 +6072,8 @@ $('b-arm-limp').onclick = ()=>{
 };
 $('b-arm-init').onclick = ()=>send({type:'arm_raw',cmd:'{"T":210,"cmd":1}'});
 $('b-arm-moveit').onclick = ()=>showTab('moveit');
-$('b-log-clear').onclick  = ()=>{ $('log-list').innerHTML=''; logSeen=0; $('log-count').textContent='0'; };
+$('b-log-clear').onclick  = ()=>{ $('log-list').innerHTML=''; logSeen=0; logLast=null;
+  $('log-count').textContent='0'; };
 $('b-cloud-reset').onclick = cloudReset;
 $('b-cost-smaller').onclick = ()=>costResize(1/COST_STEP);
 $('b-cost-bigger').onclick  = ()=>costResize(COST_STEP);
@@ -6515,17 +6894,41 @@ function cloudSetActive(on){
 // next warning yanks the line they were reading off the screen.
 const LOG_LEVELS = {30:['WARN','#facc15'], 40:['ERROR','#f87171'], 50:['FATAL','#f87171']};
 let logSeen = 0;
+let logLast = null;      // {key, count, el} — the run currently being folded
+
+// A repeating warning must not push everything else off the tab. The D435
+// reports "Incomplete video frame detected! Size 686856 out of 814335 bytes"
+// every few seconds under load, and the byte count differs every time, so
+// folding on the exact text would never match. Digits are replaced with # to
+// get the SHAPE of the message; identical shapes from the same node collapse
+// into one line with a counter, and any different message ends the run.
+const logShape = m => m.level + '|' + m.name + '|' +
+  String(m.text).replace(/\d+/g, '#');
+
 function addLog(m){
   const list = $('log-list');
   const stick = list.scrollHeight - list.scrollTop - list.clientHeight < 40;
   const [name, colour] = LOG_LEVELS[m.level] || ['LOG', '#a1a1aa'];
-  const d = document.createElement('div');
   const ts = new Date(m.t * 1000).toLocaleTimeString('el-GR');
+  const key = logShape(m);
+  $('log-count').textContent = ++logSeen;
+  if(logLast && logLast.key === key){
+    logLast.count++;
+    // The newest timestamp and the newest numbers, so a folded run still shows
+    // what is happening NOW rather than freezing on the first occurrence.
+    logLast.el.textContent =
+      `${ts}  ${name}  [${m.name}]  ${m.text}  ×${logLast.count}`;
+    if(stick) list.scrollTop = list.scrollHeight;
+    return;
+  }
+  const d = document.createElement('div');
   d.style.color = colour;
   d.textContent = `${ts}  ${name}  [${m.name}]  ${m.text}`;
   list.appendChild(d);
+  // The folded line is always the LAST one, and the trim always takes the
+  // first, so a run can never be folded into a node that has been detached.
+  logLast = {key: key, count: 1, el: d};
   while(list.children.length > 300) list.removeChild(list.firstChild);
-  $('log-count').textContent = ++logSeen;
   if(stick) list.scrollTop = list.scrollHeight;
 }
 function sendChat(kind){
@@ -6557,6 +6960,7 @@ for(const [code, name] of LANGS){
   b.onclick = () => setLang(code);
   $('lang-buttons').appendChild(b);
 }
+safetyBuild();             // rows must exist before applyLang() translates them
 applyLang();               // also builds the tabs, so it precedes showTab()
 
 // Set in JS so the stream carries the same token as the page.

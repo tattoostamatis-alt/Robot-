@@ -221,7 +221,10 @@ class AprilTagRelocalizer(Node):
         qx, qy, qz, qw = mat_to_quat(m_map_base)
 
         msg = PoseWithCovarianceStamped()
-        msg.header.stamp = self.get_clock().now().to_msg()
+        # Stamp 0, not now() — AMCL transforms the pose AT this stamp and a
+        # future one is refused outright ("extrapolation into the future"),
+        # which drops the tag fix in silence. See global_localizer_node._publish.
+        msg.header.stamp = Time().to_msg()
         msg.header.frame_id = self.map_frame
         msg.pose.pose.position.x = float(m_map_base[0, 3])
         msg.pose.pose.position.y = float(m_map_base[1, 3])

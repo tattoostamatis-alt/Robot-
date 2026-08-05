@@ -17,6 +17,7 @@ import rclpy
 import yaml
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from rclpy.node import Node
+from rclpy.time import Time
 
 
 POSE_DIR = os.path.expanduser('~/.ros')
@@ -119,7 +120,12 @@ class PoseSaverNode(Node):
             return
 
         msg = PoseWithCovarianceStamped()
-        msg.header.stamp    = self.get_clock().now().to_msg()
+        # Stamp 0, not now() — AMCL transforms the pose AT this stamp and a
+        # future one is refused outright ("extrapolation into the future").
+        # This node publishes ONCE and cancels its timer, so a refusal here is
+        # a saved pose thrown away without a word. See
+        # global_localizer_node._publish for the measurement.
+        msg.header.stamp    = Time().to_msg()
         msg.header.frame_id = 'map'
         msg.pose.pose.position.x    = x
         msg.pose.pose.position.y    = y

@@ -902,8 +902,122 @@ TRANSLATIONS = {
          'schwach und lauscht im GESAMTEN lokalen Netz — verbinde ein neues '
          'WLAN nur von hier, wenn du allen im Netz vertraust.'),
 
+    # ── safety tab ────────────────────────────────────────────────────────
+    # 'Ασφάλεια' is the tab; the dashboard token's card next door is
+    # 'Κλειδί πρόσβασης', because two panels both called "Security" is how a
+    # user ends up looking for the stopping distance under the access key.
+    'Ασφάλεια':          ('Safety', 'Sicherheit'),
+    'Απόσταση από εμπόδια': ('Distance from obstacles', 'Abstand zu Hindernissen'),
+    'Πόσο κοντά πλησιάζει πριν σταματήσει':
+        ('How close it gets before stopping',
+         'Wie nah es herankommt, bevor es stoppt'),
+    'Το ρομπότ κόβει την ευθεία κίνηση όταν δει κάτι πιο κοντά από αυτό. '
+    'Συνεχίζει να στρίβει και να κάνει όπισθεν, ώστε να μπορεί να ξεφύγει.':
+        ('The robot cuts forward motion when it sees something closer than '
+         'this. It keeps turning and reversing, so it can still get away.',
+         'Der Roboter stoppt die Vorwärtsfahrt, wenn er etwas Näheres sieht. '
+         'Drehen und Rückwärtsfahren bleiben möglich, damit er wegkommt.'),
+    'Πόσο φαρδιά κοιτάει μπροστά του':
+        ('How wide "ahead" is', 'Wie breit „voraus“ ist'),
+    'Ποιο κομμάτι της εικόνας μετράει ως «μπροστά». Στο 1.00 τον σταματά '
+    'ο,τιδήποτε φαίνεται στην άκρη του κάδρου — σε διάδρομο αυτό σημαίνει ότι '
+    'δεν ξεκινά ποτέ.':
+        ('Which part of the image counts as "ahead". At 1.00 anything at the '
+         'edge of the frame stops it — in a corridor that means it never '
+         'starts at all.',
+         'Welcher Teil des Bildes als „voraus“ zählt. Bei 1.00 stoppt ihn '
+         'alles am Bildrand — in einem Flur heißt das: er fährt nie los.'),
+    'Σε πόση σιωπή της κάμερας φρενάρει':
+        ('How long a silent camera is tolerated',
+         'Wie lange eine stumme Kamera toleriert wird'),
+    'Αν η ανίχνευση σταματήσει (κόλλησε η κάμερα, τερμάτισε ο detector), η '
+    'ευθεία κίνηση μπλοκάρεται μετά από τόση ώρα αντί να θεωρηθεί ο δρόμος '
+    'καθαρός.':
+        ('If detection stops (the camera hung, the detector exited), forward '
+         'motion is blocked after this long instead of the path being assumed '
+         'clear.',
+         'Wenn die Erkennung ausfällt (Kamera hängt, Detector beendet), wird '
+         'die Vorwärtsfahrt nach dieser Zeit gesperrt, statt den Weg als frei '
+         'anzunehmen.'),
+    'Απόσταση από τοίχους': ('Distance from walls', 'Abstand zu Wänden'),
+    'Πόσο μακριά από τοίχους σχεδιάζει τη διαδρομή':
+        ('How far from walls it plans its path',
+         'Wie weit von Wänden es seinen Weg plant'),
+    'Ζώνη γύρω από κάθε εμπόδιο που ο planner αποφεύγει. Μεγαλύτερη = περνά '
+    'πιο κεντραρισμένο.':
+        ('A zone around every obstacle that the planner avoids. Larger = it '
+         'passes more centred.',
+         'Eine Zone um jedes Hindernis, die der Planer meidet. Größer = er '
+         'fährt mittiger.'),
+    '‼️ Οι πόρτες εδώ είναι ~0.78 m. Πάνω από 0.30 m οι ζώνες των δύο '
+    'παραστάδων ενώνονται και το ρομπότ αρνείται να περάσει από άνοιγμα που '
+    'στον χάρτη φαίνεται καθαρό.':
+        ('‼️ The doorways here are ~0.78 m. Above 0.30 m the zones of the two '
+         'jambs meet and the robot refuses an opening that looks clear on the '
+         'map.',
+         '‼️ Die Türen hier sind ~0,78 m. Über 0,30 m treffen sich die Zonen '
+         'beider Pfosten und der Roboter verweigert eine Öffnung, die auf der '
+         'Karte frei aussieht.'),
+    'Πόσο απότομα χαλαρώνει αυτή η ζώνη':
+        ('How sharply that zone falls off',
+         'Wie stark diese Zone abfällt'),
+    'Μεγαλύτερο = η αποφυγή σβήνει πιο γρήγορα με την απόσταση, άρα δέχεται '
+    'να περάσει πιο κοντά στον τοίχο.':
+        ('Higher = the avoidance fades faster with distance, so it accepts '
+         'passing closer to the wall.',
+         'Höher = das Ausweichen klingt mit der Entfernung schneller ab, er '
+         'fährt also näher an der Wand vorbei.'),
+    'Αισθητήρες επαφής': ('Contact sensors', 'Kontaktsensoren'),
+    '‼️ Η βάση τρέχει σε FULL mode: το ίδιο το Roomba ΔΕΝ σταματά μόνο του σε '
+    "προφυλακτήρα ή σε σκαλί. Αυτοί οι τρεις διακόπτες είναι το μόνο που το "
+    "κάνει. Κλείσ' τους μόνο για χαλασμένο αισθητήρα.":
+        ('‼️ The base runs in FULL mode: the Roomba itself does NOT stop for '
+         'its bumper or a step. These three switches are the only thing that '
+         'does. Turn one off only for a broken sensor.',
+         '‼️ Die Basis läuft im FULL-Modus: der Roomba selbst stoppt NICHT bei '
+         'Stoßfänger oder Stufe. Diese drei Schalter sind das Einzige, was es '
+         'tut. Nur bei defektem Sensor ausschalten.'),
+    'Στοπ στον προφυλακτήρα': ('Stop on bumper', 'Stopp bei Stoßfänger'),
+    'Στοπ στον γκρεμό (σκαλί)': ('Stop at a drop (step)', 'Stopp an Absturzkante'),
+    'Στοπ όταν πέφτει τροχός στο κενό':
+        ('Stop when a wheel drops', 'Stopp bei durchhängendem Rad'),
+    'Πόσο μένει μπλοκαρισμένο μετά από χτύπημα':
+        ('How long it stays blocked after a bump',
+         'Wie lange nach einem Stoß blockiert bleibt'),
+    'Κρατά την ευθεία κλειστή τόση ώρα αφού ελευθερωθεί ο προφυλακτήρας, ώστε '
+    'το ρομπότ να μην ξαναμπεί στο ίδιο έπιπλο.':
+        ('Keeps forward blocked this long after the bumper releases, so the '
+         'robot does not drive back into the same furniture.',
+         'Hält die Vorwärtsfahrt so lange gesperrt, nachdem der Stoßfänger '
+         'frei ist, damit er nicht gleich wieder ins selbe Möbel fährt.'),
+    'Πόσο μένει μπλοκαρισμένο μετά από γκρεμό':
+        ('How long it stays blocked after a drop',
+         'Wie lange nach einer Kante blockiert bleibt'),
+    'Σκληρά όρια': ('Hard limits', 'Harte Grenzen'),
+    'σταθερά': ('fixed', 'fest'),
+    'Αυτά ΔΕΝ αλλάζουν από εδώ. Ο collision_monitor τα διαβάζει μία φορά στην '
+    'εκκίνηση, οπότε ένας διακόπτης εδώ θα έδειχνε νούμερο που το ρομπότ δεν '
+    'χρησιμοποιεί. Αλλάζουν στο config/nav2_params.yaml και θέλουν πλήρη '
+    'επανεκκίνηση.':
+        ('These do NOT change from here. collision_monitor reads them once at '
+         'startup, so a control here would show a number the robot is not '
+         'using. They change in config/nav2_params.yaml and need a full '
+         'restart.',
+         'Diese ändern sich hier NICHT. collision_monitor liest sie einmal '
+         'beim Start, ein Regler hier würde also einen Wert zeigen, den der '
+         'Roboter nicht benutzt. Änderung in config/nav2_params.yaml, mit '
+         'vollständigem Neustart.'),
+    '↺ Επαναφορά προεπιλογών': ('↺ Restore defaults', '↺ Standardwerte'),
+    'Επαναφορά όλων των ρυθμίσεων ασφαλείας στις προεπιλογές;':
+        ('Restore all safety settings to their defaults?',
+         'Alle Sicherheitseinstellungen auf Standard zurücksetzen?'),
+    'Επαναφέρθηκαν.': ('Restored.', 'Zurückgesetzt.'),
+    'ΕΝΕΡΓΟ':            ('ON', 'AN'),
+    'ΚΛΕΙΣΤΟ':           ('OFF', 'AUS'),
+    'δεν τρέχει':        ('not running', 'läuft nicht'),
+
     # ── dashboard key ─────────────────────────────────────────────────────
-    'Ασφάλεια':          ('Security', 'Sicherheit'),
+    'Κλειδί πρόσβασης':  ('Access key', 'Zugangsschlüssel'),
     '🔑 Νέο κλειδί':     ('🔑 New key', '🔑 Neuer Schlüssel'),
     'νέο κλειδί':        ('new key', 'neuer Schlüssel'),
     'Κράτησέ το τώρα — μετά την επανεκκίνηση χρειάζεται:':

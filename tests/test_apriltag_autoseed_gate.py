@@ -64,7 +64,13 @@ def _install_stubs():
         'rclpy': _mod('rclpy', init=lambda *a, **k: None,
                       spin=lambda *a, **k: None, shutdown=lambda *a, **k: None),
         'rclpy.node': _mod('rclpy.node', Node=_Node),
-        'rclpy.time': _mod('rclpy.time', Time=lambda *a, **k: None),
+        # Time() must answer to_msg(): /initialpose is stamped with a zero Time
+        # on purpose — AMCL refuses a stamp in the future and drops the fix.
+        # See test_log_tab_noise.py.
+        'rclpy.time': _mod(
+            'rclpy.time',
+            Time=lambda *a, **k: types.SimpleNamespace(
+                to_msg=lambda: types.SimpleNamespace(sec=0, nanosec=0))),
         'rclpy.duration': _mod('rclpy.duration',
                                Duration=lambda **k: types.SimpleNamespace(**k)),
         'geometry_msgs': _mod('geometry_msgs'),

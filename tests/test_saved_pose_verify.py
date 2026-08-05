@@ -80,7 +80,12 @@ def _install_stubs():
                       spin=lambda *a, **k: None,
                       try_shutdown=lambda *a, **k: None),
         'rclpy.node': _mod('rclpy.node', Node=_Node),
-        'rclpy.time': _mod('rclpy.time', Time=lambda *a, **k: None),
+        # Time() must answer to_msg(): the restored pose is stamped with a zero
+        # Time, not now(), or AMCL refuses it. See test_log_tab_noise.py.
+        'rclpy.time': _mod(
+            'rclpy.time',
+            Time=lambda *a, **k: types.SimpleNamespace(
+                to_msg=lambda: types.SimpleNamespace(sec=0, nanosec=0))),
         'rclpy.qos': _mod('rclpy.qos',
                           QoSProfile=lambda **kw: types.SimpleNamespace(**kw),
                           QoSDurabilityPolicy=types.SimpleNamespace(TRANSIENT_LOCAL=1),

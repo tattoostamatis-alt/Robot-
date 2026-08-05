@@ -59,6 +59,11 @@ class CameraWatchdog(Node):
         # it, on the very next bringup. Generous, because a cold start under
         # load plus USB enumeration is genuinely slow.
         self.declare_parameter('startup_timeout', 45.0)
+        # How long the camera has to keep streaming after a restart before that
+        # restart stops counting against max_restarts. Comfortably longer than
+        # the grace period, so a restart that only half worked does not buy
+        # itself a fresh budget.
+        self.declare_parameter('restart_count_reset', 300.0)
         # Same arguments bringup uses with use_perception:=true. Kept here
         # rather than read from the launch because this has to work when the
         # launch that owned the camera is the thing that lost it.
@@ -92,9 +97,11 @@ class CameraWatchdog(Node):
         self.enable_restart = bool(self.get_parameter('enable_restart').value)
 
         self.startup_timeout = float(self.get_parameter('startup_timeout').value)
+        self.reset_after = float(self.get_parameter('restart_count_reset').value)
         self._last_frame = None        # None = never saw one
         self._started_at = time.monotonic()
         self._restarts = 0
+        self._last_restart_at = 0.0
         self._blocked_until = 0.0
         self._reported_dead = False
 
@@ -125,12 +132,30 @@ class CameraWatchdog(Node):
             f'(timeout {self.timeout:.0f}s, restart={"on" if self.enable_restart else "off"})')
 
     def _on_frame(self, _msg):
-        if self._last_frame is None:
-            self.get_logger().info('Camera is streaming')
-        elif self._reported_dead:
-            self.get_logger().info('Camera is back')
-            self._reported_dead = False
+        # ‼️ The first branch used to be an if/elif, so a camera that NEVER
+        # streamed and was then brought back by a restart hit the first branch
+        # only — `_reported_dead` stayed True forever. Two consequences, both
+        # seen in the log tab on 2026-08-05: the red "the robot is BLIND" line
+        # was never followed by anything saying it came back (17 s later), and
+        # a SECOND failure would have been reported by nobody, because the flag
+        # that guards that error was already set.
+        first = self._last_frame is None
         self._last_frame = time.monotonic()
+        if first:
+            self.get_logger().info('Camera is streaming')
+        if self._reported_dead:
+            self._reported_dead = False
+            if not first:
+                self.get_logger().info('Camera is back')
+        # A restart that worked buys back the budget. Without this the counter
+        # only ever climbs: three unrelated hiccups spread over a day and the
+        # watchdog gives up for an hour on a camera that recovered every time.
+        if self._restarts and (self._last_frame - self._last_restart_at
+                               > self.reset_after):
+            self.get_logger().info(
+                f'Camera has streamed for {self.reset_after:.0f}s since the '
+                f'last restart — clearing the count (was {self._restarts})')
+            self._restarts = 0
 
     def _check(self):
         now = time.monotonic()
@@ -169,6 +194,7 @@ class CameraWatchdog(Node):
             return
 
         self._restarts += 1
+        self._last_restart_at = now
         self._blocked_until = now + self.grace
         self.get_logger().warn(
             f'Restarting the camera (attempt {self._restarts}/{self.max_restarts})')

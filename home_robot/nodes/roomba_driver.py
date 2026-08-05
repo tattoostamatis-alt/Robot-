@@ -491,8 +491,39 @@ class RoombaDriver(Node):
         self._prev_right_enc = None
         self._prev_odom_time = None
 
+    # Guards the dashboard's safety tab can switch, and how long they hold
+    # after they release. Kept apart from the calibration trims below because
+    # turning one of these off means the robot drives into things: the only
+    # legitimate reason is a sensor that reports a permanent bump, and then the
+    # log line is the record of who did it and when.
+    _SAFETY_FLAGS = ('bump_stop', 'cliff_stop', 'wheel_drop_stop')
+    _SAFETY_TIMES = {'bump_block_s': (0.0, 10.0), 'cliff_block_s': (0.0, 10.0)}
+
     def _on_set_parameters(self, params):
         from rcl_interfaces.msg import SetParametersResult
+        for p in params:
+            limits = self._SAFETY_TIMES.get(p.name)
+            if limits is None:
+                continue
+            try:
+                value = float(p.value)
+            except (TypeError, ValueError):
+                return SetParametersResult(
+                    successful=False, reason=f'{p.name} must be a number')
+            if not limits[0] <= value <= limits[1]:
+                return SetParametersResult(
+                    successful=False,
+                    reason=f'{p.name} must be between {limits[0]} and {limits[1]}')
+        for p in params:
+            if p.name in self._SAFETY_FLAGS:
+                setattr(self, p.name, bool(p.value))
+                self.get_logger().warn(
+                    f'{p.name} turned {"ON" if p.value else "OFF"} at runtime'
+                    + ('' if p.value else
+                       ' — the base is in FULL mode and will not stop itself'))
+            elif p.name in self._SAFETY_TIMES:
+                setattr(self, p.name, float(p.value))
+                self.get_logger().info(f'{p.name} is now {float(p.value):.1f}s')
         for p in params:
             if p.name == 'right_trim':
                 self.right_trim = p.value
