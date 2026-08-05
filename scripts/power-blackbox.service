@@ -1,0 +1,22 @@
+[Unit]
+Description=Record APU package power, so the next abrupt cut leaves evidence
+Documentation=file:///usr/local/sbin/power-blackbox
+# Deliberately early and dependency-free: at least one cut happened with the
+# machine otherwise idle, and one killed a boot before userspace was up.
+DefaultDependencies=no
+After=local-fs.target
+Wants=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/power-blackbox
+Restart=always
+RestartSec=5
+Nice=10
+# Reading sysfs at 2 Hz costs nothing; make sure the logger is never the reason
+# for a power step it is supposed to be measuring.
+IOSchedulingClass=idle
+CPUSchedulingPolicy=idle
+
+[Install]
+WantedBy=sysinit.target

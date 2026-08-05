@@ -1,0 +1,18 @@
+[Unit]
+Description=Hold CPU/iGPU power draw steady (portable power station safety)
+Documentation=file:///usr/local/sbin/power-smooth
+# disable-cpu-boost.service re-applies its own 3.9 GHz cap and boost=1 at every
+# boot. Run after it or it silently undoes the profile.
+After=multi-user.target disable-cpu-boost.service
+Wants=disable-cpu-boost.service
+
+[Service]
+Type=oneshot
+# `boot` reads PROFILE from /etc/default/power-smooth and applies it. With no
+# such file, or PROFILE=off, it restores the machine's normal band and exits —
+# so enabling this unit changes nothing until a profile is actually chosen.
+ExecStart=/usr/local/sbin/power-smooth boot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

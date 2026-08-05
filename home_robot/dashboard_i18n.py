@@ -1179,38 +1179,65 @@ TRANSLATIONS = {
     'κανονικό': ('normal', 'normal'),
     'ήπιο': ('gentle', 'sanft'),
     'πολύ σταθερό': ('very steady', 'sehr gleichmäßig'),
-    'Για όταν το mini PC τρέχει από την powerstation. Δεν φτιάχνει τον '
-    'inverter — του δίνει όμως πιο ήσυχο φορτίο: στενεύει τη ζώνη συχνότητας '
-    'της CPU, ώστε να μην πέφτει πολύ χαμηλά (idle-shutoff) ούτε να πετάγεται '
-    'ψηλά (αιχμή). Στην πρίζα άφησέ το στο «κανονικό».':
-        ('For when the mini PC runs off the power station. It does not fix the '
-         'inverter — it hands it a quieter load: the CPU frequency band is '
-         'narrowed so the draw neither falls far enough to trip an idle '
-         'shutoff nor spikes far enough to trip an overcurrent cutoff. On wall '
-         'power leave it on "normal".',
-         'Für den Betrieb des Mini-PCs an der Powerstation. Es repariert den '
-         'Wechselrichter nicht — es gibt ihm eine ruhigere Last: das '
-         'Frequenzband der CPU wird verengt, damit die Aufnahme weder tief '
-         'genug fällt für eine Leerlaufabschaltung noch hoch genug springt für '
-         'eine Überstromabschaltung. Am Netz auf „normal" lassen.'),
-    'Μετρημένο εδώ, άθροισμα συχνότητας 8 πυρήνων σε 45 δευτερόλεπτα:':
-        ('Measured here, summed clock across 8 cores over 45 seconds:',
-         'Hier gemessen, Summentakt über 8 Kerne in 45 Sekunden:'),
-    '9.6 GHz μέσος όρος με διακύμανση 12.5 και χειρότερο άλμα 10.8·':
-        ('9.6 GHz average, swing 12.5, worst jump 10.8;',
-         '9,6 GHz Mittel, Schwankung 12,5, größter Sprung 10,8;'),
-    '13.9 / 3.7 / 3.5. Όσο πιο σταθερό, τόσο περισσότερο ρεύμα κατά μέσο όρο '
-    '— η CPU δεν κατεβαίνει ποτέ στο χαμηλό της σκαλί.':
-        ('13.9 / 3.7 / 3.5. The steadier it is, the more it draws on average — '
-         'the CPU never drops to its low step.',
-         '13,9 / 3,7 / 3,5. Je gleichmäßiger, desto höher der '
-         'Durchschnittsverbrauch — die CPU fällt nie auf ihre niedrige Stufe.'),
-    '‼️ Δεν επιβιώνει σε restart — σε κάθε boot επανέρχεται το κανονικό. '
-    'Είναι διακόπτης για μία συνεδρία στην powerstation.':
-        ('‼️ It does not survive a restart — every boot comes back to normal. '
-         'This is a switch for one power-station session.',
-         '‼️ Übersteht keinen Neustart — jeder Boot kehrt zu „normal" zurück. '
-         'Das ist ein Schalter für eine Powerstation-Sitzung.'),
+    'Για όταν το mini PC τρέχει από την powerstation (Anker SOLIX C300 DC). '
+    'Αυτή δεν έχει inverter — τροφοδοτεί το PC μέσω USB-C Power Delivery. Μια '
+    'πηγή PD δεν ενοχλείται από το πόσο ρεύμα τραβάς, αλλά από το πόσο απότομα '
+    'αλλάζει: ένα σκαλοπάτι φορτίου ρίχνει την προστασία της θύρας ή προκαλεί '
+    'επαναδιαπραγμάτευση PD, και η επαναδιαπραγμάτευση κόβει τη γραμμή αρκετά '
+    'ώστε το PC να σβήσει ακαριαία.':
+        ('For when the mini PC runs off the power station (Anker SOLIX C300 '
+         'DC). That one has no inverter — it feeds the PC over USB-C Power '
+         'Delivery. A PD source does not mind how much current you draw, it '
+         'minds how abruptly that changes: a step in load trips the port\'s '
+         'protection or forces a PD renegotiation, and a renegotiation drops '
+         'the rail for long enough to kill the PC outright.',
+         'Für den Betrieb des Mini-PCs an der Powerstation (Anker SOLIX C300 '
+         'DC). Diese hat keinen Wechselrichter — sie versorgt den PC über '
+         'USB-C Power Delivery. Eine PD-Quelle stört nicht, wie viel Strom du '
+         'ziehst, sondern wie abrupt sich das ändert: eine Laststufe löst den '
+         'Schutz des Ports aus oder erzwingt eine PD-Neuverhandlung, und diese '
+         'unterbricht die Versorgung lange genug, um den PC sofort '
+         'abzuschalten.'),
+    'Τα προφίλ πειράζουν τέσσερα πράγματα, όλα για να μειώσουν το άλμα: '
+    'στενεύουν τη ζώνη συχνότητας της CPU, κλείνουν το boost, βάζουν τον '
+    'επεξεργαστή σε λειτουργία εξοικονόμησης, και — μόνο στο «πολύ σταθερό» — '
+    'κόβουν το ψηλότερο σκαλί της iGPU. Γι\' αυτό το «πολύ σταθερό» κοστίζει '
+    'σε ταχύτητα γραφικών· το «ήπιο» τα αφήνει ήσυχα.':
+        ('The profiles change four things, all of them to shrink the step: '
+         'they narrow the CPU frequency band, turn boost off, put the '
+         'processor in a power-saving mode, and — only in "very steady" — cut '
+         'the iGPU\'s top step. That is why "very steady" costs graphics '
+         'speed, while "gentle" leaves graphics alone.',
+         'Die Profile ändern vier Dinge, alle um den Sprung zu verkleinern: '
+         'sie verengen das Frequenzband der CPU, schalten Boost ab, setzen den '
+         'Prozessor in einen Sparmodus und — nur bei „sehr gleichmäßig" — '
+         'kappen die oberste Stufe der iGPU. Deshalb kostet „sehr '
+         'gleichmäßig" Grafikleistung, „sanft" lässt die Grafik in Ruhe.'),
+    'Μετρημένο εδώ σε πραγματικά Watt (αισθητήρας PPT του επεξεργαστή), με '
+    'ριπές φορτίου σε όλους τους πυρήνες:':
+        ('Measured here in real watts (the processor\'s own PPT sensor), under '
+         'bursts of all-core load:',
+         'Hier in echten Watt gemessen (PPT-Sensor des Prozessors), unter '
+         'Lastspitzen auf allen Kernen:'),
+    '21.5 W μέσος όρος και διακύμανση 30.0 W, από 7 ως 37·':
+        ('21.5 W average and a 30.0 W swing, from 7 to 37;',
+         '21,5 W Mittel und 30,0 W Schwankung, von 7 bis 37;'),
+    '11.9 και 12.1·': ('11.9 and 12.1;', '11,9 und 12,1;'),
+    '10.5 και 11.1. Η διακύμανση πέφτει κατά 63% και η μέση κατανάλωση στο '
+    'μισό — εδώ δεν πληρώνεις τίποτα για τη σταθερότητα.':
+        ('10.5 and 11.1. The swing drops by 63% and the average draw halves — '
+         'here steadiness costs you nothing.',
+         '10,5 und 11,1. Die Schwankung sinkt um 63% und der '
+         'Durchschnittsverbrauch halbiert sich — Gleichmäßigkeit kostet hier '
+         'nichts.'),
+    '✅ Επιβιώνει σε restart: η επιλογή αποθηκεύεται και ξαναμπαίνει μόνη της '
+    'σε κάθε boot. Στην πρίζα γύρνα το σε «κανονικό» — δεν χρειάζεται.':
+        ('✅ It survives a restart: the choice is saved and reapplies itself at '
+         'every boot. On wall power switch it back to "normal" — it is not '
+         'needed there.',
+         '✅ Übersteht einen Neustart: die Auswahl wird gespeichert und bei '
+         'jedem Boot erneut angewendet. Am Netz wieder auf „normal" stellen — '
+         'dort wird es nicht gebraucht.'),
 
     # ── USB power cycle (System pane) ─────────────────────────────────────
     'Ξεκόλλα αισθητήρα': ('Unstick a sensor', 'Sensor entklemmen'),

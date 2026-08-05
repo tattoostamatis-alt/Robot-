@@ -2045,10 +2045,13 @@ class DashboardNode(Node):
         }, remember=False)
 
     def _power_profile(self, profile: str):
-        """Narrow or restore the CPU frequency band — see scripts/power_smooth.sh.
+        """Switch the machine-wide power profile — see scripts/power_smooth.sh.
 
-        No sudo install of its own: the script leans on the cpufreq-set helper
-        that already has a NOPASSWD entry.
+        Forwards to /usr/local/sbin/power-smooth, which does four things (CPU
+        band, boost, amd-pstate EPP, iGPU DPM cap) and saves the choice so
+        power-smooth.service reapplies it at boot. Needs the one-time
+        scripts/install_power_smooth.sh; until then the script exits non-zero
+        with instructions rather than silently doing a fraction of the job.
         """
         script = os.path.join(SRC_HOME, 'scripts', 'power_smooth.sh')
         if not os.path.exists(script):
@@ -4477,13 +4480,16 @@ button{font:inherit;color:inherit}
         </div>
         <div id="pw-msg" style="font-size:11.5px;color:#71717a;margin-top:10px"></div>
         <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
-          Για όταν το mini PC τρέχει από την powerstation. Δεν φτιάχνει τον inverter — του δίνει όμως πιο ήσυχο φορτίο: στενεύει τη ζώνη συχνότητας της CPU, ώστε να μην πέφτει πολύ χαμηλά (idle-shutoff) ούτε να πετάγεται ψηλά (αιχμή). Στην πρίζα άφησέ το στο «κανονικό».
+          Για όταν το mini PC τρέχει από την powerstation (Anker SOLIX C300 DC). Αυτή δεν έχει inverter — τροφοδοτεί το PC μέσω USB-C Power Delivery. Μια πηγή PD δεν ενοχλείται από το πόσο ρεύμα τραβάς, αλλά από το πόσο απότομα αλλάζει: ένα σκαλοπάτι φορτίου ρίχνει την προστασία της θύρας ή προκαλεί επαναδιαπραγμάτευση PD, και η επαναδιαπραγμάτευση κόβει τη γραμμή αρκετά ώστε το PC να σβήσει ακαριαία.
         </p>
         <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
-          Μετρημένο εδώ, άθροισμα συχνότητας 8 πυρήνων σε 45 δευτερόλεπτα: <b>κανονικό</b> 9.6 GHz μέσος όρος με διακύμανση 12.5 και χειρότερο άλμα 10.8· <b>ήπιο</b> 11.8 / 5.6 / 4.6· <b>πολύ σταθερό</b> 13.9 / 3.7 / 3.5. Όσο πιο σταθερό, τόσο περισσότερο ρεύμα κατά μέσο όρο — η CPU δεν κατεβαίνει ποτέ στο χαμηλό της σκαλί.
+          Τα προφίλ πειράζουν τέσσερα πράγματα, όλα για να μειώσουν το άλμα: στενεύουν τη ζώνη συχνότητας της CPU, κλείνουν το boost, βάζουν τον επεξεργαστή σε λειτουργία εξοικονόμησης, και — μόνο στο «πολύ σταθερό» — κόβουν το ψηλότερο σκαλί της iGPU. Γι' αυτό το «πολύ σταθερό» κοστίζει σε ταχύτητα γραφικών· το «ήπιο» τα αφήνει ήσυχα.
         </p>
         <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
-          ‼️ Δεν επιβιώνει σε restart — σε κάθε boot επανέρχεται το κανονικό. Είναι διακόπτης για μία συνεδρία στην powerstation.
+          Μετρημένο εδώ σε πραγματικά Watt (αισθητήρας PPT του επεξεργαστή), με ριπές φορτίου σε όλους τους πυρήνες: <b>κανονικό</b> 21.5 W μέσος όρος και διακύμανση 30.0 W, από 7 ως 37· <b>ήπιο</b> 11.9 και 12.1· <b>πολύ σταθερό</b> 10.5 και 11.1. Η διακύμανση πέφτει κατά 63% και η μέση κατανάλωση στο μισό — εδώ δεν πληρώνεις τίποτα για τη σταθερότητα.
+        </p>
+        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+          ✅ Επιβιώνει σε restart: η επιλογή αποθηκεύεται και ξαναμπαίνει μόνη της σε κάθε boot. Στην πρίζα γύρνα το σε «κανονικό» — δεν χρειάζεται.
         </p>
       </div>
       <div class="card">
