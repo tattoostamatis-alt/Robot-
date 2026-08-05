@@ -873,6 +873,22 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('use_diagnosis', default='true')),
     )
 
+    # ── Wheel slip / stall monitor ────────────────────────────────
+    # Costs nothing (three topics it already publishes, compared every 0.5 s)
+    # and covers the one stuck-robot case the bumper structurally cannot: a rug
+    # or a cable that holds the robot without ever being touched.
+    slip_monitor_node = Node(
+        package='home_robot',
+        executable='slip_monitor_node.py',
+        name='slip_monitor',
+        output='screen',
+        parameters=[{
+            'announce': LaunchConfiguration('slip_speak', default='true'),
+        }],
+        condition=IfCondition(LaunchConfiguration('use_slip_monitor',
+                                                  default='true')),
+    )
+
     # ── Face detection (YuNet on NPU) ─────────────────────────────
     face_detection_node = Node(
         package='home_robot',
@@ -1418,6 +1434,7 @@ def generate_launch_description():
         tactile_node,
         echo_node,
         self_diagnosis_node,
+        slip_monitor_node,
         tracker_node,
         diarization_node_action,
         recovery_node,

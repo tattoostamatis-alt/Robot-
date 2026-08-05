@@ -50,6 +50,7 @@ install(PROGRAMS
   home_robot/nodes/sound_event_node.py
   home_robot/nodes/face_identity_node.py
   home_robot/nodes/self_diagnosis_node.py
+  home_robot/nodes/slip_monitor_node.py
   home_robot/nodes/hand_gesture_node.py
   home_robot/nodes/people_node.py
   home_robot/nodes/acoustic_map_node.py

@@ -1131,6 +1131,236 @@ TRANSLATIONS = {
          'device would fight the wake word for it. Requires',
          'das vom Wakeword-Knoten veröffentlicht wird — ein zweiter ALSA-Stream '
          'auf demselben Gerät würde mit dem Wakeword konkurrieren. Benötigt'),
+
+    # ── Sensor fusion pane ────────────────────────────────────────────────
+    'Ποιος λέει τι':     ('Who says what', 'Wer sagt was'),
+    'EKF (αποτέλεσμα)':  ('EKF (the result)', 'EKF (Ergebnis)'),
+    '60 δευτερόλεπτα':   ('60 seconds', '60 Sekunden'),
+    'Τροχοί − EKF':      ('Wheels − EKF', 'Räder − EKF'),
+    '⟲ Μηδένισε τη σύγκριση': ('⟲ Re-zero the comparison',
+                               '⟲ Vergleich nullen'),
+    "Οι τρεις γωνίες ΔΕΝ έχουν κοινό μηδέν — το BNO085 ξεκινά από όπου "
+    "κοιτούσε στο boot, οι τροχοί από όπου άναψε η βάση. Το κουμπί τις "
+    "ευθυγραμμίζει εδώ και τώρα, οπότε ό,τι ανοίγει μετά είναι πραγματική "
+    "απόκλιση. Οδήγησε ένα γύρο και γύρνα στο ίδιο σημείο: η γραμμή που δεν "
+    "επιστρέφει στο μηδέν είναι ο αισθητήρας που λέει ψέματα. Οι τροχοί "
+    "ανοίγουν πάντα σε χαλί και σε στροφές — γι' αυτό ο EKF παίρνει γωνία "
+    "μόνο από το IMU (config/ekf.yaml).":
+        ('The three headings share NO common zero — the BNO085 starts from '
+         'wherever it was facing at boot, the wheels from wherever the base '
+         'powered up. The button aligns them here and now, so anything that '
+         'opens up afterwards is real drift. Drive a loop and come back to the '
+         'same spot: the line that does not return to zero is the sensor that '
+         'is lying. The wheels always drift on carpet and in turns — which is '
+         'why the EKF takes heading from the IMU alone (config/ekf.yaml).',
+         'Die drei Winkel haben KEINEN gemeinsamen Nullpunkt — der BNO085 '
+         'startet dort, wohin er beim Booten schaute, die Räder dort, wo die '
+         'Basis eingeschaltet wurde. Der Knopf richtet sie hier und jetzt aus, '
+         'alles danach ist echte Abweichung. Fahre eine Runde und komm zum '
+         'selben Punkt zurück: die Linie, die nicht auf null zurückkehrt, ist '
+         'der Sensor, der lügt. Die Räder driften auf Teppich und in Kurven '
+         'immer — deshalb nimmt der EKF den Winkel nur vom IMU '
+         '(config/ekf.yaml).'),
+
+    'Πόσο διορθώνει το AMCL': ('How much AMCL is correcting',
+                               'Wie viel AMCL korrigiert'),
+    'Μετατόπιση από το μηδένισμα': ('Shift since the re-zero',
+                                    'Verschiebung seit dem Nullen'),
+    'Γωνία από το μηδένισμα': ('Angle since the re-zero',
+                               'Winkel seit dem Nullen'),
+    'Μέγιστο': ('Peak', 'Maximum'),
+    'Πόσο χρειάστηκε να ΞΑΝΑΒΑΛΕΙ το AMCL το ρομπότ πάνω στους τοίχους από '
+    'τη στιγμή που άνοιξες την καρτέλα — δηλαδή το λάθος που μάζεψε η '
+    'σύντηξη μόνη της, όσο κοιτούσες. Στον χάρτη δεν φαίνεται ποτέ: εκεί το '
+    'ρομπότ δείχνει πάντα σωστά τοποθετημένο, επειδή ακριβώς αυτή η διόρθωση '
+    'το κρατά εκεί. Λίγα εκατοστά ανά διαδρομή είναι φυσιολογικά· δεκάδες '
+    'σημαίνουν ότι η οδομετρία γλιστράει και το AMCL μπαλώνει.':
+        ('How far AMCL had to put the robot back onto the walls since you '
+         'opened this tab — the error the fusion accumulated on its own while '
+         'you watched. It never shows on the map: there the robot always looks '
+         'correctly placed, precisely because this correction keeps it there. '
+         'A few centimetres per trip is normal; tens of them mean the odometry '
+         'is slipping and AMCL is papering over it.',
+         'Wie weit AMCL den Roboter seit dem Öffnen dieses Tabs wieder auf die '
+         'Wände setzen musste — der Fehler, den die Fusion allein angesammelt '
+         'hat, während du zusahst. Auf der Karte sieht man das nie: dort steht '
+         'der Roboter immer richtig, genau weil diese Korrektur ihn dort hält. '
+         'Wenige Zentimeter pro Fahrt sind normal; Dutzende heißen, die '
+         'Odometrie rutscht und AMCL überdeckt es.'),
+    '‼️ ΔΙΑΦΟΡΑ, όχι απόλυτη τιμή. Το ωμό':
+        ('‼️ A DIFFERENCE, not an absolute value. Raw',
+         '‼️ Eine DIFFERENZ, kein Absolutwert. Das rohe'),
+    'περιέχει και το πού έτυχε να είναι η αρχή του':
+        ('also carries wherever the origin of', 'enthält auch, wo der Ursprung von'),
+    'στο boot: μετρήθηκε 366 cm και 123° σε ρομπότ που εντόπιζε τέλεια — '
+    'απλώς είχε οδηγήσει από τότε που άναψε. Το κουμπί «Μηδένισε» ξαναπιάνει '
+    'το σημείο αναφοράς.':
+        ('happened to be at boot: 366 cm and 123° were measured on a robot '
+         'that was localizing perfectly — it had simply driven since it was '
+         'switched on. The re-zero button retakes the reference.',
+         'beim Booten zufällig lag: 366 cm und 123° wurden an einem Roboter '
+         'gemessen, der perfekt lokalisierte — er war seit dem Einschalten '
+         'einfach gefahren. Der Null-Knopf setzt den Bezugspunkt neu.'),
+
+    'Ταχύτητες': ('Speeds', 'Geschwindigkeiten'),
+    'Μπροστά — τροχοί': ('Forward — wheels', 'Vorwärts — Räder'),
+    'Μπροστά — EKF': ('Forward — EKF', 'Vorwärts — EKF'),
+    'Στροφή — τροχοί': ('Turn — wheels', 'Drehung — Räder'),
+    'Στροφή — γυροσκόπιο': ('Turn — gyro', 'Drehung — Gyroskop'),
+    'Στροφή — EKF': ('Turn — EKF', 'Drehung — EKF'),
+    'Οι τροχοί λένε πόσο ΖΗΤΗΘΗΚΕ να γυρίσει, το γυροσκόπιο πόσο γύρισε '
+    'ΠΡΑΓΜΑΤΙΚΑ. Όταν οι δύο αριθμοί διαφέρουν σταθερά, η βάση γλιστράει ή '
+    'έχει κολλήσει σε κάτι. Κάτω από ~0.31 rad/s η 879 δεν στρίβει καθόλου: '
+    'θα δεις εντολή στροφής στους τροχούς και μηδέν στο γυροσκόπιο, και αυτό '
+    'είναι το γνωστό κατώφλι, όχι βλάβη.':
+        ('The wheels say how much turn was ASKED for, the gyro how much '
+         'actually happened. When the two differ consistently, the base is '
+         'slipping or caught on something. Below ~0.31 rad/s the 879 does not '
+         'turn at all: you will see a turn at the wheels and zero at the gyro, '
+         'and that is the known floor, not a fault.',
+         'Die Räder sagen, wie viel Drehung ANGEFORDERT wurde, das Gyroskop, '
+         'wie viel wirklich geschah. Weichen beide dauerhaft ab, rutscht die '
+         'Basis oder hängt fest. Unter ~0,31 rad/s dreht der 879 gar nicht: '
+         'Räder zeigen Drehung, Gyroskop null — das ist die bekannte Schwelle, '
+         'kein Fehler.'),
+
+    'Υγεία πηγών': ('Source health', 'Zustand der Quellen'),
+    '‼️ Νεκρή πηγή είναι ΣΙΩΠΗΛΗ, όχι λάθος: ο EKF συνεχίζει να δημοσιεύει '
+    'την τελευταία καλή γωνία και όλα δείχνουν υγιή. Μόνο η συχνότητα και η '
+    "ηλικία δείγματος το δείχνουν — γι' αυτό μετριούνται εδώ χωριστά από τις "
+    'τιμές.':
+        ('‼️ A dead source is SILENT, not wrong: the EKF keeps publishing its '
+         'last good heading and everything looks healthy. Only the rate and '
+         'the sample age show it — which is why they are measured here, apart '
+         'from the values.',
+         '‼️ Eine tote Quelle ist STUMM, nicht falsch: der EKF veröffentlicht '
+         'weiter seinen letzten guten Winkel und alles wirkt gesund. Nur Rate '
+         'und Alter der Probe zeigen es — deshalb werden sie hier getrennt von '
+         'den Werten gemessen.'),
+    'Φυσιολογικές τιμές, μετρημένες: τροχοί ~20 Hz, IMU ~6 Hz, EKF ~30 Hz. '
+    'Το IMU είναι όντως το αργότερο και αυτό είναι εντάξει — ο EKF παίρνει '
+    'από εκεί μόνο γωνία, όχι θέση.':
+        ('Normal values, measured: wheels ~20 Hz, IMU ~6 Hz, EKF ~30 Hz. The '
+         'IMU really is the slowest and that is fine — the EKF takes only '
+         'heading from it, not position.',
+         'Normalwerte, gemessen: Räder ~20 Hz, IMU ~6 Hz, EKF ~30 Hz. Das IMU '
+         'ist tatsächlich das langsamste und das ist in Ordnung — der EKF '
+         'nimmt davon nur den Winkel, nicht die Position.'),
+
+    'Αβεβαιότητα': ('Uncertainty', 'Unsicherheit'),
+    'EKF γωνία ±': ('EKF heading ±', 'EKF Winkel ±'),
+    'AMCL θέση ± / γωνία ±': ('AMCL position ± / heading ±',
+                              'AMCL Position ± / Winkel ±'),
+    'Πόσο σίγουρος δηλώνει ο καθένας ότι είναι, σε εκατοστά και μοίρες '
+    '(τυπική απόκλιση, όχι το ωμό covariance). Το AMCL φουσκώνει όταν χάνει '
+    'τον εντοπισμό και ξαναμαζεύει μόλις κλειδώσει σε τοίχους — μια τιμή που '
+    'μεγαλώνει και δεν ξαναμαζεύει είναι το «οι κόκκινες γραμμές έφυγαν» '
+    'πριν το δεις στον χάρτη.':
+        ('How sure each one claims to be, in centimetres and degrees (standard '
+         'deviation, not raw covariance). AMCL swells when it loses '
+         'localization and shrinks again once it locks onto walls — a value '
+         'that grows and never comes back is "the red lines went wrong" before '
+         'you can see it on the map.',
+         'Wie sicher sich jeder gibt, in Zentimetern und Grad '
+         '(Standardabweichung, nicht rohe Kovarianz). AMCL schwillt an, wenn '
+         'es die Lokalisierung verliert, und schrumpft wieder, sobald es an '
+         'Wänden einrastet — ein Wert, der wächst und nicht zurückkommt, ist '
+         '„die roten Linien stimmen nicht", bevor du es auf der Karte siehst.'),
+    '‼️ Η ΘΕΣΗ του EKF δεν εμφανίζεται επίτηδες. Ο EKF δουλεύει στο':
+        ('‼️ The EKF POSITION is deliberately not shown. The EKF works in',
+         '‼️ Die EKF-POSITION wird bewusst nicht gezeigt. Der EKF arbeitet in'),
+    ', όπου καμία απόλυτη μέτρηση δεν τον διορθώνει, οπότε η αβεβαιότητα '
+    'θέσης του μεγαλώνει για πάντα — μετρήθηκε στα ±2607 km σε ρομπότ που '
+    'εντόπιζε μια χαρά. Δεν είναι βλάβη, είναι ο ορισμός του frame. Η γωνία '
+    'του παραμένει φραγμένη (το IMU τη διορθώνει), και για τη θέση ο μόνος '
+    'αριθμός με νόημα είναι του AMCL.':
+        (', where no absolute measurement corrects it, so its position '
+         'uncertainty grows for ever — measured at ±2607 km on a robot that '
+         'was localizing perfectly well. Not a fault, the definition of the '
+         'frame. Its heading stays bounded (the IMU corrects it), and for '
+         'position the only meaningful number is AMCL\'s.',
+         ', wo keine absolute Messung ihn korrigiert, also wächst seine '
+         'Positionsunsicherheit ewig — gemessen bei ±2607 km an einem Roboter, '
+         'der einwandfrei lokalisierte. Kein Fehler, sondern die Definition '
+         'des Frames. Sein Winkel bleibt begrenzt (das IMU korrigiert ihn), '
+         'und für die Position zählt nur die Zahl von AMCL.'),
+
+    'LiDAR εναντίον κάμερας': ('LiDAR versus camera', 'LiDAR gegen Kamera'),
+    'Σύγκρινε με το βάθος της D435 (ανάβει το νέφος σημείων)':
+        ('Compare against the D435 depth (switches the point cloud on)',
+         'Mit der D435-Tiefe vergleichen (schaltet die Punktwolke ein)'),
+    'Συμφωνία': ('Agreement', 'Übereinstimmung'),
+    'Βλέπει μόνο η κάμερα': ('Camera only', 'Nur die Kamera sieht'),
+    'Πλησιέστερο κρυφό εμπόδιο': ('Nearest hidden obstacle',
+                                  'Nächstes verstecktes Hindernis'),
+    'Κάτοψη γύρω από το ρομπότ, 4 μέτρα ακτίνα, μύτη προς τα πάνω.':
+        ('Top-down around the robot, 4 metre radius, nose pointing up.',
+         'Draufsicht um den Roboter, 4 Meter Radius, Nase nach oben.'),
+    'Λευκό': ('White', 'Weiß'),
+    '= το lidar,': ('= the lidar,', '= das LiDAR,'),
+    'γαλάζιο': ('blue', 'blau'),
+    '= η κάμερα,': ('= the camera,', '= die Kamera,'),
+    'κόκκινο': ('red', 'rot'),
+    '= εκεί που η κάμερα βλέπει εμπόδιο ΠΙΟ ΚΟΝΤΑ από το lidar.':
+        ('= where the camera sees an obstacle NEARER than the lidar does.',
+         '= wo die Kamera ein Hindernis NÄHER sieht als das LiDAR.'),
+    'Τα κόκκινα είναι ο λόγος που υπάρχει αυτή η κάρτα: το C1 κόβει μία '
+    'οριζόντια φέτα στα 60.6 cm, οπότε ένα τραπέζι, ένα σκαλί, ένα σκυμμένο '
+    'κεφάλι ή μια γάτα ζουν ακριβώς στο κενό του. Η κάμερα κοιτάει από τα '
+    '53.6 cm και τα πιάνει, αλλά μόνο μπροστά — τα ~87° του κώνου της. Έξω '
+    'από αυτόν υπάρχει μόνο λευκό, και αυτό είναι σωστό, όχι διαφωνία.':
+        ('The red is why this card exists: the C1 cuts one horizontal slice at '
+         '60.6 cm, so a table top, a step, a bent-over head or a cat lives '
+         'exactly in its blind gap. The camera looks from 53.6 cm and catches '
+         'them, but only ahead — its ~87° cone. Outside that there is only '
+         'white, and that is correct, not a disagreement.',
+         'Das Rot ist der Grund für diese Karte: der C1 schneidet eine '
+         'waagerechte Scheibe bei 60,6 cm, also leben Tischplatte, Stufe, ein '
+         'gebeugter Kopf oder eine Katze genau in seiner Lücke. Die Kamera '
+         'schaut ab 53,6 cm und erfasst sie, aber nur nach vorn — ihr ~87°- '
+         'Kegel. Außerhalb gibt es nur Weiß, und das ist richtig, kein '
+         'Widerspruch.'),
+    'Πολύ κοντά ο κώνος στενεύει μόνος του: το βάθος βγαίνει από δύο φακούς '
+    'και σε απόσταση μισού μέτρου τα άκρα του καρέ δεν τα βλέπουν και οι '
+    'δύο, οπότε εκεί δεν υπάρχει μέτρηση. Μετρήθηκε 36° μπροστά σε εμπόδιο '
+    'στα 40 cm. Δεν είναι βλάβη — κάνε ένα βήμα πίσω και ο κώνος ανοίγει.':
+        ('Up close the cone narrows on its own: depth comes from two lenses, '
+         'and at half a metre the edges of the frame are not seen by both, so '
+         'there is no measurement there. 36° was measured facing an obstacle '
+         'at 40 cm. Not a fault — step back and the cone opens up.',
+         'Aus der Nähe verengt sich der Kegel von selbst: Tiefe entsteht aus '
+         'zwei Linsen, und bei einem halben Meter sehen nicht beide die Ränder '
+         'des Bildes, dort gibt es also keine Messung. 36° wurden vor einem '
+         'Hindernis in 40 cm gemessen. Kein Fehler — tritt zurück und der '
+         'Kegel öffnet sich.'),
+    'Το πάτωμα κόβεται επίτηδες κάτω από':
+        ('The floor is deliberately cut below', 'Der Boden wird bewusst unter'),
+    'cm και το ταβάνι πάνω από': ('cm and the ceiling above',
+                                  'cm abgeschnitten und die Decke über'),
+    'cm: χωρίς αυτό η κάμερα «βλέπει» το χαλί μισό μέτρο μπροστά και τα '
+    'πάντα γίνονται κόκκινα.':
+        ('cm: without it the camera "sees" the carpet half a metre ahead and '
+         'everything turns red.',
+         'cm: sonst „sieht" die Kamera den Teppich einen halben Meter voraus '
+         'und alles wird rot.'),
+
+    # ── Sensor fusion badges (JS) ─────────────────────────────────────────
+    'καμία ένδειξη': ('no reading', 'keine Anzeige'),
+    'ΣΙΩΠΗ': ('SILENT', 'STUMM'),
+    'αργό': ('slow', 'langsam'),
+    'λείπει πηγή': ('a source is missing', 'Quelle fehlt'),
+    'μεγάλη απόκλιση': ('large divergence', 'große Abweichung'),
+    'αποκλίνουν': ('diverging', 'weichen ab'),
+    'συμφωνούν': ('agreeing', 'stimmen überein'),
+    'μεγάλη διόρθωση': ('large correction', 'große Korrektur'),
+    'μαζεύει': ('pulling back', 'zieht zurück'),
+    'μόλις κινηθεί το ρομπότ': ('once the robot moves',
+                                'sobald der Roboter fährt'),
+    'χωρίς βάθος': ('no depth', 'keine Tiefe'),
+    'κρυφά': ('hidden', 'versteckt'),
+    'σε': ('across', 'über'),
+    'κατευθύνσεις': ('directions', 'Richtungen'),
+    'κανένα': ('none', 'keines'),
 }
 
 

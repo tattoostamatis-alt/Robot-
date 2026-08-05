@@ -60,10 +60,14 @@ class FakeMsg:
         self.header = H()
 
 
-def encode(xyz, bgr, viewers=True):
+def encode(xyz, bgr, viewers=True, fusion_viewers=False):
     d = Dash()
     d._state = FakeState()
     d._cloud_ws = {'a browser'} if viewers else set()
+    # The Sensor fusion tab shares this one decode but wants only a top-down
+    # profile out of it, never the 3D payload — see _cam_profile.
+    d._fuse_cam_ws = {'a fusion tab'} if fusion_viewers else set()
+    d._cam_profile = lambda *a, **k: None   # its TF/profile machinery is not here
     d._cloud_last = 0.0
     d._cb_cloud(FakeMsg(xyz, bgr))
     return d._state.sent
@@ -91,11 +95,30 @@ def test_a_viewer_gets_a_cloud():
     assert len(encode([(0.1, 0.2, 1.0)], [(1, 2, 3)])) == 1
 
 
+def test_a_fusion_viewer_alone_gets_no_3d_payload():
+    """The Sensor fusion tab needs the same decode but not the 150 kB/s.
+
+    It asks for the cloud to be produced (it wants the top-down profile out of
+    it), so the callback runs — but sending it the full 3D payload as well
+    would put the 3D tab's bandwidth on a tab that never draws it.
+    """
+    assert encode([(0.1, 0.2, 1.0)], [(1, 2, 3)],
+                  viewers=False, fusion_viewers=True) == []
+
+
+def test_a_fusion_viewer_does_not_stop_the_3d_tab():
+    both = encode([(0.1, 0.2, 1.0)], [(1, 2, 3)],
+                  viewers=True, fusion_viewers=True)
+    assert len(both) == 1
+
+
 def test_the_rate_is_throttled_below_the_camera():
     """The camera runs at 28 Hz; forwarding all of it would be 4 MB/s."""
     d = Dash()
     d._state = FakeState()
     d._cloud_ws = {'x'}
+    d._fuse_cam_ws = set()
+    d._cam_profile = lambda *a, **k: None
     d._cloud_last = 0.0
     for _ in range(10):                    # ten frames back to back
         d._cb_cloud(FakeMsg([(0.0, 0.0, 1.0)], [(1, 2, 3)]))
@@ -260,16 +283,43 @@ def test_it_sets_the_realsense_parameter():
 
 
 def test_it_follows_whether_anyone_is_watching():
-    """On when the first viewer arrives, off when the last leaves."""
+    """On when the first viewer arrives, off when the last leaves.
+
+    Two sets of viewers now, since the Sensor fusion tab needs the cloud too:
+    the last one to leave is what switches the camera back down.
+    """
     disp = _node_method('dispatch')
-    assert '_set_camera_pointcloud(bool(self._cloud_ws))' in disp, \
+    assert 'self._cloud_ws or self._fuse_cam_ws' in disp, \
         "the 'cloud' message must drive the camera parameter"
 
 
 def test_a_closed_tab_turns_it_off():
     """A browser closed on the 3D pane never sends its 'off'."""
-    assert '_set_camera_pointcloud(bool(self._cloud_ws))' in _node_method('release_client'), \
+    body = _node_method('release_client')
+    assert 'self._cloud_ws or self._fuse_cam_ws' in body, \
         'a vanished viewer would leave the camera building clouds for nobody'
+    assert '_fuse_ws.discard(client)' in body and '_fuse_cam_ws.discard(client)' in body, \
+        'a tab closed on the fusion pane never sends its off either'
+
+
+def test_it_never_switches_off_a_pointcloud_it_did_not_switch_on():
+    """‼️ Nav2's voxel_layer feeds on this topic (nav2_params.yaml
+    `depth_camera`), and since 2026-08-05 the launch files start the camera
+    with pointcloud.enable:=true for exactly that reason.
+
+    If the dashboard still turned it off when the last 3D viewer left, it would
+    blind the costmap to every obstacle the LiDAR's flat slice misses — with
+    nothing in any log to say so. It must probe the parameter at startup and
+    keep its hands off when somebody else already owns it.
+    """
+    body = _node_method('_set_camera_pointcloud')
+    assert 'if not self._cloud_param_own' in body, \
+        'the dashboard would switch off a pointcloud Nav2 depends on'
+    probe = _node_method('_probe_cloud_owner')
+    assert 'GetParameters' in _NODE_SRC and 'pointcloud.enable' in probe, \
+        'nothing reads the current value, so ownership is guesswork'
+    assert '_cloud_param_own = False' in probe, \
+        'the probe never actually gives up ownership'
 
 
 def test_it_does_not_spam_the_camera_with_the_same_value():
