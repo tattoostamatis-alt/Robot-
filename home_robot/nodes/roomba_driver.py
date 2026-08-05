@@ -13,7 +13,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSHistoryPolicy
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
-from sensor_msgs.msg import BatteryState
+from sensor_msgs.msg import BatteryState, PointCloud2, PointField
 from std_msgs.msg import Bool, Float32, String
 import pycreate2
 from home_robot import ir_homing
@@ -369,6 +369,10 @@ class RoombaDriver(Node):
         self.wheel_drop_stop = self.get_parameter('wheel_drop_stop').value
         self.cliff_block_s = self.get_parameter('cliff_block_s').value
         self._cliff = False
+        # Which of the four fired, left to right: (left, front-left,
+        # front-right, right). See _publish_cliffs for why the individual bits
+        # matter and the merged flag is not enough.
+        self._cliff_bits = (False, False, False, False)
         self._cliff_warned = False
         self._last_cliff_time = 0.0
         self._wheel_drop = False
@@ -474,6 +478,29 @@ class RoombaDriver(Node):
             QoSProfile(depth=1,
                        history=QoSHistoryPolicy.KEEP_LAST,
                        durability=QoSDurabilityPolicy.TRANSIENT_LOCAL))
+
+        # ── Cliffs as costmap obstacles ──────────────────────────────────
+        # The four cliff sensors have always stopped the robot (cliff_stop
+        # below) and there it ended: nothing downstream ever heard about it, so
+        # the planner kept routing over the same stair and the robot kept
+        # driving up to it, stopping, and being sent again. Publishing them as
+        # points lets the costmap remember the edge.
+        #
+        # ‼️ MARKING ONLY on the costmap side (see nav2_params.yaml). A drop is
+        # invisible to every other sensor — the LiDAR sweeps straight over a
+        # stairwell and reports open floor — so a raytrace would clear the mark
+        # the moment the robot backed away, which is precisely when it must not.
+        self.declare_parameter('publish_cliff_obstacles', True)
+        # Where the four sensors sit, as bearing from straight ahead and
+        # distance from base_link. ‼️ ESTIMATED from the 34 cm chassis, NOT
+        # measured: the angles put the marks in roughly the right arc, and if a
+        # drop ever marks visibly off to one side these are the numbers to fix.
+        self.declare_parameter('cliff_bearings_deg', [65.0, 25.0, -25.0, -65.0])
+        self.declare_parameter('cliff_radius', 0.15)
+        self._cliff_pub = self.create_publisher(
+            PointCloud2, 'cliff_obstacles', 5)
+        if self.get_parameter('publish_cliff_obstacles').value:
+            self.create_timer(0.2, self._publish_cliffs)   # 5 Hz
 
         self.create_timer(0.05, self._publish_odom)     # 20 Hz
         self.create_timer(0.05, self._motor_control)     # 20 Hz ramped output + watchdog
@@ -1336,6 +1363,10 @@ class RoombaDriver(Node):
                 if len(data) != 9:
                     raise Exception(f'Encoder data not 9 bytes long, it is: {len(data)}')
                 left, right, bumps, cl, cfl, cfr, cr = struct.unpack('>hhBBBBB', data)
+                # Kept per sensor, not just OR'd into one flag: which of the
+                # four fired is what says WHERE the drop is, and that is what
+                # the costmap needs to mark. See _publish_cliffs.
+                self._cliff_bits = (bool(cl), bool(cfl), bool(cfr), bool(cr))
                 # bit0 = bump right, bit1 = bump left, bits 2/3 = wheel drops.
                 # In Full mode the Roomba no longer acts on the drops itself, so
                 # they are read here instead of being masked off.
@@ -1355,6 +1386,54 @@ class RoombaDriver(Node):
                 time.sleep(0.05)
         self._note_link_failure('get_encoders()', str(last))
         return None
+
+    # Height the cliff points are published at, in base_link metres. NOT zero:
+    # the costmap's obstacle sources filter on height, and a point on the floor
+    # plane sits right on the boundary where rounding decides whether it counts.
+    # 0.10 m is comfortably inside every layer's band.
+    CLIFF_MARK_Z = 0.10
+
+    def _publish_cliffs(self):
+        """The four cliff sensors, as points where the floor stops being floor.
+
+        Nothing is published while no sensor is triggered: an empty cloud every
+        200 ms would be pure noise on a topic whose only message is "there is a
+        drop HERE".
+        """
+        if not any(self._cliff_bits):
+            return
+        bearings = self.get_parameter('cliff_bearings_deg').value
+        radius = float(self.get_parameter('cliff_radius').value)
+
+        pts = []
+        for fired, bearing_deg in zip(self._cliff_bits, bearings):
+            if not fired:
+                continue
+            a = math.radians(float(bearing_deg))
+            pts.append((radius * math.cos(a), radius * math.sin(a),
+                        self.CLIFF_MARK_Z))
+        if not pts:
+            return
+
+        msg = PointCloud2()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        # base_link, not odom: these are positions on the robot itself, and the
+        # costmap transforms them. Publishing in a world frame would need the
+        # pose to be current, which during a cliff stop it may not be.
+        msg.header.frame_id = 'base_link'
+        msg.height = 1
+        msg.width = len(pts)
+        msg.fields = [
+            PointField(name='x', offset=0,  datatype=PointField.FLOAT32, count=1),
+            PointField(name='y', offset=4,  datatype=PointField.FLOAT32, count=1),
+            PointField(name='z', offset=8,  datatype=PointField.FLOAT32, count=1),
+        ]
+        msg.is_bigendian = False
+        msg.point_step = 12
+        msg.row_step = 12 * len(pts)
+        msg.is_dense = True
+        msg.data = b''.join(struct.pack('<fff', *p) for p in pts)
+        self._cliff_pub.publish(msg)
 
     def _publish_odom(self):
         enc = self._safe_get_encoders()
