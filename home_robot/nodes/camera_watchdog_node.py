@@ -21,6 +21,31 @@ Deliberately narrow:
     the reason.
   * It waits for the FIRST frame before arming. A camera still starting up is
     not a camera that died.
+
+## ‼️ It does not read the frames — and must not start
+
+This node only ever needed one bit of information: is the stream alive. It was
+paying for that by subscribing to two full image topics — ~1.4 MB per message,
+30 Hz each — and deserializing every one of them into a Python object it threw
+away on the next line. Measured 2026-08-05 on the live D435, against a 3.8%
+idle-spin baseline:
+
+    Image (deserialized)      23.3% CPU     <- what this node used to cost
+    Image (raw=True)          15.0% CPU
+    CameraInfo                10.0% CPU     <- what it costs now
+
+That is ~19.5% of a core down to ~6.2%, on a machine whose load was already
+corrupting USB frames (see project_robot_perception_load: RViz at 160% was
+producing five "Incomplete video frame" warnings a minute, and removing it took
+them to zero).
+
+CameraInfo is published from the same frame callback as the image, so it is a
+true liveness proxy rather than a hopeful one. VERIFIED, not assumed: with
+enable_depth flipped off on the running camera, depth/image_rect_raw and
+depth/camera_info both went 29.3 Hz -> 0.0 Hz together, colour untouched, and
+both came back at 28.1 Hz when it was flipped on. If a future driver decouples
+them, `use_heartbeat:=false` puts the watch back on the image topics — still
+raw, since the pixels were never wanted.
 """
 import subprocess
 import time
@@ -30,10 +55,27 @@ from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
 from rcl_interfaces.srv import SetParameters
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import CameraInfo, Image
 
 DEFAULT_TOPIC = '/camera/camera/color/image_raw'
 DEFAULT_DEPTH_TOPIC = '/camera/camera/depth/image_rect_raw'
+
+
+def heartbeat_for(image_topic: str) -> str:
+    """The camera_info that rides alongside an image topic.
+
+    /camera/camera/color/image_raw       -> /camera/camera/color/camera_info
+    /camera/camera/depth/image_rect_raw  -> /camera/camera/depth/camera_info
+
+    Purely the sibling name: camera_info always sits next to the image in the
+    same namespace, whatever the image is called (image_raw, image_rect_raw,
+    image_rect). A topic with no parent namespace has no sibling, so it is
+    returned unchanged and the caller keeps watching the image itself.
+    """
+    parent, sep, _leaf = image_topic.rpartition('/')
+    if not sep or not parent:
+        return image_topic
+    return f'{parent}/camera_info'
 
 
 class CameraWatchdog(Node):
@@ -90,6 +132,11 @@ class CameraWatchdog(Node):
         self.declare_parameter('depth_grace', 20.0)
         self.declare_parameter('enable_depth_recover', True)
 
+        # Watch camera_info instead of the images themselves — see the module
+        # docstring for the measurement and for what was verified before
+        # trusting it. False falls back to the image topics, still raw.
+        self.declare_parameter('use_heartbeat', True)
+
         self.topic = self.get_parameter('topic').value
         self.timeout = float(self.get_parameter('timeout').value)
         self.grace = float(self.get_parameter('restart_grace').value)
@@ -105,11 +152,8 @@ class CameraWatchdog(Node):
         self._blocked_until = 0.0
         self._reported_dead = False
 
-        # Images are BEST_EFFORT: a RELIABLE subscription matches nothing and
-        # the watchdog would declare a healthy camera dead, every time.
-        self.create_subscription(
-            Image, self.topic, self._on_frame,
-            QoSProfile(depth=1, reliability=QoSReliabilityPolicy.BEST_EFFORT))
+        self.use_heartbeat = bool(self.get_parameter('use_heartbeat').value)
+        self._watch(self.topic, self._on_frame)
         self.create_timer(1.0, self._check)
 
         self.depth_topic = self.get_parameter('depth_topic').value
@@ -122,14 +166,32 @@ class CameraWatchdog(Node):
         self._depth_on_at = 0.0         # when to flip enable_depth back on
         self._depth_cli = self.create_client(
             SetParameters, '/camera/camera/set_parameters')
-        self.create_subscription(
-            Image, self.depth_topic, self._on_depth,
-            QoSProfile(depth=1, reliability=QoSReliabilityPolicy.BEST_EFFORT))
+        self._watch(self.depth_topic, self._on_depth)
         self.create_timer(1.0, self._check_depth)
 
         self.get_logger().info(
             f'Camera watchdog armed on {self.topic} '
-            f'(timeout {self.timeout:.0f}s, restart={"on" if self.enable_restart else "off"})')
+            f'(timeout {self.timeout:.0f}s, restart={"on" if self.enable_restart else "off"}, '
+            f'watching {"camera_info" if self.use_heartbeat else "the images"})')
+
+    def _watch(self, image_topic: str, callback):
+        """Subscribe to whatever is cheapest that still means "this is alive".
+
+        ‼️ BEST_EFFORT either way. A RELIABLE subscription does not match the
+        image publishers at all, and the watchdog would declare a healthy
+        camera dead every single time. It is also compatible with the RELIABLE
+        camera_info publisher — a subscriber may ask for less than it is
+        offered, never more.
+        """
+        qos = QoSProfile(depth=1, reliability=QoSReliabilityPolicy.BEST_EFFORT)
+        if self.use_heartbeat:
+            topic = heartbeat_for(image_topic)
+            if topic != image_topic:
+                self.create_subscription(CameraInfo, topic, callback, qos)
+                return
+        # raw=True: the bytes are never looked at, so there is no reason to pay
+        # for turning 1.4 MB into a Python object thirty times a second.
+        self.create_subscription(Image, image_topic, callback, qos, raw=True)
 
     def _on_frame(self, _msg):
         # ‼️ The first branch used to be an if/elif, so a camera that NEVER

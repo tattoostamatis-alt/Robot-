@@ -65,6 +65,7 @@ class _BaseNode:
         self.pubs = {}
         self.timers = []
         self.subs = []
+        self.sub_specs = []
 
     def declare_parameter(self, name, value):
         self._params[name] = value
@@ -77,8 +78,16 @@ class _BaseNode:
         self.pubs[topic] = p
         return p
 
-    def create_subscription(self, msg_type, topic, cb, qos):
+    def create_subscription(self, msg_type, topic, cb, qos, **kw):
+        # `subs` stays a (topic, cb) list — dozens of tests index it that way.
+        # What the subscription was MADE of goes in a parallel list, so a test
+        # can assert on the message type or on raw= without any of them
+        # changing. The camera watchdog needs it: subscribing to the images
+        # instead of their camera_info is a 3x CPU regression that nothing else
+        # would notice.
         self.subs.append((topic, cb))
+        self.sub_specs.append({'type': msg_type, 'topic': topic,
+                               'qos': qos, **kw})
         return None
 
     def create_client(self, *a, **k):

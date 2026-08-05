@@ -19,6 +19,17 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_safety_regressions import _BaseNode, _load, _mod, _ns  # noqa: E402
 
 
+# Distinct classes rather than `object` for both: the tests below assert on
+# WHICH message type the watchdog asked for, and that is the whole point of the
+# change that stopped it deserializing 1.4 MB frames it never looked at.
+class _Image:
+    pass
+
+
+class _CameraInfo:
+    pass
+
+
 @pytest.fixture
 def cam(monkeypatch):
     launched = []
@@ -37,7 +48,8 @@ def cam(monkeypatch):
                           QoSReliabilityPolicy=_ns(BEST_EFFORT='best_effort',
                                                    RELIABLE='reliable')),
         'sensor_msgs': _mod('sensor_msgs'),
-        'sensor_msgs.msg': _mod('sensor_msgs.msg', Image=object),
+        'sensor_msgs.msg': _mod('sensor_msgs.msg', Image=_Image,
+                                CameraInfo=_CameraInfo),
     }
     mod = _load(f'{PKG}/home_robot/nodes/camera_watchdog_node.py', mods)
     monkeypatch.setattr(mod.subprocess, 'Popen', FakePopen)
@@ -311,9 +323,85 @@ def test_depth_returning_is_announced(cam):
     assert node._depth_reported is False
 
 
-def test_it_subscribes_to_the_raw_depth_topic(cam):
+def test_it_watches_the_raw_depth_stream_not_the_aligned_one(cam):
     """aligned_depth_to_color is turned on and off at runtime by the 3D map tab,
     so watching it would read a deliberate change as a failure."""
     mod, node, _ = cam
     topics = [t for t, _cb in node.subs]
-    assert '/camera/camera/depth/image_rect_raw' in topics
+    assert '/camera/camera/depth/camera_info' in topics
+    assert not any('aligned' in t for t in topics)
+
+
+# ── it must not read the frames ──────────────────────────────────────────────
+# Measured on the live D435 2026-08-05, against a 3.8% idle-spin baseline:
+# subscribing to the two Image topics cost 23.3% of a core, raw=True 15.0%, and
+# CameraInfo 10.0% — for one bit of information, on a machine whose load was
+# already corrupting USB frames.
+
+def test_it_subscribes_to_camera_info_not_to_images(cam):
+    """‼️ The regression this guards: 1.4 MB deserialized into a Python object
+    thirty times a second, twice over, and dropped on the next line."""
+    mod, node, _ = cam
+    types = {s['type'] for s in node.sub_specs}
+    assert _Image not in types, (
+        'the watchdog is reading image frames again — it only ever needed to '
+        'know whether the stream is alive')
+    assert types == {_CameraInfo}
+
+
+def test_both_streams_are_watched_through_their_own_camera_info(cam):
+    mod, node, _ = cam
+    topics = {s['topic'] for s in node.sub_specs}
+    assert topics == {'/camera/camera/color/camera_info',
+                      '/camera/camera/depth/camera_info'}
+
+
+def test_the_heartbeat_is_the_sibling_of_the_image_topic(cam):
+    mod, _node, _ = cam
+    assert mod.heartbeat_for('/camera/camera/color/image_raw') == \
+        '/camera/camera/color/camera_info'
+    assert mod.heartbeat_for('/camera/camera/depth/image_rect_raw') == \
+        '/camera/camera/depth/camera_info'
+
+
+def test_a_topic_with_no_namespace_keeps_watching_itself(cam):
+    """No sibling to fall back on — better to watch the image than to invent a
+    topic name that does not exist and call a live camera dead."""
+    mod, _node, _ = cam
+    assert mod.heartbeat_for('/image_raw') == '/image_raw'
+    assert mod.heartbeat_for('image_raw') == 'image_raw'
+
+
+def test_the_fallback_still_refuses_to_deserialize(cam, monkeypatch):
+    """use_heartbeat:=false exists for a driver that decouples camera_info from
+    its frames. It goes back to the image topics — but raw, because the pixels
+    were never what was wanted."""
+    mod, _node, _ = cam
+    # Built without __init__ so only _watch is under test: the constructor
+    # would subscribe with use_heartbeat already read from its parameter.
+    fresh = mod.CameraWatchdog.__new__(mod.CameraWatchdog)
+    mod.Node.__init__(fresh, 'camera_watchdog')
+    fresh.use_heartbeat = False
+    fresh._watch('/camera/camera/color/image_raw', lambda _m: None)
+    spec = fresh.sub_specs[-1]
+    assert spec['type'] is _Image
+    assert spec['raw'] is True, 'the fallback deserializes every frame'
+
+
+def test_the_subscription_is_best_effort_either_way(cam):
+    """‼️ A RELIABLE subscription does not match the image publishers at all,
+    and the watchdog would call a healthy camera dead every time."""
+    mod, node, _ = cam
+    for spec in node.sub_specs:
+        assert spec['qos'].reliability == 'best_effort'
+
+
+def test_liveness_still_works_through_the_heartbeat(cam):
+    """The point of the topic swap is that nothing else about the node changes:
+    a camera_info message means the same as a frame."""
+    mod, node, launched = cam
+    node._on_frame(None)
+    assert node._last_frame is not None
+    _age(node, 60.0)
+    node._check()
+    assert launched, 'a silent heartbeat no longer triggers a restart'
