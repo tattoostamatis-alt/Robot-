@@ -38,6 +38,12 @@ _TEMPLATE = _SRC.split('HTML_TEMPLATE = r"""', 1)[1].split('"""', 1)[0]
 # The same substitutions index() makes, so what the browser parses here is what
 # it parses in the flat. Values are stand-ins except the safety ones, which are
 # the real table — this file is about that table.
+def _usb_devices():
+    """USB_DEVICES out of the node module, without importing rclpy."""
+    body = re.search(r'USB_DEVICES = (\{.*?\n\})', _SRC, re.S).group(1)
+    return dict(re.findall(r"'(\w+)':\s*'([^']*)'", body))
+
+
 _SUBS = {
     '__ROOMS__': json.dumps(['saloni', 'kouzina']),
     '__TOKEN_QS__': json.dumps(''),
@@ -48,6 +54,9 @@ _SUBS = {
     '__ARM_JOINTS__': re.search(r'ARM_JOINTS = (\[.*?\])', _SRC, re.S).group(1)
                         .replace("'", '"'),
     '__HAS_NOVNC__': 'false',
+    # Kept in step with the node's own list rather than retyped: a device
+    # added there and missing here is a page that throws at load.
+    '__USB_DEVICES__': json.dumps(_usb_devices(), ensure_ascii=False),
     '__SAFETY_SPECS__': json.dumps(
         {s.key: {'kind': s.kind, 'def': s.default, 'lo': s.lo, 'hi': s.hi,
                  'step': s.step, 'warn_above': s.warn_above,

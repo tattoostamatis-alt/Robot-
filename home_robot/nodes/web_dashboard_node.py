@@ -100,6 +100,23 @@ SRC_MAPS_DIR = (os.path.join(SRC_HOME, 'maps')
                 else os.path.join(SHARE, 'maps'))
 NOVNC_DIR = '/usr/share/novnc'
 
+# Sensors whose USB port can be power-cycled from the System tab, and the label
+# each one gets. The list is fixed HERE, on the server: the browser sends a
+# name, and a name that is not in this dict never reaches a command line that
+# runs as root. See scripts/usb_power.sh for how the ports are resolved (never
+# hardcoded — USB enumeration on this machine is not stable).
+USB_DEVICES = {
+    'camera': '📷 Κάμερα',
+    'lidar':  '📡 Lidar',
+    'mic':    '🎙️ Μικρόφωνο',
+    'imu':    '🧭 IMU',
+    'arm':    '🦾 Βραχίονας',
+    'roomba': '🧹 Σκούπα',
+}
+# The root-owned copy, not the one in the source tree. A NOPASSWD sudoers entry
+# pointing at a file this user can edit is a root shell with extra steps.
+USB_HELPER = '/usr/local/sbin/robot-usb-power'
+
 # Must match the display map in scripts/gui_session.sh.
 VNC_PORTS = {'rviz': 5902, 'gazebo': 5903, 'moveit': 5904, 'rtabmap': 5905}
 # TigerVNC sessions authenticate from ~/.vnc/passwd, which we cannot read back
@@ -1958,6 +1975,42 @@ class DashboardNode(Node):
             'error': error,
         }, remember=False)
 
+    def _usb_power_cycle(self, name: str):
+        """Cut power to one USB port for two seconds, from the other side of
+        the house.
+
+        The helper is the root-owned copy in /usr/local/sbin, not the one in
+        the source tree: a NOPASSWD sudoers entry pointing at a file this user
+        can edit would be a root shell with extra steps. See
+        scripts/install_usb_power.sh.
+        """
+        # ‼️ Not self._run: it returns stdout only, and everything that goes
+        # wrong here goes to stderr — `sudo -n` refusing for want of a password
+        # says nothing on stdout at all, so the panel showed a bare "failed"
+        # and sent you hunting for a hardware fault. Measured 2026-08-05.
+        if not os.path.exists(USB_HELPER):
+            # By far the most likely failure: the one-time root install was
+            # never run. Say exactly that, and what to type.
+            err = 'δεν έχει εγκατασταθεί — τρέξε: sudo scripts/install_usb_power.sh'
+            ok = False
+            self.get_logger().error(f'usb power cycle {name}: {USB_HELPER} missing')
+        else:
+            try:
+                r = subprocess.run(['sudo', '-n', USB_HELPER, 'cycle', name],
+                                   capture_output=True, text=True, timeout=30)
+                ok = r.returncode == 0
+                err = '' if ok else (r.stderr or r.stdout or 'failed').strip()[:160]
+            except Exception as exc:                      # noqa: BLE001
+                ok, err = False, str(exc)[:160]
+            if not ok:
+                self.get_logger().error(f'usb power cycle {name} failed: {err}')
+                if 'password' in err.lower():
+                    err = ('λείπει το NOPASSWD — τρέξε: '
+                           'sudo scripts/install_usb_power.sh')
+        self._state.broadcast({
+            'type': 'usb_power', 'device': name, 'ok': ok, 'error': err,
+        }, remember=False)
+
     def _sys_task(self, args, note, refresh=True, timeout=45):
         out, rc = self._run(args, timeout=timeout)
         # ‼️ Never log `args` — a wifi password is in there.
@@ -2428,6 +2481,16 @@ class DashboardNode(Node):
                 self.get_logger().warn(f'{action} requested from the dashboard')
                 threading.Thread(target=self._sys_task,
                                  args=(cmd, action, False), daemon=True).start()
+        elif t == 'usb_power':
+            # The device name is checked against a fixed list here rather than
+            # forwarded, so nothing the browser sends can become an argument to
+            # a command running as root.
+            name = str(msg.get('device', ''))
+            if name in USB_DEVICES:
+                self.get_logger().warn(
+                    f'USB power cycle requested from the dashboard: {name}')
+                threading.Thread(target=self._usb_power_cycle,
+                                 args=(name,), daemon=True).start()
         elif t == 'echo_probe':
             self._echo_pub.publish(String(data=str(msg.get('room', ''))))
         elif t == 'people_add':
@@ -3185,6 +3248,10 @@ def _make_html(rooms: list, token: str = '') -> str:
             .replace('__ARM_LIMITS__', json.dumps(ARM_LIMITS))
             .replace('__ARM_JOINTS__', json.dumps(ARM_JOINTS))
             .replace('__HAS_NOVNC__', json.dumps(os.path.isdir(NOVNC_DIR)))
+            # Sent from the server so the allowed names exist in exactly one
+            # place — the browser cannot invent a seventh.
+            .replace('__USB_DEVICES__', json.dumps(USB_DEVICES,
+                                                   ensure_ascii=False))
             .replace('__SAFETY_SPECS__', json.dumps(
                 {s.key: {'kind': s.kind, 'def': s.default, 'lo': s.lo,
                          'hi': s.hi, 'step': s.step,
@@ -4287,6 +4354,20 @@ button{font:inherit;color:inherit}
         <div id="s-bars"></div>
       </div>
       <div class="card">
+        <h3>Ξεκόλλα αισθητήρα <span class="badge" id="usb-badge">—</span></h3>
+        <div class="row" style="flex-wrap:wrap;gap:8px" id="usb-buttons"></div>
+        <div id="usb-msg" style="font-size:11.5px;color:#71717a;margin-top:10px"></div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          Κόβει το ρεύμα στη θύρα USB της συσκευής για δύο δευτερόλεπτα και το ξαναδίνει — ό,τι ακριβώς κάνει το να την βγάλεις και να την ξαναβάλεις, χωρίς να σηκωθεί κανείς. Για αισθητήρα που κόλλησε και δεν ξεκολλάει με restart του κόμβου.
+        </p>
+        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+          ‼️ Ο ΟΔΗΓΟΣ ΔΕΝ ΕΠΑΝΕΚΚΙΝΕΙ ΜΟΝΟΣ ΤΟΥ. Η συσκευή θα ξαναεμφανιστεί στο σύστημα, αλλά ο κόμβος που την είχε ανοιχτή κρατά πεθαμένο handle — θέλει και δικό του restart. Η κάμερα είναι η εξαίρεση: ο camera_watchdog την ξαναπιάνει μόνος του.
+        </p>
+        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+          Η «σκούπα» κόβει το ρεύμα στη σειριακή της βάσης. Αν το ρομπότ κινείται, οι τροχοί συνεχίζουν με την τελευταία εντολή ώσπου να πιάσει το watchdog των 0.25 δευτερολέπτων — μην το πατήσεις εν κινήσει.
+        </p>
+      </div>
+      <div class="card">
         <h3>Θερμοκρασίες</h3>
         <div id="s-temps" class="tempgrid">—</div>
       </div>
@@ -4534,6 +4615,7 @@ const TOKEN_QS   = __TOKEN_QS__;    // '' when auth is disabled
 const ARM_LIMITS = __ARM_LIMITS__;
 const ARM_JOINTS = __ARM_JOINTS__;
 const HAS_NOVNC  = __HAS_NOVNC__;
+const USB_DEVICES = __USB_DEVICES__;
 // ‼️ ANG was 0.10, which is BELOW the 879's ~0.31 rad/s rotation floor — the
 // wheels physically do not turn under it, so ◄/► sent a twist that the base
 // swallowed in silence. 0.60 rad/s (~34 deg/s) is a deliberate half of the
@@ -4963,6 +5045,7 @@ const HANDLERS = {
   vocab(m){ renderVocab(m); },
   compass(m){ compassOffset = m.offset; drawCompass2(); },
   fusion(m){ renderFusion(m); },
+  usb_power(m){ usbResult(m); },
   fuseprof(m){ renderFuseProfile(m); },
   hand(m){ handState = m; renderGestureBindings(); },
   people(m){ renderPeople(m); },
@@ -6556,6 +6639,52 @@ $('fp-on').onchange = e => {
 drawFzChart();
 drawFuseProfile();
 
+// ── USB power cycle ────────────────────────────────────────────────────────
+// Pulling the plug on one sensor, from wherever you happen to be. Built from
+// the server's list so the browser cannot name a device the server would not
+// accept anyway.
+let usbBusy = null;
+
+function usbBuild(){
+  const box = $('usb-buttons');
+  if (!box || box.childElementCount) return;
+  for (const name in USB_DEVICES){
+    const b = document.createElement('button');
+    b.className = 'btn';
+    b.textContent = USB_DEVICES[name];
+    b.onclick = () => usbCycle(name, b.textContent);
+    box.appendChild(b);
+  }
+}
+
+function usbCycle(name, label){
+  if (usbBusy) return;
+  // The base is the one that can hurt: cutting its serial link mid-drive
+  // leaves the wheels running on the last command until the driver's 0.25 s
+  // watchdog catches it.
+  if (name === 'roomba' &&
+      !confirm(t('Θα κοπεί η σειριακή της βάσης. Αν το ρομπότ κινείται, οι '
+                 + 'τροχοί συνεχίζουν ώσπου να πιάσει το watchdog. Να συνεχίσω;')))
+    return;
+  usbBusy = name;
+  $('usb-badge').innerHTML = `<span class="pill warn">${t('σε εξέλιξη')}</span>`;
+  $('usb-msg').textContent = label + ' — ' + t('κόβω το ρεύμα…');
+  document.querySelectorAll('#usb-buttons .btn').forEach(b => b.disabled = true);
+  send({type: 'usb_power', device: name});
+}
+
+function usbResult(m){
+  usbBusy = null;
+  document.querySelectorAll('#usb-buttons .btn').forEach(b => b.disabled = false);
+  const label = USB_DEVICES[m.device] || m.device;
+  $('usb-badge').innerHTML = m.ok
+    ? `<span class="pill ok">${t('έγινε')}</span>`
+    : `<span class="pill bad">${t('απέτυχε')}</span>`;
+  $('usb-msg').textContent = m.ok
+    ? label + ' — ' + t('ξαναήρθε. Ο κόμβος που την είχε ανοιχτή θέλει restart.')
+    : label + ' — ' + (m.error || t('απέτυχε'));
+}
+
 // ── keyboard driving ───────────────────────────────────────────────────────
 // There were no key bindings at all — the D-pad was mouse/touch only, so on a
 // laptop "the keys don't work" was literally true. Arrows + WASD, held down.
@@ -7741,6 +7870,7 @@ for(const [code, name] of LANGS){
   $('lang-buttons').appendChild(b);
 }
 safetyBuild();             // rows must exist before applyLang() translates them
+usbBuild();                // same: the buttons carry translatable labels
 applyLang();               // also builds the tabs, so it precedes showTab()
 
 // Set in JS so the stream carries the same token as the page.

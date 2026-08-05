@@ -1132,6 +1132,55 @@ TRANSLATIONS = {
          'das vom Wakeword-Knoten veröffentlicht wird — ein zweiter ALSA-Stream '
          'auf demselben Gerät würde mit dem Wakeword konkurrieren. Benötigt'),
 
+    # ── USB power cycle (System pane) ─────────────────────────────────────
+    'Ξεκόλλα αισθητήρα': ('Unstick a sensor', 'Sensor entklemmen'),
+    'Κόβει το ρεύμα στη θύρα USB της συσκευής για δύο δευτερόλεπτα και το '
+    'ξαναδίνει — ό,τι ακριβώς κάνει το να την βγάλεις και να την ξαναβάλεις, '
+    'χωρίς να σηκωθεί κανείς. Για αισθητήρα που κόλλησε και δεν ξεκολλάει με '
+    'restart του κόμβου.':
+        ('Cuts power to the device\'s USB port for two seconds and gives it '
+         'back — exactly what unplugging and replugging it does, without '
+         'anyone getting up. For a sensor that has wedged and does not come '
+         'back when its node restarts.',
+         'Unterbricht zwei Sekunden lang den Strom am USB-Port des Geräts und '
+         'gibt ihn zurück — genau das, was Aus- und Einstecken bewirkt, ohne '
+         'dass jemand aufstehen muss. Für einen Sensor, der hängt und beim '
+         'Neustart seines Knotens nicht zurückkommt.'),
+    '‼️ Ο ΟΔΗΓΟΣ ΔΕΝ ΕΠΑΝΕΚΚΙΝΕΙ ΜΟΝΟΣ ΤΟΥ. Η συσκευή θα ξαναεμφανιστεί στο '
+    'σύστημα, αλλά ο κόμβος που την είχε ανοιχτή κρατά πεθαμένο handle — '
+    'θέλει και δικό του restart. Η κάμερα είναι η εξαίρεση: ο camera_watchdog '
+    'την ξαναπιάνει μόνος του.':
+        ('‼️ THE DRIVER DOES NOT RESTART ITSELF. The device will come back to '
+         'the system, but the node that had it open still holds a dead handle '
+         '— it needs restarting too. The camera is the exception: '
+         'camera_watchdog picks it up on its own.',
+         '‼️ DER TREIBER STARTET SICH NICHT SELBST NEU. Das Gerät kommt im '
+         'System zurück, aber der Knoten, der es offen hatte, hält weiter ein '
+         'totes Handle — er braucht ebenfalls einen Neustart. Die Kamera ist '
+         'die Ausnahme: camera_watchdog fängt sie selbst wieder ein.'),
+    'Η «σκούπα» κόβει το ρεύμα στη σειριακή της βάσης. Αν το ρομπότ κινείται, '
+    'οι τροχοί συνεχίζουν με την τελευταία εντολή ώσπου να πιάσει το watchdog '
+    'των 0.25 δευτερολέπτων — μην το πατήσεις εν κινήσει.':
+        ('"Vacuum" cuts power to the base\'s serial link. If the robot is '
+         'moving, the wheels keep running on the last command until the '
+         '0.25 s watchdog catches it — do not press this while it drives.',
+         '„Sauger" unterbricht den Strom der seriellen Verbindung zur Basis. '
+         'Fährt der Roboter, laufen die Räder mit dem letzten Befehl weiter, '
+         'bis der 0,25-s-Watchdog greift — nicht während der Fahrt drücken.'),
+    'Θα κοπεί η σειριακή της βάσης. Αν το ρομπότ κινείται, οι τροχοί '
+    'συνεχίζουν ώσπου να πιάσει το watchdog. Να συνεχίσω;':
+        ('The base\'s serial link will be cut. If the robot is moving, the '
+         'wheels keep running until the watchdog catches it. Continue?',
+         'Die serielle Verbindung zur Basis wird unterbrochen. Fährt der '
+         'Roboter, laufen die Räder weiter, bis der Watchdog greift. '
+         'Fortfahren?'),
+    'σε εξέλιξη': ('in progress', 'läuft'),
+    'κόβω το ρεύμα…': ('cutting power…', 'unterbreche den Strom…'),
+    'έγινε': ('done', 'erledigt'),
+    'ξαναήρθε. Ο κόμβος που την είχε ανοιχτή θέλει restart.':
+        ('is back. The node that had it open needs restarting.',
+         'ist zurück. Der Knoten, der es offen hatte, braucht einen Neustart.'),
+
     # ── Sensor fusion pane ────────────────────────────────────────────────
     'Ποιος λέει τι':     ('Who says what', 'Wer sagt was'),
     'EKF (αποτέλεσμα)':  ('EKF (the result)', 'EKF (Ergebnis)'),

@@ -102,6 +102,12 @@ def test_the_restart_time_is_recorded_when_the_restart_happens():
 
 # ── 3. the repeating USB warning that buried the tab ─────────────────────────
 
+def _usb_devices():
+    """USB_DEVICES out of the node module, without importing rclpy."""
+    body = re.search(r'USB_DEVICES = (\{.*?\n\})', _DASH, re.S).group(1)
+    return dict(re.findall(r"'(\w+)':\s*'([^']*)'", body))
+
+
 _SUBS = {
     '__ROOMS__': json.dumps(['saloni']),
     '__TOKEN_QS__': json.dumps(''),
@@ -110,6 +116,9 @@ _SUBS = {
     '__ARM_JOINTS__': re.search(r'ARM_JOINTS = (\[.*?\])', _DASH, re.S).group(1)
                         .replace("'", '"'),
     '__HAS_NOVNC__': 'false',
+    # Kept in step with the node's own list rather than retyped: a device
+    # added there and missing here is a page that throws at load.
+    '__USB_DEVICES__': json.dumps(_usb_devices(), ensure_ascii=False),
     '__I18N__': '{}',
     '__LANGS__': json.dumps([['el', 'Ελληνικά'], ['en', 'English'],
                              ['de', 'Deutsch']]),
