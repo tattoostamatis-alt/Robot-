@@ -1,21 +1,72 @@
 #!/usr/bin/env python3
-"""Face detection — YuNet (quantized) on NPU → bounding boxes + landmarks."""
+"""Face detection — YuNet through OpenCV's own FaceDetectorYN.
+
+## ‼️ It never found a face. Not once.
+
+Until 2026-08-05 this node ran a locally quantized `yunet_int8.onnx` and
+published `[]` on every single frame, at 10 Hz, for a full core of CPU. Not
+"sometimes missed a face" — the `obj` output of that graph was **exactly
+0.000** at every anchor and every stride, and the score is `cls * obj`, so no
+detection could ever clear any threshold. Confirmed on the live robot: 10 s of
+`/face_detections` is 10 s of `data: '[]'`.
+
+The cause is in scripts/quantize_npu_models.sh, which calibrates with
+
+    np.random.randn(*shape)          # values around 0, sigma 1
+
+while real frames are 0-255. INT8 calibration derives its activation scales
+from that data, so every scale came out roughly two orders of magnitude too
+small, activations saturated, and the objectness branch collapsed to zero. The
+`cls` branch survived as noise — 0.45 to 0.87 at EVERY anchor, which is its own
+tell that the graph is not doing anything.
+
+So everything downstream was dead too, quietly: face_identity had nobody to
+identify, and situational_awareness never had a face to report.
+
+## What it does now, and what that costs
+
+`cv2.FaceDetectorYN` with the stock opencv_zoo model. Decode and NMS happen in
+C++ instead of the ~65 lines of Python that used to do it here, and the model
+is float — no quantization to get wrong.
+
+Measured on this box, per frame, at 10 Hz (see project_robot_perception_load):
+
+    int8 640x640, 2 threads       64% of a core, 0 faces ever
+    fp32 640x480, 1 thread        43% of a core, faces down to 70 px
+    fp32 480x360, 1 thread        23% of a core, faces down to 90 px
+    fp32 320x240, 1 thread         9% of a core, faces down to 160 px
+
+‼️ MORE THREADS COST MORE CPU HERE, they only buy latency: 640x480 is 43 ms
+wall / 43 ms CPU on one thread, and 25 ms wall / 51 ms CPU on four. One thread
+at 5 Hz leaves the frame budget nine tenths empty, so there is nothing to buy.
+
+640x480 is the default because of the last column. A 24 cm face at 480 px of
+42.5 deg vertical FOV is ~148/d pixels tall, so 70 px is a person at ~2.1 m and
+160 px is one at ~0.9 m — closer than anyone stands when talking to the robot.
+Drop to 480x360 if the CPU matters more than the last half-metre.
+
+## ‼️ OpenCV 4.6 cannot load this model
+
+The system OpenCV is 4.6.0 and its FaceDetectorYN throws "Layer with requested
+id=-1 not found" on the first detect() with the 2023mar model. The venv on the
+path below has 4.11, which works — that import order is load-bearing, not a
+leftover from the NPU experiment it was added for.
+"""
 
 import os
 import sys
 
+# ‼️ Order matters: this venv supplies OpenCV 4.11. See the module docstring —
+# the system 4.6 cannot run this model at all.
 _VENV_SITE = '/home/dimi/ryzenai_venv/lib/python3.12/site-packages'
 if os.path.isdir(_VENV_SITE):
     sys.path.insert(0, _VENV_SITE)
-os.environ.setdefault('XILINX_XRT', '/opt/xilinx/xrt')
-os.environ.setdefault('RYZEN_AI_INSTALLATION_PATH', '/home/dimi/ryzenai_venv')
 
-import cv2
 import json
 import threading
+import urllib.request
 
-import numpy as np
-import onnxruntime as ort
+import cv2
 
 import rclpy
 from rclpy.node import Node
@@ -23,114 +74,87 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from cv_bridge import CvBridge
 
-_VAIP_CONFIG = '/home/dimi/ryzenai_venv/voe-4.0-linux_x86_64/vaip_config.json'
-_MODEL_PATH  = os.path.join(os.path.dirname(__file__), 'yunet_int8.onnx')
-# ‼️ Must match the ONNX graph, which is [1, 3, 640, 640] NCHW. These said
-# 192x320 and every inference died with "Got invalid dimensions for input:
-# index 3 Got: 320 Expected: 640" — the node crashed on its first frame, on
-# every launch, so use_face_detection:=true silently brought up nothing.
-# Verified against the model with onnx.load(); re-check if the model is swapped.
-_INPUT_H     = 640
-_INPUT_W     = 640
-_SCORE_THR   = 0.6
-_NMS_THR     = 0.3
+_MODEL_PATH = os.path.join(os.path.dirname(__file__), 'yunet_face_2023mar.onnx')
+# 232 KB. *.onnx is gitignored (weights are not committed), so a fresh checkout
+# has no model — fetch it rather than come up healthy and blind, which is
+# exactly the failure this rewrite exists to end.
+_MODEL_URL = ('https://github.com/opencv/opencv_zoo/raw/main/models/'
+              'face_detection_yunet/face_detection_yunet_2023mar.onnx')
+
+_SCORE_THR = 0.6
+_NMS_THR = 0.3
+_TOP_K = 5000
 
 
-def _build_session():
-    # YuNet is 158 KB, but the graph is 640x640 float32 NCHW, so a pass is ~30ms,
-    # not the <3ms the 320x320 model would cost. No benefit mapping it to the NPU.
-    #
-    # ‼️ Cap the threads. onnxruntime defaults intra_op to every core, and on this
-    # 16-core box that is a hard loss: measured 136ms/pass at the default against
-    # 55ms on one thread and 29ms on four — the tiny per-op tensors spend all their
-    # time in barrier sync. It also pinned ~9.5 cores at 10fps and drove load past
-    # 60, which starved the rest of the stack. Four threads is the knee of the
-    # curve; two is within 30% of it for a quarter of the cores, and at
-    # process_every_n=3 that leaves the 100ms frame budget with room to spare.
-    opts = ort.SessionOptions()
-    opts.intra_op_num_threads = 2
-    opts.inter_op_num_threads = 1
-    return ort.InferenceSession(
-        _MODEL_PATH, opts, providers=['CPUExecutionProvider']), 'CPU (2 threads)'
+def ensure_model(path: str = _MODEL_PATH, url: str = _MODEL_URL) -> bool:
+    """Download the model if it is missing. True if it is there afterwards."""
+    if os.path.isfile(path):
+        return True
+    tmp = path + '.part'
+    try:
+        urllib.request.urlretrieve(url, tmp)
+        os.replace(tmp, path)
+        return True
+    except Exception:                                          # noqa: BLE001
+        for leftover in (tmp,):
+            try:
+                os.remove(leftover)
+            except OSError:
+                pass
+        return False
 
 
-def _decode_multiscale(outputs, img_w, img_h, score_thr, nms_thr):
-    """YuNet's real output: 12 tensors, 3 strides x (cls, obj, bbox, kps).
+def to_json(faces, scale_x: float = 1.0, scale_y: float = 1.0) -> list:
+    """FaceDetectorYN rows -> the JSON face_identity and the dashboard expect.
 
-    ‼️ The previous decoder only handled a single fused (1, N, 15) tensor and
-    returned [] for anything else. This model emits the multi-scale form, so
-    face detection produced ZERO faces on every frame — silently, with the node
-    alive and no error. Discovered 2026-08-03 after fixing the input size that
-    had been crashing it outright.
+    A row is [x, y, w, h, then five landmark x/y pairs, then score]. The
+    landmark ORDER is right eye, left eye, nose, right mouth corner, left mouth
+    corner — the same order SFace's alignment template is built from, so it is
+    passed through untouched. Reordering it would still produce embeddings; it
+    would just quietly stop telling people apart (face_identity_node._align).
 
-    Layout, confirmed against the shapes for a 640x640 input
-    (80x80=6400, 40x40=1600, 20x20=400):
-        [cls_8, cls_16, cls_32, obj_8, obj_16, obj_32,
-         bbox_8, bbox_16, bbox_32, kps_8, kps_16, kps_32]
-    Score is cls * obj. Boxes are (cx, cy, w, h) in anchor units: centre as an
-    offset from the anchor in stride units, size in log space.
+    Scales map back to full-frame coordinates when detection ran on a resized
+    copy, since everything downstream indexes the original image.
     """
-    strides = (8, 16, 32)
-    n = len(strides)
-    cls_o, obj_o = outputs[0:n], outputs[n:2 * n]
-    box_o, kps_o = outputs[2 * n:3 * n], outputs[3 * n:4 * n]
-
-    boxes, scores, landmarks = [], [], []
-    for i, stride in enumerate(strides):
-        cols = _INPUT_W // stride
-        rows = _INPUT_H // stride
-        cls = np.array(cls_o[i]).reshape(-1)
-        obj = np.array(obj_o[i]).reshape(-1)
-        box = np.array(box_o[i]).reshape(-1, 4)
-        kps = np.array(kps_o[i]).reshape(-1, 10)
-        conf = np.clip(cls, 0, 1) * np.clip(obj, 0, 1)
-
-        keep = np.nonzero(conf >= score_thr)[0]
-        if keep.size == 0:
-            continue
-        ax = (keep % cols) * stride
-        ay = (keep // cols) * stride
-
-        cx = ax + box[keep, 0] * stride
-        cy = ay + box[keep, 1] * stride
-        w = np.exp(box[keep, 2]) * stride
-        h = np.exp(box[keep, 3]) * stride
-
-        sx, sy = img_w / _INPUT_W, img_h / _INPUT_H
-        for j, k in enumerate(keep):
-            boxes.append([float((cx[j] - w[j] / 2) * sx),
-                          float((cy[j] - h[j] / 2) * sy),
-                          float(w[j] * sx), float(h[j] * sy)])
-            scores.append(float(conf[k]))
-            landmarks.append([
-                {'x': int((ax[j] + kps[k, 2 * m] * stride) * sx),
-                 'y': int((ay[j] + kps[k, 2 * m + 1] * stride) * sy)}
-                for m in range(5)])
-
-    if not boxes:
-        return []
-    idx = cv2.dnn.NMSBoxes(boxes, scores, score_thr, nms_thr)
-    faces = []
-    for i in np.array(idx).flatten() if len(idx) else []:
-        x, y, w, h = boxes[i]
-        faces.append({'x1': int(x), 'y1': int(y),
-                      'x2': int(x + w), 'y2': int(y + h),
-                      'score': round(scores[i], 2),
-                      'landmarks': landmarks[i]})
-    return faces
-
-
+    out = []
+    for row in faces if faces is not None else []:
+        x, y, w, h = (float(v) for v in row[:4])
+        out.append({
+            'x1': int(x * scale_x),
+            'y1': int(y * scale_y),
+            'x2': int((x + w) * scale_x),
+            'y2': int((y + h) * scale_y),
+            'score': round(float(row[-1]), 2),
+            'landmarks': [{'x': int(float(row[4 + 2 * i]) * scale_x),
+                           'y': int(float(row[5 + 2 * i]) * scale_y)}
+                          for i in range(5)],
+        })
+    return out
 
 
 class FaceDetectionNode(Node):
     def __init__(self):
         super().__init__('face_detection_node')
-        self.declare_parameter('process_every_n', 3)
+        # 6 = 5 Hz off a 30 Hz camera. Was 3 (10 Hz), which is more often than
+        # a face moves and twice the cost. Recognition and "who is talking"
+        # both work off a face that is there for seconds.
+        self.declare_parameter('process_every_n', 6)
+        self.declare_parameter('input_width', 640)
+        self.declare_parameter('input_height', 480)
+        # See the docstring: extra threads buy latency this node does not need
+        # and cost CPU it cannot spare.
+        self.declare_parameter('threads', 1)
 
-        self.process_every_n = self.get_parameter('process_every_n').value
-        self.bridge          = CvBridge()
-        self._session        = None
-        self._frame_count    = 0
+        self.process_every_n = int(self.get_parameter('process_every_n').value)
+        self.input_size = (int(self.get_parameter('input_width').value),
+                           int(self.get_parameter('input_height').value))
+        self.threads = int(self.get_parameter('threads').value)
+
+        self.bridge = CvBridge()
+        self._detector = None
+        self._frame_count = 0
+        self._scale = (1.0, 1.0)
+        self._warned_size = False
 
         threading.Thread(target=self._load_model, daemon=True).start()
 
@@ -140,16 +164,24 @@ class FaceDetectionNode(Node):
         self.get_logger().info('Face detection node ready')
 
     def _load_model(self):
-        if not os.path.isfile(_MODEL_PATH):
-            self.get_logger().warn(
-                f'Face model not found: {_MODEL_PATH} — run scripts/quantize_npu_models.sh first')
+        if not ensure_model():
+            self.get_logger().error(
+                f'Face model missing and could not be downloaded: {_MODEL_PATH}. '
+                'Face detection, face identity and "who is talking" are all '
+                f'dead until it is there. Fetch it by hand from {_MODEL_URL}')
             return
-        sess, backend = _build_session()
-        self._session = sess
-        self.get_logger().info(f'YuNet loaded on {backend}')
+        # cv2.setNumThreads() at runtime breaks FaceDetectorYN on 4.6; on 4.11
+        # it is honoured, and it must be set before the detector is built.
+        cv2.setNumThreads(self.threads)
+        self._detector = cv2.FaceDetectorYN.create(
+            _MODEL_PATH, '', self.input_size, _SCORE_THR, _NMS_THR, _TOP_K)
+        self.get_logger().info(
+            f'YuNet loaded — {self.input_size[0]}x{self.input_size[1]}, '
+            f'{self.threads} thread(s), '
+            f'{30.0 / max(1, self.process_every_n):.1f} Hz')
 
     def _cb(self, color_msg: Image):
-        if self._session is None:
+        if self._detector is None:
             return
         self._frame_count += 1
         if self._frame_count % self.process_every_n != 0:
@@ -157,21 +189,22 @@ class FaceDetectionNode(Node):
 
         bgr = self.bridge.imgmsg_to_cv2(color_msg, 'bgr8')
         img_h, img_w = bgr.shape[:2]
+        want_w, want_h = self.input_size
+        if (img_w, img_h) != self.input_size:
+            # ‼️ The detector's input size is fixed at construction: handing it
+            # a differently sized frame is undefined, not automatic. Resize and
+            # scale the boxes back, so the coordinates downstream stay in the
+            # original frame.
+            if not self._warned_size:
+                self._warned_size = True
+                self.get_logger().info(
+                    f'Camera is {img_w}x{img_h}, detecting at {want_w}x{want_h}')
+            bgr = cv2.resize(bgr, self.input_size)
+            self._scale = (img_w / want_w, img_h / want_h)
 
-        resized = cv2.resize(bgr, (_INPUT_W, _INPUT_H))
-        # NCHW first: that is what this graph declares. The NHWC attempt below
-        # stays as a fallback for a differently-exported model.
-        inp = np.transpose(resized, (2, 0, 1))[np.newaxis].astype(np.float32)
-
-        try:
-            outputs = self._session.run(None, {'input': inp})
-        except Exception:
-            # Try NCHW format
-            inp_t = resized.astype(np.float32)[np.newaxis]   # (1, H, W, 3)
-            outputs = self._session.run(None, {self._session.get_inputs()[0].name: inp_t})
-
-        faces = _decode_multiscale(outputs, img_w, img_h, _SCORE_THR, _NMS_THR)
-        self.faces_pub.publish(String(data=json.dumps(faces)))
+        _n, faces = self._detector.detect(bgr)
+        self.faces_pub.publish(String(data=json.dumps(
+            to_json(faces, *self._scale))))
 
 
 def main():
