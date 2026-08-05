@@ -1307,15 +1307,18 @@ TRANSLATIONS = {
          'weiter seinen letzten guten Winkel und alles wirkt gesund. Nur Rate '
          'und Alter der Probe zeigen es — deshalb werden sie hier getrennt von '
          'den Werten gemessen.'),
-    'Φυσιολογικές τιμές, μετρημένες: τροχοί ~20 Hz, IMU ~6 Hz, EKF ~30 Hz. '
-    'Το IMU είναι όντως το αργότερο και αυτό είναι εντάξει — ο EKF παίρνει '
-    'από εκεί μόνο γωνία, όχι θέση.':
-        ('Normal values, measured: wheels ~20 Hz, IMU ~6 Hz, EKF ~30 Hz. The '
-         'IMU really is the slowest and that is fine — the EKF takes only '
-         'heading from it, not position.',
-         'Normalwerte, gemessen: Räder ~20 Hz, IMU ~6 Hz, EKF ~30 Hz. Das IMU '
-         'ist tatsächlich das langsamste und das ist in Ordnung — der EKF '
-         'nimmt davon nur den Winkel, nicht die Position.'),
+    'Φυσιολογικές τιμές, μετρημένες σε φρέσκο `robot max`: τροχοί ~20 Hz, '
+    'IMU ~110 Hz, EKF ~30 Hz. ‼️ Το IMU μετρήθηκε κάποτε στα 6 Hz και πέρασε '
+    'για φυσιολογικό — ήταν υποβαθμισμένη ροή που κανείς δεν είχε προσέξει. '
+    'Αν το δεις κάτω από 40, δεν είναι «αργό», είναι χαλασμένο.':
+        ('Normal values, measured on a fresh `robot max`: wheels ~20 Hz, IMU '
+         '~110 Hz, EKF ~30 Hz. ‼️ The IMU once measured 6 Hz and was taken for '
+         'normal — it was a degraded stream nobody had noticed. Below 40 it is '
+         'not "slow", it is broken.',
+         'Normalwerte, gemessen bei frischem `robot max`: Räder ~20 Hz, IMU '
+         '~110 Hz, EKF ~30 Hz. ‼️ Das IMU wurde einmal mit 6 Hz gemessen und '
+         'galt als normal — es war ein degradierter Stream, den niemand '
+         'bemerkt hatte. Unter 40 ist es nicht „langsam", sondern kaputt.'),
 
     'Αβεβαιότητα': ('Uncertainty', 'Unsicherheit'),
     'EKF γωνία ±': ('EKF heading ±', 'EKF Winkel ±'),

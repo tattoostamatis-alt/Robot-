@@ -4257,7 +4257,7 @@ button{font:inherit;color:inherit}
           ‼️ Νεκρή πηγή είναι ΣΙΩΠΗΛΗ, όχι λάθος: ο EKF συνεχίζει να δημοσιεύει την τελευταία καλή γωνία και όλα δείχνουν υγιή. Μόνο η συχνότητα και η ηλικία δείγματος το δείχνουν — γι' αυτό μετριούνται εδώ χωριστά από τις τιμές.
         </p>
         <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
-          Φυσιολογικές τιμές, μετρημένες: τροχοί ~20 Hz, IMU ~6 Hz, EKF ~30 Hz. Το IMU είναι όντως το αργότερο και αυτό είναι εντάξει — ο EKF παίρνει από εκεί μόνο γωνία, όχι θέση.
+          Φυσιολογικές τιμές, μετρημένες σε φρέσκο `robot max`: τροχοί ~20 Hz, IMU ~110 Hz, EKF ~30 Hz. ‼️ Το IMU μετρήθηκε κάποτε στα 6 Hz και πέρασε για φυσιολογικό — ήταν υποβαθμισμένη ροή που κανείς δεν είχε προσέξει. Αν το δεις κάτω από 40, δεν είναι «αργό», είναι χαλασμένο.
         </p>
       </div>
 
@@ -6437,11 +6437,13 @@ function fzPill(cls, txt){ return `<span class="pill ${cls}">${txt}</span>`; }
 // last good heading on screen for ever, and that is the failure this tab
 // exists to catch.
 //
-// ‼️ `floor` is what each topic MEASURES on this robot, halved — not what the
-// code elsewhere assumes. /imu/data was measured at 6.1 Hz (2026-08-05), while
-// _cb_imu's own comment still says "the stream runs ~19 Hz"; a threshold built
-// on 19 would have painted a perfectly healthy BNO085 amber for ever, and an
-// alarm that is always on is an alarm nobody reads.
+// ‼️ `floor` is what each topic MEASURES on this robot — and measure it on a
+// FRESH stack. On 2026-08-05 /imu/data read 6.1 Hz and a threshold was built
+// on that; after a `robot max` restart the same topic read 108-113 Hz, which
+// is what the firmware actually sends. The 6 Hz was a degraded stream nobody
+// had noticed, and a floor of 3 would have hidden it for ever. A stale rate is
+// exactly the failure this row exists to show, so the floor is set well under
+// the healthy rate but well OVER a stream that has fallen over.
 function fzHealth(s, floor){
   if (!s || s.age === null || s.age === undefined)
     return fzPill('bad', t('καμία ένδειξη'));
@@ -6500,9 +6502,9 @@ function renderFusion(m){
   $('fz-wzi').textContent = rs(m.wz.imu);
   $('fz-wze').textContent = rs(m.wz.ekf);
 
-  $('fz-h-wheel').innerHTML = fzHealth(S.wheel, 10);   // measured 19.9 Hz
-  $('fz-h-imu').innerHTML   = fzHealth(S.imu, 3);      // measured  6.1 Hz
-  $('fz-h-ekf').innerHTML   = fzHealth(S.ekf, 15);     // measured 30.0 Hz
+  $('fz-h-wheel').innerHTML = fzHealth(S.wheel, 10);   // measured  19.9 Hz
+  $('fz-h-imu').innerHTML   = fzHealth(S.imu, 40);     // measured 108-113 Hz
+  $('fz-h-ekf').innerHTML   = fzHealth(S.ekf, 15);     // measured  30.0 Hz
 
   // The EKF's x/y variance is unbounded by construction (see the note in the
   // card), so only its yaw is shown — printing "±2607 km" next to a healthy
