@@ -167,11 +167,26 @@ def _launch_setup(context, *args, **kwargs):
         }.items(),
     ))
 
-    # D435 depth driver only (no color/pointcloud, no detector) so the
-    # global_localizer can fuse the forward depth virtual-scan with the 360°
-    # LiDAR — much better global localization from a random start position.
+    # D435 depth driver only (no detector) so the global_localizer can fuse the
+    # forward depth virtual-scan with the 360° LiDAR — much better global
+    # localization from a random start position.
     # Skipped under use_perception: bringup's full camera already covers depth
     # (starting a second realsense would fight over the USB device).
+    #
+    # ‼️ pointcloud.enable was 'false' here, and that quietly disarmed the
+    # costmap. nav2_params.yaml has listed `depth_camera` as a voxel_layer
+    # observation source all along, but on a default `robot max` the topic had
+    # ZERO publishers (measured 2026-08-05: 2 subscribers, 0 publishers), so
+    # everything the LiDAR's single 0.606 m slice misses — table tops, steps,
+    # a bent-over person — reached the planner never. The Sensor fusion tab
+    # made the gap visible; this is what closes it.
+    #
+    # decimation x2 is not a compromise for turning it on, it is a saving: the
+    # camera node measured 34.1% CPU with no cloud at all, 63.3% with a full
+    # 30 Hz cloud, and 32.6% with cloud + decimation x2 — BELOW the old
+    # baseline, because the smaller depth frame makes every downstream filter
+    # cheaper too. 37k points per cloud is still far more than a 5 Hz costmap
+    # update can use.
     if use_depth and not use_perception:
         actions.append(IncludeLaunchDescription(
             PythonLaunchDescriptionSource([
@@ -183,7 +198,9 @@ def _launch_setup(context, *args, **kwargs):
                 'enable_infra1':      'false',
                 'enable_infra2':      'false',
                 'align_depth.enable': 'false',
-                'pointcloud.enable':  'false',
+                'pointcloud.enable':  'true',
+                'decimation_filter.enable': 'true',
+                'decimation_filter.filter_magnitude': '2',
             }.items(),
         ))
 

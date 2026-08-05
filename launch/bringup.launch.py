@@ -634,6 +634,12 @@ def generate_launch_description():
                     'enable_infra2':   'false',
                     'align_depth.enable': 'true',
                     'pointcloud.enable':  'true',
+                    # Same measurement as in localize.launch.py: decimation x2
+                    # takes the camera node from 63.3% CPU to 32.6% while still
+                    # publishing ~37k points per cloud, which is more than a
+                    # 5 Hz costmap update consumes.
+                    'decimation_filter.enable': 'true',
+                    'decimation_filter.filter_magnitude': '2',
                 }.items(),
             )
         ],

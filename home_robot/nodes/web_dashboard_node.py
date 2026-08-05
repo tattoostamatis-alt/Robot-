@@ -449,11 +449,25 @@ class DashboardNode(Node):
         # cloud stream: two phones listening must not switch each other off.
         self._listen_ws: Set[object] = set()
         self._cloud_last = 0.0
-        # The camera ships with its pointcloud filter off; _set_camera_pointcloud
-        # turns it on for as long as someone is on the 3D tab.
-        self._cloud_param_on = False
+        # _set_camera_pointcloud turns the D435's pointcloud filter on for as
+        # long as someone is on the 3D tab — but ONLY if this node is the one
+        # that turned it on.
+        #
+        # ‼️ Since 2026-08-05 the launch files start the camera with
+        # pointcloud.enable:=true, because Nav2's voxel_layer feeds on that
+        # topic (see nav2_params.yaml `depth_camera`). Switching it off on
+        # leaving the 3D tab would silently blind the costmap to every obstacle
+        # the LiDAR's flat slice misses — the exact failure this whole feature
+        # exists to prevent, and one that shows up as nothing at all in the
+        # logs. So: read the parameter once at startup, and if it is already on,
+        # somebody else owns it and this node must never touch it.
+        self._cloud_param_on  = False
+        self._cloud_param_own = True    # until the startup probe says otherwise
         self._cam_param_cli = self.create_client(
             SetParameters, '/camera/camera/set_parameters')
+        self._cam_param_get = self.create_client(
+            GetParameters, '/camera/camera/get_parameters')
+        self._cam_probe_timer = self.create_timer(3.0, self._probe_cloud_owner)
         self._map_cache = None          # (fetched_at, name); see active_map()
         self._backend_cache = None      # (fetched_at, backend); see llm_backend()
         self._cam_err_at = 0.0          # throttles the decode-failure warning
@@ -1536,6 +1550,35 @@ class DashboardNode(Node):
     CLOUD_MAX_POINTS = 4000
     CLOUD_PERIOD = 0.33
 
+    def _probe_cloud_owner(self):
+        """Find out once whether the launch already enabled the pointcloud.
+
+        Retries on its own timer rather than assuming: the camera takes several
+        seconds to advertise its parameter services, and a single early attempt
+        would fail, leave the dashboard believing it owns the parameter, and
+        switch the costmap's depth source off the first time someone closed the
+        3D tab.
+        """
+        if not self._cam_param_get.service_is_ready():
+            return                      # camera not up yet — try again in 3 s
+
+        def done(fut):
+            try:
+                vals = fut.result().values
+            except Exception:
+                return                  # leave the timer running, try again
+            if vals and vals[0].bool_value:
+                self._cloud_param_own = False
+                self._cloud_param_on  = True
+                self.get_logger().info(
+                    'D435 pointcloud is already on (Nav2 costmap owns it) — '
+                    'the 3D tab will use it without switching it off')
+            self._cam_probe_timer.cancel()
+
+        req = GetParameters.Request()
+        req.names = ['pointcloud.enable']
+        self._cam_param_get.call_async(req).add_done_callback(done)
+
     def _set_camera_pointcloud(self, on: bool):
         """Turn the D435's pointcloud filter on while the 3D tab is watching.
 
@@ -1550,6 +1593,8 @@ class DashboardNode(Node):
         Enabling it only while someone is looking keeps the default cost at zero,
         which is the same reason the stream itself is gated on _cloud_ws.
         """
+        if not self._cloud_param_own:
+            return          # Nav2 owns it; see the note where the flag is set
         if on == self._cloud_param_on:
             return
         if not self._cam_param_cli.service_is_ready():

@@ -352,15 +352,30 @@ local_costmap:
           raytrace_min_range: 0.0
           obstacle_max_range: 2.5
           obstacle_min_range: 0.0
+        # ‼️ The two heights are the whole reason this source is safe to enable.
+        # The D435 looks DOWN from 0.536 m, so most of what it returns is floor.
+        # At min_obstacle_height 0.0 the carpet itself marked as a lethal
+        # obstacle half a metre in front of the robot and Nav2 would have
+        # refused to move at all — measured on the Sensor fusion tab, where the
+        # same cut-off had to be applied for the profile to mean anything.
+        # 0.08 clears the floor and its depth noise; a doorsill or a book still
+        # marks.
+        # The top is 1.00 m, not 2.0: above the robot's own height an obstacle
+        # is something it drives UNDER (a table top it fits beneath, a shelf),
+        # and marking those would seal off half the house.
         depth_camera:
           topic: /camera/camera/depth/color/points
-          max_obstacle_height: 2.0
-          min_obstacle_height: 0.0
+          max_obstacle_height: 1.00
+          min_obstacle_height: 0.08
           clearing: true
           marking: true
           data_type: "PointCloud2"
           raytrace_max_range: 3.0
           raytrace_min_range: 0.0
+          # The D435 stops being trustworthy past ~3 m indoors and its cone
+          # narrows badly under ~0.5 m (measured 36° at 40 cm, where the two
+          # lenses stop overlapping), so it marks over the middle band and the
+          # LiDAR keeps the rest.
           obstacle_max_range: 2.5
           obstacle_min_range: 0.0
         predicted_obstacles:
