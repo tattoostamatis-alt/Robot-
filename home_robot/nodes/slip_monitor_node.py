@@ -26,9 +26,12 @@ tested against a real rug. Whoever wants to act on this can subscribe.
 """
 import json
 import math
+import os
+import subprocess
 import time
 
 import rclpy
+import tf2_ros
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
@@ -36,6 +39,7 @@ from sensor_msgs.msg import Imu, LaserScan
 from std_msgs.msg import String
 
 from home_robot.slip_detect import SlipDetector
+from home_robot.slip_map import SlipMap, correction_delta, is_significant
 
 
 class SlipMonitorNode(Node):
@@ -91,6 +95,42 @@ class SlipMonitorNode(Node):
             Imu, '/imu/data', self._cb_imu,
             QoSProfile(depth=5, reliability=QoSReliabilityPolicy.BEST_EFFORT))
         self.create_subscription(LaserScan, '/scan', self._cb_scan, 5)
+
+        # ── Slip map ───────────────────────────────────────────────────────
+        # The live numbers say HOW MUCH the odometry is drifting; this says
+        # WHERE. A robot that loses 20 cm every time it crosses one rug has a
+        # fixable problem; one that loses 2 cm everywhere has a calibration
+        # problem — and those look identical on a live readout.
+        self.declare_parameter('slip_map', True)
+        self.declare_parameter('slip_map_cell', 0.5)
+        self.declare_parameter('slip_map_min_shift', 0.03)
+        self.declare_parameter('slip_map_half_life_days', 14.0)
+        self._map_pub = self.create_publisher(String, 'slip_map', latched)
+        self._slipmap = None
+        self._corr_prev = None
+        self._map_dirty = False
+        if p('slip_map').value:
+            self._tf_buffer = tf2_ros.Buffer()
+            self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
+            self._slipmap = SlipMap(
+                path=os.path.expanduser('~/.home_robot/slip_map.json'),
+                map_name=self._active_map(),
+                cell=p('slip_map_cell').value,
+                half_life_days=p('slip_map_half_life_days').value)
+            self._slipmap.load()
+            # ‼️ 5 Hz, not 1 Hz. The mark lands where the robot was WHEN THE
+            # CORRECTION WAS SEEN, not where it was when AMCL made it, so the
+            # sampling period is a position error: at 1 Hz and 0.2 m/s that is
+            # 20 cm, which is most of a 0.5 m cell, and a test drive put the
+            # mark a whole cell past the rug that caused it. At 5 Hz it is 4 cm.
+            self.create_timer(0.2, self._sample_correction)
+            # Writing on every event would hit the disk during navigation, when
+            # the CPU is already the scarce thing; a minute of unsaved history
+            # is an acceptable loss.
+            self.declare_parameter('slip_map_save_seconds', 60.0)
+            self.create_timer(float(p('slip_map_save_seconds').value),
+                              self._save_map)
+            self._publish_map()
 
         self.create_timer(0.5, self._evaluate)
         self._publish(False, None, {})
@@ -161,6 +201,84 @@ class SlipMonitorNode(Node):
                 if firing == 'rotation' else
                 'Προχωράω αλλά δεν κουνιέμαι — κόλλησα κάπου.')))
             self.get_logger().warn(f'slip ({firing}): {detail}')
+
+    # ── slip map ───────────────────────────────────────────────────────────
+    @staticmethod
+    def _active_map():
+        """Which map is loaded, so a remap does not inherit the old house.
+
+        ‼️ A slip map recorded against another map file is worse than none:
+        the coordinates only mean anything in the frame they were taken in, so
+        loading them would paint the previous house's rug onto this one's
+        living room.
+        """
+        try:
+            r = subprocess.run(
+                ['ros2', 'param', 'get', '/map_server', 'yaml_filename'],
+                capture_output=True, text=True, timeout=10)
+            for token in (r.stdout or '').split():
+                if token.endswith('.yaml'):
+                    return os.path.basename(token)[:-5]
+        except Exception:                                 # noqa: BLE001
+            pass
+        return None
+
+    def _sample_correction(self):
+        """Watch map->odom, and when it jumps, note where the robot was.
+
+        map->odom IS the correction: everything AMCL had to undo to put the
+        dead reckoning back onto the walls. Only the CHANGE counts — the
+        absolute transform also carries wherever the odom origin happened to be
+        at boot, which on a healthy robot reads as metres.
+        """
+        try:
+            corr = self._tf_buffer.lookup_transform('map', 'odom',
+                                                    rclpy.time.Time())
+            pose = self._tf_buffer.lookup_transform('map', 'base_link',
+                                                    rclpy.time.Time())
+        except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
+                tf2_ros.ExtrapolationException, tf2_ros.TransformException):
+            return                      # not localizing; nothing to record
+
+        t, r = corr.transform.translation, corr.transform.rotation
+        cur = (t.x, t.y, math.atan2(2.0 * (r.w * r.z + r.x * r.y),
+                                    1.0 - 2.0 * (r.y * r.y + r.z * r.z)))
+        shift, turn = correction_delta(self._corr_prev, cur)
+        self._corr_prev = cur
+        if not is_significant(shift, turn,
+                              min_shift=self.get_parameter(
+                                  'slip_map_min_shift').value):
+            return
+        p = pose.transform.translation
+        self._slipmap.add(p.x, p.y, shift, turn)
+        self._map_dirty = True
+        self.get_logger().info(
+            f'slip map: {shift*100:.1f} cm / {math.degrees(turn):.1f}° '
+            f'correction at ({p.x:.2f}, {p.y:.2f})')
+        self._publish_map()
+
+    def _save_map(self):
+        if self._slipmap and self._map_dirty:
+            self._slipmap.prune()
+            self._slipmap.save()
+            self._map_dirty = False
+
+    def _publish_map(self):
+        if not self._slipmap:
+            return
+        cells = self._slipmap.decayed()
+        self._map_pub.publish(String(data=json.dumps({
+            'map': self._slipmap.map_name,
+            'cell': self._slipmap.cell,
+            # Only what is worth drawing. The tail is thousands of cells the
+            # robot merely drove through, and sending them would make the map
+            # tab look like the whole house is a problem.
+            'cells': [{'x': round(c['x'], 2), 'y': round(c['y'], 2),
+                       'm': round(c['m'], 3), 'deg': round(c['deg'], 1),
+                       'n': c['n']}
+                      for c in cells[:60] if c['m'] >= 0.05],
+            'total': len(cells),
+        })))
 
     def _publish(self, slipping, kind, detail):
         state = (slipping, kind)

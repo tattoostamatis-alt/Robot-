@@ -1132,6 +1132,27 @@ TRANSLATIONS = {
          'das vom Wakeword-Knoten veröffentlicht wird — ein zweiter ALSA-Stream '
          'auf demselben Gerät würde mit dem Wakeword konkurrieren. Benötigt'),
 
+    # ── Slip map (map pane) ───────────────────────────────────────────────
+    '🩹 Πού γλιστράει': ('🩹 Where it slips', '🩹 Wo es rutscht'),
+    'Δείχνει τα σημεία του σπιτιού όπου το AMCL χρειάστηκε να διορθώσει '
+    'περισσότερο τη θέση — δηλαδή εκεί που η οδομετρία χάνει έδαφος. '
+    'Μαζεύεται με τον καιρό και επιβιώνει σε restart. Ένα φωτεινό σημείο σε '
+    'ένα χαλί είναι πρόβλημα που φτιάχνεται· παντού λίγο, είναι βαθμονόμηση.':
+        ('Shows the places in the house where AMCL had to correct the position '
+         'most — where the odometry loses ground. It builds up over time and '
+         'survives restarts. One bright spot on a rug is a fixable problem; a '
+         'little everywhere is calibration.',
+         'Zeigt die Stellen im Haus, an denen AMCL die Position am meisten '
+         'korrigieren musste — wo die Odometrie Boden verliert. Es sammelt '
+         'sich über die Zeit und überlebt Neustarts. Ein heller Fleck auf '
+         'einem Teppich ist ein behebbares Problem; überall ein wenig ist '
+         'Kalibrierung.'),
+    'καθαρά': ('clear', 'sauber'),
+    'Χειρότερο σημείο': ('Worst spot', 'Schlimmste Stelle'),
+    'συνολικής διόρθωσης σε': ('of correction in total, across',
+                               'Korrektur insgesamt, über'),
+    'περάσματα': ('passes', 'Durchgänge'),
+
     # ── USB power cycle (System pane) ─────────────────────────────────────
     'Ξεκόλλα αισθητήρα': ('Unstick a sensor', 'Sensor entklemmen'),
     'Κόβει το ρεύμα στη θύρα USB της συσκευής για δύο δευτερόλεπτα και το '

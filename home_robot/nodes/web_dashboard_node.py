@@ -572,6 +572,13 @@ class DashboardNode(Node):
         self.create_subscription(String, '/arm/touch', self._cb_touch, latch)
         self.create_subscription(String, '/echo', self._cb_echo, latch)
         self.create_subscription(String, '/self_diagnosis', self._cb_diag, latch)
+        # Latched: the accumulated history has to be on screen the moment the
+        # page opens, not after the next correction — which on a parked robot
+        # never comes.
+        self.create_subscription(
+            String, '/slip_map',
+            lambda m: self._state.broadcast({'type': 'slip_map',
+                                             **json.loads(m.data)}), latch)
         self.create_subscription(String, '/llm_quota', self._cb_quota, latch)
         self.create_subscription(String, '/sound_events', self._cb_sound, latch)
         # Both latched by their publishers, so a tab opened long after the fact
@@ -3589,6 +3596,15 @@ button{font:inherit;color:inherit}
         </h3>
         <div class="row" id="rooms"></div>
         <div class="row" id="room-legend" style="margin-top:8px;gap:11px"></div>
+        <div class="speedbox" style="margin-top:10px">
+          <label style="display:flex;align-items:center;gap:9px;font-size:12.5px;
+            cursor:pointer;user-select:none">
+            <input type="checkbox" id="b-slipmap">
+            <span>🩹 Πού γλιστράει <span class="badge" id="sm-badge">—</span></span>
+          </label>
+          <div id="sm-msg" style="font-size:11.5px;color:#71717a;margin-top:8px;
+            line-height:1.6">Δείχνει τα σημεία του σπιτιού όπου το AMCL χρειάστηκε να διορθώσει περισσότερο τη θέση — δηλαδή εκεί που η οδομετρία χάνει έδαφος. Μαζεύεται με τον καιρό και επιβιώνει σε restart. Ένα φωτεινό σημείο σε ένα χαλί είναι πρόβλημα που φτιάχνεται· παντού λίγο, είναι βαθμονόμηση.</div>
+        </div>
         <div class="speedbox">
           <div class="row">
             <span style="font-size:12.5px;color:#a1a1aa">🔎 Πήγαινε να δεις</span>
@@ -4960,6 +4976,22 @@ function draw(){
   const s=scale(), ox=offX(), oy=offY();
   ctx.drawImage(mapImg, ox, oy, mapInfo.width*s, mapInfo.height*s);
 
+  // Where the odometry loses ground. Drawn UNDER everything else: it is
+  // history, not something happening now, and it must never be mistaken for an
+  // obstacle or a plan.
+  if(slipMapOn && slipMap && slipMap.cells && slipMap.cells.length){
+    const worst = slipMap.cells[0].m || 1;
+    const cellPx = (slipMap.cell || 0.5) / mapInfo.resolution * scale();
+    slipMap.cells.forEach(c => {
+      const p = w2c(c.x, c.y);
+      // Alpha by severity rather than a colour ramp: the map underneath has to
+      // stay readable, and "how bad" only needs to be comparable, not precise.
+      const a = 0.12 + 0.55 * Math.min(1, c.m / worst);
+      ctx.fillStyle = `rgba(248,113,113,${a})`;
+      ctx.fillRect(p.x - cellPx/2, p.y - cellPx/2, cellPx, cellPx);
+    });
+  }
+
   // Global plan
   if(plan && plan.length>1){
     ctx.strokeStyle='rgba(96,165,250,.9)'; ctx.lineWidth=2.5;
@@ -5046,6 +5078,7 @@ const HANDLERS = {
   compass(m){ compassOffset = m.offset; drawCompass2(); },
   fusion(m){ renderFusion(m); },
   usb_power(m){ usbResult(m); },
+  slip_map(m){ renderSlipMap(m); },
   fuseprof(m){ renderFuseProfile(m); },
   hand(m){ handState = m; renderGestureBindings(); },
   people(m){ renderPeople(m); },
@@ -6127,6 +6160,7 @@ function roomLegend(rooms){
   }).join('');
 }
 $('b-tint').onchange = e => send({type:'room_tint', on: e.target.checked});
+$('b-slipmap').onchange = e => { slipMapOn = e.target.checked; draw(); };
 
 // ── "πήγαινε να δεις" (check mission) ──────────────────────────────────────
 // The same mission the voice `check` tool starts: drive to the room, ask the
@@ -6638,6 +6672,29 @@ $('fp-on').onchange = e => {
 };
 drawFzChart();
 drawFuseProfile();
+
+// ── Slip map ───────────────────────────────────────────────────────────────
+// Latched, so the accumulated history is there the moment the page opens
+// rather than after the next correction — which on a parked robot never comes.
+let slipMap = null, slipMapOn = false;
+
+function renderSlipMap(m){
+  slipMap = m;
+  const n = (m.cells || []).length;
+  const badge = $('sm-badge');
+  if (badge) badge.innerHTML = n
+    ? `<span class="pill warn">${n}</span>`
+    : `<span class="pill ok">${t('καθαρά')}</span>`;
+  const msg = $('sm-msg');
+  if (msg && n){
+    const worst = m.cells[0];
+    // The single most useful sentence: how bad, and where. Metres rather than
+    // "a lot", because the number is what tells a rug from calibration.
+    msg.textContent = t('Χειρότερο σημείο') + `: ${worst.m.toFixed(2)} m `
+      + t('συνολικής διόρθωσης σε') + ` ${worst.n} ` + t('περάσματα') + '.';
+  }
+  if (slipMapOn) draw();
+}
 
 // ── USB power cycle ────────────────────────────────────────────────────────
 // Pulling the plug on one sensor, from wherever you happen to be. Built from
