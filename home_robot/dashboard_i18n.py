@@ -1132,6 +1132,24 @@ TRANSLATIONS = {
          'das vom Wakeword-Knoten veröffentlicht wird — ein zweiter ALSA-Stream '
          'auf demselben Gerät würde mit dem Wakeword konkurrieren. Benötigt'),
 
+    # ── Camera "why it looks empty" banner ────────────────────────────────
+    # The three reasons come from the SERVER (_judge_frame), so they never
+    # appear in the markup the i18n test scrapes — they have to be listed by
+    # hand or they would only ever render in Greek.
+    'Η κάμερα ΔΟΥΛΕΥΕΙ': ('The camera IS working', 'Die Kamera FUNKTIONIERT'),
+    'σκοτάδι — κοιτάει σε σκοτεινό χώρο ή είναι καλυμμένη':
+        ('darkness — it is looking into an unlit space, or something is over it',
+         'Dunkelheit — sie schaut in einen unbeleuchteten Raum oder ist verdeckt'),
+    'κατάλευκο — κοιτάει κατευθείαν σε φως ή σε τοίχο από πολύ κοντά':
+        ('pure white — it is looking straight into a light, or at a wall from '
+         'very close up',
+         'reinweiß — sie schaut direkt in ein Licht oder aus nächster Nähe auf '
+         'eine Wand'),
+    'επίπεδη επιφάνεια χωρίς λεπτομέρεια — μάλλον τοίχος μπροστά της':
+        ('a flat surface with no detail — most likely a wall in front of it',
+         'eine flache Fläche ohne Details — höchstwahrscheinlich eine Wand '
+         'davor'),
+
     # ── Slip map (map pane) ───────────────────────────────────────────────
     '🩹 Πού γλιστράει': ('🩹 Where it slips', '🩹 Wo es rutscht'),
     'Δείχνει τα σημεία του σπιτιού όπου το AMCL χρειάστηκε να διορθώσει '

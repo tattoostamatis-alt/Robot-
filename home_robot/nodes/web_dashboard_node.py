@@ -488,6 +488,8 @@ class DashboardNode(Node):
         self._map_cache = None          # (fetched_at, name); see active_map()
         self._backend_cache = None      # (fetched_at, backend); see llm_backend()
         self._cam_err_at = 0.0          # throttles the decode-failure warning
+        self._cam_judge_at = 0.0        # see _judge_frame
+        self._cam_state_last = None
         self._room_mask = (None, None, None)   # see _load_room_mask()
         self._room_mask_at = None              # mtime the cache was built from
         self._room_size_warned = False
@@ -1398,6 +1400,65 @@ class DashboardNode(Node):
                 'zmin': self.CAM_Z_MIN, 'zmax': self.CAM_Z_MAX,
             }, remember=False)
 
+    # What the picture is, not just whether there is one. Measured on this
+    # camera 2026-08-05 from a robot parked 40 cm from a white wall: brightness
+    # 116.7, a perfectly normal exposure. The frame was healthy by every
+    # measure the dashboard had and looked to a human exactly like a dead
+    # camera — "δεν δείχνει" was reported twice for a stream running at 23 fps.
+    # Texture is what tells them apart.
+    #
+    # ‼️ Laplacian variance is RESOLUTION-DEPENDENT, and calibrating it at one
+    # size while measuring at another is silently wrong. The same five live
+    # frames of that wall:
+    #
+    #     640x480 -> 6.0      320x240 -> 21.3      160x120 -> 73.3
+    #
+    # The first attempt took the 640-wide number and applied it to a 160-wide
+    # copy, so a blank wall scored 73 against a threshold of 40 and the banner
+    # never appeared. Both numbers below are measured at JUDGE_SIZE.
+    # For scale, a richly textured reference scores ~4160 at every size, so 60
+    # sits an order of magnitude clear of anything with real detail in it.
+    JUDGE_SIZE    = (320, 240)
+    FLAT_DETAIL   = 60.0     # wall measured 21.3 here
+    DARK_MEAN     = 18.0
+    BLOWN_MEAN    = 238.0
+    _CAM_JUDGE_PERIOD = 1.0  # seconds; the verdict cannot change faster
+
+    def _judge_frame(self, bgr):
+        """Say WHY the picture looks empty, once a second.
+
+        Cheap on purpose: one grayscale copy at JUDGE_SIZE, once a second,
+        which costs nothing next to the JPEG encode that just ran.
+        """
+        now = time.monotonic()
+        if now - self._cam_judge_at < self._CAM_JUDGE_PERIOD:
+            return
+        self._cam_judge_at = now
+        try:
+            small = cv2.cvtColor(cv2.resize(bgr, self.JUDGE_SIZE),
+                                 cv2.COLOR_BGR2GRAY)
+            mean = float(small.mean())
+            detail = float(cv2.Laplacian(small, cv2.CV_64F).var())
+        except cv2.error:
+            return
+
+        # Only the verdict crosses the wire, never its wording: the sentence
+        # lives in the page, where the translation table can reach it. A Greek
+        # string built here would render in Greek in all three languages.
+        if mean < self.DARK_MEAN:
+            state = 'dark'
+        elif mean > self.BLOWN_MEAN:
+            state = 'blown'
+        elif detail < self.FLAT_DETAIL:
+            state = 'flat'
+        else:
+            state = 'ok'
+        payload = {'type': 'camstate', 'state': state,
+                   'mean': round(mean, 1), 'detail': round(detail, 1)}
+        if payload != self._cam_state_last:
+            self._cam_state_last = payload
+            self._state.broadcast(payload)
+
     def _cb_camera(self, msg: Image):
         try:
             enc = msg.encoding.lower()
@@ -1422,6 +1483,7 @@ class DashboardNode(Node):
             self._state.camera_jpg = jpg.tobytes()
             self._state.camera_at = time.monotonic()
             self._state.camera_seq += 1
+            self._judge_frame(bgr)
         except Exception as e:
             # Was a bare `pass`. A frame this callback cannot decode stops the
             # picture updating for ever, and the silence made that look like a
@@ -3667,6 +3729,12 @@ button{font:inherit;color:inherit}
       <div id="cam-wrap">
         <img id="cam" alt="">
         <div class="ovl">📷 RealSense D435 · color</div>
+        <!-- ‼️ A healthy camera pointed at a blank wall is indistinguishable
+             from a dead one, and was reported as "δεν δείχνει" twice while
+             running at 23 fps. This says which it is. -->
+        <div class="ovl" id="cam-why" style="top:auto;bottom:8px;left:10px;
+             right:10px;display:none;background:rgba(120,53,15,.85);
+             color:#fbbf24;font-size:11.5px;line-height:1.5"></div>
       </div>
       <div class="card">
         <h3>Ανίχνευση <span class="badge" id="vis-count">—</span></h3>
@@ -5079,6 +5147,7 @@ const HANDLERS = {
   fusion(m){ renderFusion(m); },
   usb_power(m){ usbResult(m); },
   slip_map(m){ renderSlipMap(m); },
+  camstate(m){ renderCamState(m); },
   fuseprof(m){ renderFuseProfile(m); },
   hand(m){ handState = m; renderGestureBindings(); },
   people(m){ renderPeople(m); },
@@ -6674,6 +6743,26 @@ $('fp-on').onchange = e => {
 };
 drawFzChart();
 drawFuseProfile();
+
+// ── Why the picture looks empty ────────────────────────────────────────────
+// A camera at 23 fps showing a white wall 40 cm away looks exactly like a dead
+// one — measured brightness 117, detail 5.0 against >100 for a normal room.
+// Reported as "δεν δείχνει" twice. The banner names what is actually wrong, so
+// the answer is "move the robot", not "the camera is broken".
+const CAM_WHY = {
+  dark:  'σκοτάδι — κοιτάει σε σκοτεινό χώρο ή είναι καλυμμένη',
+  blown: 'κατάλευκο — κοιτάει κατευθείαν σε φως ή σε τοίχο από πολύ κοντά',
+  flat:  'επίπεδη επιφάνεια χωρίς λεπτομέρεια — μάλλον τοίχος μπροστά της',
+};
+
+function renderCamState(m){
+  const el = $('cam-why');
+  if (!el) return;
+  const why = m && CAM_WHY[m.state];
+  if (!why){ el.style.display = 'none'; return; }
+  el.style.display = 'block';
+  el.textContent = '⚠ ' + t('Η κάμερα ΔΟΥΛΕΥΕΙ') + ' — ' + t(why);
+}
 
 // ── Slip map ───────────────────────────────────────────────────────────────
 // Latched, so the accumulated history is there the moment the page opens
