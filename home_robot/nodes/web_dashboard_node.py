@@ -333,6 +333,58 @@ class DashboardNode(Node):
         self.create_subscription(Path, '/plan', self._cb_plan, 5)
         self.create_subscription(Odometry, '/odom', self._cb_odom, 5)
 
+        # ── Sensor fusion tabs ──────────────────────────────────────────────
+        # Two questions the rest of the dashboard cannot answer:
+        #   1. "Σύντηξη": the EKF takes vx from the wheels and yaw from the
+        #      BNO085 (see config/ekf.yaml) and AMCL corrects what is left. When
+        #      the pose walks off, the only useful question is WHICH input lied,
+        #      and that needs the three headings side by side — the IMU tab
+        #      shows one of them, the map tab shows the result, nothing shows
+        #      the disagreement.
+        #   2. "Αισθητήρες": the LiDAR sees one horizontal slice at 0.606 m and
+        #      the D435 sees a cone from 0.536 m. A table top, a step, or a cat
+        #      lives in exactly the gap between them, so what matters is where
+        #      the two DISAGREE, not either one alone.
+        # Both are gated per socket like the 3D cloud: nothing is computed while
+        # nobody is on the tab.
+        self._fuse_ws: Set[object] = set()          # sockets on either tab
+        self._fuse_cam_ws: Set[object] = set()      # sockets needing the cloud
+        self.create_subscription(Odometry, '/odometry/filtered',
+                                 self._cb_odom_filtered, 5)
+        # Per source: last yaw (rad, unwrapped), sample count, measured rate and
+        # the monotonic stamp of the newest sample. Rate/age are what expose the
+        # failure the numbers hide — a frozen source keeps publishing its last
+        # good heading, so only the clock shows it died.
+        self._fz = {k: {'yaw': None, 'raw': None, 'turns': 0.0, 'n': 0,
+                        'hz': 0.0, 'seen': 0.0, 'ref': None}
+                    for k in ('wheel', 'imu', 'ekf')}
+        self._fz_t0     = time.monotonic()
+        self._fz_vx     = {'wheel': 0.0, 'ekf': 0.0}
+        self._fz_wz     = {'wheel': 0.0, 'imu': 0.0, 'ekf': 0.0}
+        self._fz_cov    = {'ekf': None, 'amcl': None}
+        # ‼️ map->odom is NOT the correction — it is the correction PLUS wherever
+        # the odom origin happened to be when the base powered up. Read raw it
+        # showed 366 cm and 123° on a robot that was localizing perfectly
+        # (measured 2026-08-05), because the robot had simply driven and turned
+        # since boot. Only the CHANGE since the reset is AMCL pulling the pose
+        # back, so the reference is captured and subtracted.
+        self._fz_corr_ref = None       # (x, y, yaw) at the last reset
+        self._fz_corr_max = 0.0        # biggest correction since the reset
+        self._fz_yaw_max  = 0.0
+        self._fuse_last   = 0.0
+        # Angular profiles for the LiDAR/camera comparison, both in base_link
+        # bearings so they are directly comparable. (bins, list of metres|None)
+        self._prof_lidar  = None
+        self._prof_cam    = None
+        self._prof_cam_at = 0.0
+        self._prof_last   = 0.0
+        # Both mounts are static transforms, so they are looked up once and
+        # kept. Cached as None until the first successful lookup, which is the
+        # normal state for the first second or two after start.
+        self._cam_tf      = None       # base_link <- camera depth optical
+        self._laser_tf    = None       # base_link <- laser
+        self.create_timer(0.25, self._broadcast_fusion)
+
         # ── IMU (BNO085) ────────────────────────────────────────────────────
         # BEST_EFFORT: the IMU is a 10 Hz firehose of "current truth" — a
         # retransmitted stale sample is worthless, dropping it is correct.
@@ -920,6 +972,8 @@ class DashboardNode(Node):
     def _cb_pose(self, msg: PoseWithCovarianceStamped):
         p   = msg.pose.pose
         yaw = 2.0 * math.atan2(p.orientation.z, p.orientation.w)
+        c   = msg.pose.covariance
+        self._fz_cov['amcl'] = (c[0], c[7], c[35])
         self._publish_pose(p.position.x, p.position.y, yaw)
 
     def _publish_pose(self, x: float, y: float, yaw: float):
@@ -957,7 +1011,57 @@ class DashboardNode(Node):
         t, r = tf.transform.translation, tf.transform.rotation
         self._publish_pose(t.x, t.y, 2.0 * math.atan2(r.z, r.w))
 
+    # Shared angular grid for the LiDAR/camera comparison: 120 bins of 3° over
+    # the full circle. Coarse on purpose — the two sensors are 7 cm apart and
+    # the depth cone is noisy at the edges, so finer bins compare noise.
+    PROF_BINS = 120
+
+    def _profile(self, xy) -> list:
+        """Nearest return per 3° bin, from Nx2 base_link points. None = nothing.
+
+        Both sensors are reduced to the same shape so the browser can subtract
+        them: whatever is closest in a given direction is what the robot would
+        hit going that way, whichever sensor saw it.
+        """
+        out = [None] * self.PROF_BINS
+        if not len(xy):
+            return out
+        rng = np.hypot(xy[:, 0], xy[:, 1])
+        good = (rng > 0.05) & (rng < 8.0) & np.isfinite(rng)
+        if not good.any():
+            return out
+        rng = rng[good]
+        bear = np.arctan2(xy[good, 1], xy[good, 0])
+        idx = ((bear + math.pi) / (2 * math.pi) * self.PROF_BINS).astype(int)
+        np.clip(idx, 0, self.PROF_BINS - 1, out=idx)
+        # Sort by range descending so the last write into each bin — which is
+        # the one that sticks — is the nearest point in it.
+        order = np.argsort(-rng)
+        near = np.full(self.PROF_BINS, np.nan)
+        near[idx[order]] = rng[order]
+        return [None if math.isnan(v) else round(float(v), 3) for v in near]
+
+    def _tf_matrix(self, target: str, source: str):
+        """4x4 as (R, t), or None while the transform is missing."""
+        try:
+            tf = self._tf_buffer.lookup_transform(target, source,
+                                                  rclpy.time.Time())
+        except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
+                tf2_ros.ExtrapolationException, tf2_ros.TransformException):
+            return None
+        q = tf.transform.rotation
+        x, y, z, w = q.x, q.y, q.z, q.w
+        R = np.array([
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ], dtype=np.float64)
+        t = tf.transform.translation
+        return R, np.array([t.x, t.y, t.z], dtype=np.float64)
+
     def _cb_scan(self, msg: LaserScan):
+        if self._fuse_ws:
+            self._scan_profile(msg)
         self._scan_seq += 1
         if self._scan_seq % 3:          # send every 3rd scan (~3 Hz)
             return
@@ -970,6 +1074,34 @@ class DashboardNode(Node):
             'angle_inc': round(msg.angle_increment * 3, 6),
         })
 
+    def _scan_profile(self, msg: LaserScan):
+        """/scan -> base_link bearings, for the sensor-comparison tab.
+
+        ‼️ Not reusable from the map tab's copy: that one hands the browser raw
+        `laser`-frame angles and lets draw() add the mount yaw. The C1 is
+        mounted backwards (laser->base_link is a 180° yaw, measured), so
+        comparing those angles against the camera's would put every disagreement
+        on the wrong side of the robot. Transformed properly here instead of
+        hardcoding the π, so a remount fixes itself.
+        """
+        if self._laser_tf is None:
+            self._laser_tf = self._tf_matrix('base_link', msg.header.frame_id
+                                             or 'laser')
+            if self._laser_tf is None:
+                return
+        R, t = self._laser_tf
+        r = np.asarray(msg.ranges, dtype=np.float64)
+        if not r.size:
+            return
+        a = msg.angle_min + np.arange(r.size) * msg.angle_increment
+        ok = np.isfinite(r) & (r >= max(0.01, msg.range_min)) & (r <= msg.range_max)
+        if not ok.any():
+            return
+        r, a = r[ok], a[ok]
+        pts = np.stack([r * np.cos(a), r * np.sin(a), np.zeros_like(r)], axis=1)
+        base = pts @ R.T + t
+        self._prof_lidar = self._profile(base[:, :2])
+
     def _cb_plan(self, msg: Path):
         # Nav2 republishes the global plan at controller rate; 40 points is
         # plenty to draw a readable line and keeps the socket quiet.
@@ -980,8 +1112,48 @@ class DashboardNode(Node):
                        for p in pts],
         })
 
+    @staticmethod
+    def _yaw_of(q) -> float:
+        """Yaw from a quaternion, the flat-robot case (two_d_mode)."""
+        return math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                          1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+    def _fz_feed(self, key: str, yaw: float):
+        """Record one heading sample, unwrapped.
+
+        Wrapped yaw is useless for comparing sources: two headings 1° apart
+        read as 179.5 and -179.5 whenever the robot happens to face that way,
+        and the difference comes out as 359°. Counting turns keeps the three
+        curves continuous so a drift of a few degrees stays a few degrees.
+        """
+        s = self._fz[key]
+        if s['raw'] is not None:
+            d = yaw - s['raw']
+            if d > math.pi:
+                s['turns'] -= 2 * math.pi
+            elif d < -math.pi:
+                s['turns'] += 2 * math.pi
+        s['raw'] = yaw
+        s['yaw'] = yaw + s['turns']
+        s['n'] += 1
+        s['seen'] = time.monotonic()
+        if s['ref'] is None:
+            s['ref'] = s['yaw']
+
+    def _cb_odom_filtered(self, msg: Odometry):
+        """The EKF's own answer — what actually drives the odom->base_link TF."""
+        self._fz_feed('ekf', self._yaw_of(msg.pose.pose.orientation))
+        self._fz_vx['ekf'] = msg.twist.twist.linear.x
+        self._fz_wz['ekf'] = msg.twist.twist.angular.z
+        c = msg.pose.covariance
+        # Diagonal only: x, y, yaw variances (indices 0, 7, 35 of the 6x6).
+        self._fz_cov['ekf'] = (c[0], c[7], c[35])
+
     def _cb_odom(self, msg: Odometry):
         wz = msg.twist.twist.angular.z
+        self._fz_feed('wheel', self._yaw_of(msg.pose.pose.orientation))
+        self._fz_vx['wheel'] = msg.twist.twist.linear.x
+        self._fz_wz['wheel'] = wz
         # Well clear of the 879's ~0.31 rad/s rotation floor, so this is only
         # true when the wheels are genuinely turning the robot.
         self._turning = abs(wz) > 0.15
@@ -1023,6 +1195,10 @@ class DashboardNode(Node):
 
         g = msg.angular_velocity
         a = msg.linear_acceleration
+        # Fed at the full stream rate, not the throttled 5 Hz below: the fusion
+        # tab's rate counter has to measure the IMU, not this panel's throttle.
+        self._fz_feed('imu', yaw)
+        self._fz_wz['imu'] = g.z
         # The firmware's own failure mode: enabling several SH2 reports
         # back-to-back silently drops some over the flaky I2C bus, and the
         # symptom is a gyro pinned at exactly 0 while the quaternion keeps
@@ -1065,6 +1241,124 @@ class DashboardNode(Node):
         # covers both a wedged BNO085 and a dead imu_node.
         if now - self._imu_seen > 2.0:
             self._state.broadcast({'type': 'imu', 'alive': False, 'hz': 0.0})
+
+    # ── Sensor fusion ──────────────────────────────────────────────────────
+    def _fusion_reset(self):
+        """Re-zero the three headings against each other, and drop the peaks.
+
+        The absolute values are meaningless (the BNO085's zero is wherever it
+        booted, the wheels' zero is wherever the base powered up), so the panel
+        only ever shows how far each source has drifted from the others SINCE
+        the reset. Pressing it while the robot stands still is the calibration.
+        """
+        for s in self._fz.values():
+            s['ref'] = s['yaw']
+        self._fz_corr_ref = None
+        self._fz_corr_max = 0.0
+        self._fz_yaw_max  = 0.0
+
+    def _broadcast_fusion(self):
+        """The EKF's inputs, its output, and what AMCL had to correct.
+
+        Runs at 4 Hz off a timer rather than off any one callback, because the
+        interesting failure is a source that STOPPED: a callback-driven panel
+        goes quiet exactly when it has something to report.
+        """
+        if not self._fuse_ws:
+            return
+        now = time.monotonic()
+
+        dt = now - self._fz_t0
+        if dt >= 1.0:                       # measured rates, once a second
+            for s in self._fz.values():
+                s['hz'] = s['n'] / dt
+                s['n']  = 0
+            self._fz_t0 = now
+
+        src = {}
+        for k, s in self._fz.items():
+            rel = (None if s['yaw'] is None or s['ref'] is None
+                   else math.degrees(s['yaw'] - s['ref']))
+            src[k] = {
+                'yaw': None if rel is None else round(rel, 2),
+                'hz':  round(s['hz'], 1),
+                # No sample ever seen reads as "dead", not as "0.0 s old".
+                'age': None if not s['seen'] else round(now - s['seen'], 1),
+            }
+
+        def diff(a, b):
+            ya, yb = src[a]['yaw'], src[b]['yaw']
+            return None if ya is None or yb is None else round(ya - yb, 2)
+
+        # How far AMCL has had to shift the odom frame SINCE the reset: exactly
+        # the error the fusion accumulated while you were watching, which is
+        # invisible on the map tab (there the robot always looks correctly
+        # placed — that is what the correction is for).
+        corr = {'ok': False}
+        try:
+            tf = self._tf_buffer.lookup_transform('map', 'odom',
+                                                  rclpy.time.Time())
+            t, r = tf.transform.translation, tf.transform.rotation
+            yaw = self._yaw_of(r)
+            if self._fz_corr_ref is None:
+                self._fz_corr_ref = (t.x, t.y, yaw)
+            rx, ry, ryaw = self._fz_corr_ref
+            d   = math.hypot(t.x - rx, t.y - ry) * 100.0          # cm
+            # Shortest way round, or a correction across ±180° reads as 359°.
+            cy  = abs(math.degrees(math.atan2(math.sin(yaw - ryaw),
+                                              math.cos(yaw - ryaw))))
+            self._fz_corr_max = max(self._fz_corr_max, d)
+            self._fz_yaw_max  = max(self._fz_yaw_max, cy)
+            corr = {'ok': True, 'd': round(d, 1), 'yaw': round(cy, 2),
+                    'dmax': round(self._fz_corr_max, 1),
+                    'yawmax': round(self._fz_yaw_max, 2)}
+        except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
+                tf2_ros.ExtrapolationException):
+            pass                # not localized — no correction exists to show
+
+        def sigma(c):
+            # Variance -> standard deviation, in units a human reads: the raw
+            # numbers are m^2 and rad^2, where a perfectly healthy 0.0004 and
+            # an alarming 0.25 look equally like noise.
+            if c is None:
+                return None
+            return [round(math.sqrt(max(0.0, c[0])) * 100, 1),
+                    round(math.sqrt(max(0.0, c[1])) * 100, 1),
+                    round(math.degrees(math.sqrt(max(0.0, c[2]))), 1)]
+
+        self._state.broadcast({
+            'type': 'fusion',
+            'src':  src,
+            'dyaw': {'wheel': diff('wheel', 'ekf'), 'imu': diff('imu', 'ekf')},
+            'vx':   {k: round(v, 3) for k, v in self._fz_vx.items()},
+            'wz':   {k: round(v, 3) for k, v in self._fz_wz.items()},
+            'cov':  {'ekf': sigma(self._fz_cov['ekf']),
+                     'amcl': sigma(self._fz_cov['amcl'])},
+            'corr': corr,
+            # Same qualification as the IMU tab's gyro alarm: a difference that
+            # only appears while the wheels turn is a real fusion fault, one at
+            # rest is quantisation.
+            'turning': self._turning,
+        }, remember=False)
+
+        # The two profiles ride the same timer at half the rate: 120 bins twice
+        # over is ~1.5 kB, and the shapes do not change fast enough to be worth
+        # 4 Hz on a phone.
+        if self._fuse_cam_ws and now - self._prof_last >= 0.4:
+            self._prof_last = now
+            cam_age = (None if not self._prof_cam_at
+                       else round(now - self._prof_cam_at, 1))
+            self._state.broadcast({
+                'type':  'fuseprof',
+                'bins':  self.PROF_BINS,
+                'lidar': self._prof_lidar,
+                'cam':   self._prof_cam,
+                # Distinguishes "the camera agrees with the LiDAR everywhere"
+                # from "the camera stopped publishing", which look identical
+                # once a stale profile is drawn.
+                'cam_age': cam_age,
+                'zmin': self.CAM_Z_MIN, 'zmax': self.CAM_Z_MAX,
+            }, remember=False)
 
     def _cb_camera(self, msg: Image):
         try:
@@ -1270,7 +1564,9 @@ class DashboardNode(Node):
         self.get_logger().info(f'D435 pointcloud {"on" if on else "off"} (3D tab)')
 
     def _cb_cloud(self, msg: PointCloud2):
-        if not self._cloud_ws:
+        # Two consumers now: the 3D tab wants the coloured points, the sensor
+        # tab wants only a top-down profile. Both come off this one decode.
+        if not (self._cloud_ws or self._fuse_cam_ws):
             return
         now = time.time()
         if now - self._cloud_last < self.CLOUD_PERIOD:
@@ -1298,6 +1594,11 @@ class DashboardNode(Node):
         if not len(xyz):
             return
 
+        if self._fuse_cam_ws:
+            self._cam_profile(xyz, msg.header.frame_id)
+
+        if not self._cloud_ws:
+            return
         # Millimetres in int16 covers +-32 m; the D435 stops at 10.
         mm = np.clip(xyz * 1000.0, -32000, 32000).astype('<i2')
         rgb = bgr[:, ::-1].copy()          # BGR -> RGB for the browser
@@ -1307,6 +1608,27 @@ class DashboardNode(Node):
             'type': 'cloud', 'n': len(mm), 'frame': msg.header.frame_id,
             'total': n, 'data': base64.b64encode(payload).decode(),
         }, remember=False)
+
+    # What counts as an obstacle for the comparison, in metres above the floor.
+    # The floor itself has to go: the D435 looks down from 0.536 m, so most of
+    # what it returns is carpet, and carpet in a min-range profile reads as a
+    # wall half a metre in front of the robot. The ceiling goes for the same
+    # reason on the way up. What is left is the band the robot can hit.
+    CAM_Z_MIN = 0.06
+    CAM_Z_MAX = 1.40
+
+    def _cam_profile(self, xyz, frame: str):
+        """D435 points -> the same 3° bearing profile the LiDAR produces."""
+        if self._cam_tf is None:
+            self._cam_tf = self._tf_matrix(
+                'base_link', frame or 'camera_depth_optical_frame')
+            if self._cam_tf is None:
+                return
+        R, t = self._cam_tf
+        base = xyz.astype(np.float64) @ R.T + t
+        band = base[(base[:, 2] > self.CAM_Z_MIN) & (base[:, 2] < self.CAM_Z_MAX)]
+        self._prof_cam    = self._profile(band[:, :2])
+        self._prof_cam_at = time.monotonic()
 
     def _cb_rosout(self, msg: RosoutLog):
         # WARN(30) and up only — see State.logs. Nav2's costmaps alone publish
@@ -1887,7 +2209,9 @@ class DashboardNode(Node):
         self._listen_ws.discard(client)
         # A tab closed on the 3D pane never sends its 'off', so the camera would
         # keep building pointclouds for nobody.
-        self._set_camera_pointcloud(bool(self._cloud_ws))
+        self._fuse_ws.discard(client)
+        self._fuse_cam_ws.discard(client)
+        self._set_camera_pointcloud(bool(self._cloud_ws or self._fuse_cam_ws))
         self._costmap_on.discard(client)
 
     def dispatch(self, msg: dict, client=None):
@@ -1933,7 +2257,29 @@ class DashboardNode(Node):
                     self._cloud_ws.add(client)
                 else:
                     self._cloud_ws.discard(client)
-                self._set_camera_pointcloud(bool(self._cloud_ws))
+                self._set_camera_pointcloud(
+                    bool(self._cloud_ws or self._fuse_cam_ws))
+        elif t == 'fusion':
+            # Two switches, not one: the EKF panel is a few hundred bytes at
+            # 4 Hz, while the sensor comparison turns the D435's pointcloud
+            # filter on and costs real CPU on the camera. A tab that only wants
+            # the numbers must not pay for the cloud.
+            if client is not None:
+                # First viewer re-zeroes everything: every number on the tab is
+                # "since when you started looking", and inheriting an hour-old
+                # reference from a tab someone closed would open the panel on a
+                # metre of correction that had already been explained.
+                if msg.get('on') and not self._fuse_ws:
+                    self._fusion_reset()
+                for key, s in (('on', self._fuse_ws), ('cam', self._fuse_cam_ws)):
+                    if msg.get(key):
+                        s.add(client)
+                    else:
+                        s.discard(client)
+                self._set_camera_pointcloud(
+                    bool(self._cloud_ws or self._fuse_cam_ws))
+        elif t == 'fusion_reset':
+            self._fusion_reset()
         elif t == 'localize':
             if self._loc_client.service_is_ready():
                 self._loc_client.call_async(Empty.Request())
@@ -3712,6 +4058,127 @@ button{font:inherit;color:inherit}
       </div>
     </section>
 
+    <!-- ── Sensor fusion ───────────────────────────────────────── -->
+    <!-- One tab, not two: the EKF panel and the LiDAR/camera comparison are
+         the same question asked of different sensors ("do my sensors agree?"),
+         and the tab bar was already at 23 entries — a 25th would have pushed
+         the phone layout to a fourth row of chips. The camera comparison is
+         behind its own switch because it turns the D435 pointcloud filter on. -->
+    <section class="pane" id="p-fuse">
+      <div class="card">
+        <h3>Ποιος λέει τι <span class="badge" id="fz-badge">—</span></h3>
+        <canvas id="fz-chart" width="720" height="200"
+                style="width:100%;height:200px;display:block;background:#0c0c0e;
+                       border:1px solid #2c2c32;border-radius:10px"></canvas>
+        <div class="row" style="gap:14px;flex-wrap:wrap;margin-top:9px;
+                                font-size:11.5px;color:#a1a1aa">
+          <span><b style="color:#fbbf24">╌</b> Τροχοί</span>
+          <span><b style="color:#38bdf8">┈</b> IMU</span>
+          <span><b style="color:#4ade80">━</b> EKF (αποτέλεσμα)</span>
+          <span style="color:#71717a">60 δευτερόλεπτα</span>
+        </div>
+        <div class="grid2" style="margin-top:12px">
+          <span class="k">Τροχοί − EKF</span><span class="v" id="fz-dw">—</span>
+          <span class="k">IMU − EKF</span><span class="v" id="fz-di">—</span>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button class="btn pri" id="b-fz-reset">⟲ Μηδένισε τη σύγκριση</button>
+        </div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          Οι τρεις γωνίες ΔΕΝ έχουν κοινό μηδέν — το BNO085 ξεκινά από όπου κοιτούσε στο boot, οι τροχοί από όπου άναψε η βάση. Το κουμπί τις ευθυγραμμίζει εδώ και τώρα, οπότε ό,τι ανοίγει μετά είναι πραγματική απόκλιση. Οδήγησε ένα γύρο και γύρνα στο ίδιο σημείο: η γραμμή που δεν επιστρέφει στο μηδέν είναι ο αισθητήρας που λέει ψέματα. Οι τροχοί ανοίγουν πάντα σε χαλί και σε στροφές — γι' αυτό ο EKF παίρνει γωνία μόνο από το IMU (config/ekf.yaml).
+        </p>
+      </div>
+
+      <div class="card">
+        <h3>Πόσο διορθώνει το AMCL <span class="badge" id="fz-corr-badge">—</span></h3>
+        <div class="grid2">
+          <span class="k">Μετατόπιση από το μηδένισμα</span><span class="v" id="fz-corr">—</span>
+          <span class="k">Γωνία από το μηδένισμα</span><span class="v" id="fz-corryaw">—</span>
+          <span class="k">Μέγιστο</span><span class="v" id="fz-corrmax">—</span>
+        </div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          Πόσο χρειάστηκε να ΞΑΝΑΒΑΛΕΙ το AMCL το ρομπότ πάνω στους τοίχους από τη στιγμή που άνοιξες την καρτέλα — δηλαδή το λάθος που μάζεψε η σύντηξη μόνη της, όσο κοιτούσες. Στον χάρτη δεν φαίνεται ποτέ: εκεί το ρομπότ δείχνει πάντα σωστά τοποθετημένο, επειδή ακριβώς αυτή η διόρθωση το κρατά εκεί. Λίγα εκατοστά ανά διαδρομή είναι φυσιολογικά· δεκάδες σημαίνουν ότι η οδομετρία γλιστράει και το AMCL μπαλώνει.
+        </p>
+        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+          ‼️ ΔΙΑΦΟΡΑ, όχι απόλυτη τιμή. Το ωμό <code>map→odom</code> περιέχει και το πού έτυχε να είναι η αρχή του <code>odom</code> στο boot: μετρήθηκε 366 cm και 123° σε ρομπότ που εντόπιζε τέλεια — απλώς είχε οδηγήσει από τότε που άναψε. Το κουμπί «Μηδένισε» ξαναπιάνει το σημείο αναφοράς.
+        </p>
+      </div>
+
+      <div class="card">
+        <h3>Ταχύτητες</h3>
+        <div class="grid2">
+          <span class="k">Μπροστά — τροχοί</span><span class="v" id="fz-vxw">—</span>
+          <span class="k">Μπροστά — EKF</span><span class="v" id="fz-vxe">—</span>
+          <span class="k">Στροφή — τροχοί</span><span class="v" id="fz-wzw">—</span>
+          <span class="k">Στροφή — γυροσκόπιο</span><span class="v" id="fz-wzi">—</span>
+          <span class="k">Στροφή — EKF</span><span class="v" id="fz-wze">—</span>
+        </div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          Οι τροχοί λένε πόσο ΖΗΤΗΘΗΚΕ να γυρίσει, το γυροσκόπιο πόσο γύρισε ΠΡΑΓΜΑΤΙΚΑ. Όταν οι δύο αριθμοί διαφέρουν σταθερά, η βάση γλιστράει ή έχει κολλήσει σε κάτι. Κάτω από ~0.31 rad/s η 879 δεν στρίβει καθόλου: θα δεις εντολή στροφής στους τροχούς και μηδέν στο γυροσκόπιο, και αυτό είναι το γνωστό κατώφλι, όχι βλάβη.
+        </p>
+      </div>
+
+      <div class="card">
+        <h3>Υγεία πηγών</h3>
+        <div class="grid2">
+          <span class="k">Τροχοί <code>/odom</code></span><span class="v" id="fz-h-wheel">—</span>
+          <span class="k">IMU <code>/imu/data</code></span><span class="v" id="fz-h-imu">—</span>
+          <span class="k">EKF <code>/odometry/filtered</code></span><span class="v" id="fz-h-ekf">—</span>
+        </div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          ‼️ Νεκρή πηγή είναι ΣΙΩΠΗΛΗ, όχι λάθος: ο EKF συνεχίζει να δημοσιεύει την τελευταία καλή γωνία και όλα δείχνουν υγιή. Μόνο η συχνότητα και η ηλικία δείγματος το δείχνουν — γι' αυτό μετριούνται εδώ χωριστά από τις τιμές.
+        </p>
+        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+          Φυσιολογικές τιμές, μετρημένες: τροχοί ~20 Hz, IMU ~6 Hz, EKF ~30 Hz. Το IMU είναι όντως το αργότερο και αυτό είναι εντάξει — ο EKF παίρνει από εκεί μόνο γωνία, όχι θέση.
+        </p>
+      </div>
+
+      <div class="card">
+        <h3>Αβεβαιότητα</h3>
+        <div class="grid2">
+          <span class="k">EKF γωνία ±</span><span class="v" id="fz-cov-ekf">—</span>
+          <span class="k">AMCL θέση ± / γωνία ±</span><span class="v" id="fz-cov-amcl">—</span>
+        </div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          Πόσο σίγουρος δηλώνει ο καθένας ότι είναι, σε εκατοστά και μοίρες (τυπική απόκλιση, όχι το ωμό covariance). Το AMCL φουσκώνει όταν χάνει τον εντοπισμό και ξαναμαζεύει μόλις κλειδώσει σε τοίχους — μια τιμή που μεγαλώνει και δεν ξαναμαζεύει είναι το «οι κόκκινες γραμμές έφυγαν» πριν το δεις στον χάρτη.
+        </p>
+        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+          ‼️ Η ΘΕΣΗ του EKF δεν εμφανίζεται επίτηδες. Ο EKF δουλεύει στο <code>odom</code>, όπου καμία απόλυτη μέτρηση δεν τον διορθώνει, οπότε η αβεβαιότητα θέσης του μεγαλώνει για πάντα — μετρήθηκε στα ±2607 km σε ρομπότ που εντόπιζε μια χαρά. Δεν είναι βλάβη, είναι ο ορισμός του frame. Η γωνία του παραμένει φραγμένη (το IMU τη διορθώνει), και για τη θέση ο μόνος αριθμός με νόημα είναι του AMCL.
+        </p>
+      </div>
+
+      <div class="card">
+        <h3>LiDAR εναντίον κάμερας <span class="badge" id="fp-badge">—</span></h3>
+        <label style="display:flex;align-items:center;gap:9px;font-size:12.5px;
+          cursor:pointer;user-select:none;padding:9px 11px;border-radius:10px;
+          background:#232329;border:1px solid #33333d">
+          <input type="checkbox" id="fp-on">
+          <span>Σύγκρινε με το βάθος της D435 (ανάβει το νέφος σημείων)</span>
+        </label>
+        <canvas id="fp-canvas" width="440" height="440"
+                style="display:block;margin:12px auto 0;width:min(100%,420px);
+                       aspect-ratio:1;height:auto;background:#0c0c0e;
+                       border:1px solid #2c2c32;border-radius:12px"></canvas>
+        <div class="grid2" style="margin-top:12px">
+          <span class="k">Συμφωνία</span><span class="v" id="fp-agree">—</span>
+          <span class="k">Βλέπει μόνο η κάμερα</span><span class="v" id="fp-camonly">—</span>
+          <span class="k">Πλησιέστερο κρυφό εμπόδιο</span><span class="v" id="fp-near">—</span>
+        </div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          Κάτοψη γύρω από το ρομπότ, 4 μέτρα ακτίνα, μύτη προς τα πάνω. <b style="color:#e4e4e7">Λευκό</b> = το lidar, <b style="color:#38bdf8">γαλάζιο</b> = η κάμερα, <b style="color:#f87171">κόκκινο</b> = εκεί που η κάμερα βλέπει εμπόδιο ΠΙΟ ΚΟΝΤΑ από το lidar.
+        </p>
+        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+          Τα κόκκινα είναι ο λόγος που υπάρχει αυτή η κάρτα: το C1 κόβει μία οριζόντια φέτα στα 60.6 cm, οπότε ένα τραπέζι, ένα σκαλί, ένα σκυμμένο κεφάλι ή μια γάτα ζουν ακριβώς στο κενό του. Η κάμερα κοιτάει από τα 53.6 cm και τα πιάνει, αλλά μόνο μπροστά — τα ~87° του κώνου της. Έξω από αυτόν υπάρχει μόνο λευκό, και αυτό είναι σωστό, όχι διαφωνία.
+        </p>
+        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+          Πολύ κοντά ο κώνος στενεύει μόνος του: το βάθος βγαίνει από δύο φακούς και σε απόσταση μισού μέτρου τα άκρα του καρέ δεν τα βλέπουν και οι δύο, οπότε εκεί δεν υπάρχει μέτρηση. Μετρήθηκε 36° μπροστά σε εμπόδιο στα 40 cm. Δεν είναι βλάβη — κάνε ένα βήμα πίσω και ο κώνος ανοίγει.
+        </p>
+        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+          Το πάτωμα κόβεται επίτηδες κάτω από <span id="fp-zmin">6</span> cm και το ταβάνι πάνω από <span id="fp-zmax">140</span> cm: χωρίς αυτό η κάμερα «βλέπει» το χαλί μισό μέτρο μπροστά και τα πάντα γίνονται κόκκινα.
+        </p>
+      </div>
+    </section>
+
     <!-- ── Voice / LLM ─────────────────────────────────────────── -->
     <section class="pane" id="p-llm">
       <div class="card" style="margin-bottom:9px">
@@ -4072,6 +4539,7 @@ const TABS = [
   ['arm',    '🦾', 'Χέρι'],
   ['base',   '🧹', 'Σκούπα'],
   ['imu',    '🧭', 'IMU'],
+  ['fuse',   '🔀', 'Σύντηξη'],
   ['rtabmap','🏠', 'Σπίτι 3D'],
   ['cost',   '🧱', 'Costmap'],
   ['nerf',   '✨', 'NeRF'],
@@ -4112,6 +4580,7 @@ function showTab(id){
   if (VNC_APPS[id]) ensureVnc(id);
   cloudSetActive(id === 'cloud');
   costSetActive(id === 'cost');
+  fuseSetActive(id === 'fuse');
   if (id === 'cost'){ buildCostLegend(); costShowSize(); }
   if (id === 'set') mapsRefresh();
   // 170 kB of geometry, fetched the first time the tab is opened rather than
@@ -4446,6 +4915,8 @@ const HANDLERS = {
   gesture(m){ gestureState = m; drawPointRing(); renderGestureBindings(); },
   vocab(m){ renderVocab(m); },
   compass(m){ compassOffset = m.offset; drawCompass2(); },
+  fusion(m){ renderFusion(m); },
+  fuseprof(m){ renderFuseProfile(m); },
   hand(m){ handState = m; renderGestureBindings(); },
   people(m){ renderPeople(m); },
   diagnostics(m){ renderDiagnostics(m); },
@@ -5472,6 +5943,7 @@ function connect(){
                      // Same reason as the cloud: the node tracks viewers per
                      // socket, so after a restart it has forgotten this tab.
                      if(costOn) send({type:'costmap', on:true});
+                     if(fuseOn) fuseSend();
                      if(!overlayOn) send({type:'overlay', on:false}); };
   ws.onclose = ()=>{ $('dot').classList.remove('on');
                      // The server forgets listeners per socket, so a dropped
@@ -5775,6 +6247,267 @@ function onImu(m){
   $('i-quat').textContent  = m.quat.map(v=>v.toFixed(3)).join(' / ');
   drawRose(m.yaw, true);
 }
+
+// ── Sensor fusion tab ──────────────────────────────────────────────────────
+// Two panels behind one switch each. The numbers are cheap (a few hundred
+// bytes at 4 Hz) and go on as soon as the tab opens; the LiDAR/camera
+// comparison needs the D435's pointcloud filter, so it stays off until asked.
+let fuseOn = false, fuseCam = false;
+// 60 s of history at the server's 4 Hz. Kept as three parallel arrays so a
+// source that drops out leaves a gap in its own line instead of shifting the
+// other two.
+const FZ_KEEP = 240;
+let fzHist = {wheel: [], imu: [], ekf: []};
+
+function fuseSend(){ send({type:'fusion', on: fuseOn, cam: fuseOn && fuseCam}); }
+
+function fuseSetActive(on){
+  if (on === fuseOn) return;
+  fuseOn = on;
+  fuseSend();
+}
+
+function fzPill(cls, txt){ return `<span class="pill ${cls}">${txt}</span>`; }
+
+// A source is judged by its clock, not its value: a wedged publisher keeps its
+// last good heading on screen for ever, and that is the failure this tab
+// exists to catch.
+//
+// ‼️ `floor` is what each topic MEASURES on this robot, halved — not what the
+// code elsewhere assumes. /imu/data was measured at 6.1 Hz (2026-08-05), while
+// _cb_imu's own comment still says "the stream runs ~19 Hz"; a threshold built
+// on 19 would have painted a perfectly healthy BNO085 amber for ever, and an
+// alarm that is always on is an alarm nobody reads.
+function fzHealth(s, floor){
+  if (!s || s.age === null || s.age === undefined)
+    return fzPill('bad', t('καμία ένδειξη'));
+  if (s.age > 2)
+    return fzPill('bad', t('ΣΙΩΠΗ') + ' ' + s.age.toFixed(0) + 's');
+  const slow = s.hz < floor;
+  return fzPill(slow ? 'warn' : 'ok', s.hz.toFixed(1) + ' Hz')
+       + (slow ? ' <span style="color:#fbbf24;font-size:11px">'
+                 + t('αργό') + '</span>' : '');
+}
+
+function renderFusion(m){
+  const S = m.src || {};
+  ['wheel','imu','ekf'].forEach(k => {
+    const v = S[k] && S[k].yaw;
+    fzHist[k].push(v === null || v === undefined ? null : v);
+    if (fzHist[k].length > FZ_KEEP) fzHist[k].shift();
+  });
+  drawFzChart();
+
+  const deg = v => (v === null || v === undefined) ? '—'
+                 : (v >= 0 ? '+' : '') + v.toFixed(2) + '°';
+  $('fz-dw').textContent = deg(m.dyaw.wheel);
+  $('fz-di').textContent = deg(m.dyaw.imu);
+
+  // The wheels ALWAYS open up against the fused heading — that is the whole
+  // reason the EKF ignores their yaw — so a few degrees is health, not a
+  // fault. Only a gap wide enough to matter for a doorway is worth a colour.
+  const worst = Math.max(Math.abs(m.dyaw.wheel || 0), Math.abs(m.dyaw.imu || 0));
+  const dead = ['wheel','imu','ekf'].some(
+    k => !S[k] || S[k].age === null || S[k].age === undefined || S[k].age > 2);
+  $('fz-badge').innerHTML = dead ? fzPill('bad', t('λείπει πηγή'))
+    : worst > 15 ? fzPill('bad', t('μεγάλη απόκλιση'))
+    : worst > 5  ? fzPill('warn', t('αποκλίνουν'))
+                 : fzPill('ok', t('συμφωνούν'));
+
+  const c = m.corr || {};
+  if (c.ok){
+    $('fz-corr').textContent    = c.d.toFixed(1) + ' cm';
+    $('fz-corryaw').textContent = c.yaw.toFixed(2) + '°';
+    $('fz-corrmax').textContent = c.dmax.toFixed(1) + ' cm · '
+                                + c.yawmax.toFixed(2) + '°';
+    $('fz-corr-badge').innerHTML = c.d > 50 ? fzPill('bad', t('μεγάλη διόρθωση'))
+      : c.d > 15 ? fzPill('warn', t('μαζεύει'))
+                 : fzPill('ok', t('εντάξει'));
+  } else {
+    ['fz-corr','fz-corryaw','fz-corrmax'].forEach(id => $(id).textContent = '—');
+    // No map->odom is not a fusion fault: it means nothing is localizing.
+    $('fz-corr-badge').innerHTML = fzPill('warn', t('χωρίς εντοπισμό'));
+  }
+
+  const ms = v => v.toFixed(3) + ' m/s', rs = v => v.toFixed(3) + ' rad/s';
+  $('fz-vxw').textContent = ms(m.vx.wheel);
+  $('fz-vxe').textContent = ms(m.vx.ekf);
+  $('fz-wzw').textContent = rs(m.wz.wheel);
+  $('fz-wzi').textContent = rs(m.wz.imu);
+  $('fz-wze').textContent = rs(m.wz.ekf);
+
+  $('fz-h-wheel').innerHTML = fzHealth(S.wheel, 10);   // measured 19.9 Hz
+  $('fz-h-imu').innerHTML   = fzHealth(S.imu, 3);      // measured  6.1 Hz
+  $('fz-h-ekf').innerHTML   = fzHealth(S.ekf, 15);     // measured 30.0 Hz
+
+  // The EKF's x/y variance is unbounded by construction (see the note in the
+  // card), so only its yaw is shown — printing "±2607 km" next to a healthy
+  // robot teaches the reader to ignore the whole card.
+  $('fz-cov-ekf').textContent  = m.cov.ekf ? '±' + m.cov.ekf[2].toFixed(1) + '°' : '—';
+  // AMCL publishes a pose only when it UPDATES one, and it updates only while
+  // the robot drives — so on a parked robot this stays empty for ever. Saying
+  // why beats a dash that reads as broken.
+  $('fz-cov-amcl').textContent = m.cov.amcl
+    ? `±${m.cov.amcl[0].toFixed(1)} / ±${m.cov.amcl[1].toFixed(1)} cm · ±${m.cov.amcl[2].toFixed(1)}°`
+    : t('μόλις κινηθεί το ρομπότ');
+}
+
+// Strip chart of the three headings. Auto-scaled, because the interesting
+// range is anything from a tenth of a degree of noise to a 90° runaway, and a
+// fixed axis would render one of those two cases as a flat line.
+function drawFzChart(){
+  const c = $('fz-chart'); if (!c) return;
+  const g = c.getContext('2d'), W = c.width, H = c.height, PAD = 26;
+  g.clearRect(0, 0, W, H);
+
+  let peak = 2;                            // never zoom in past ±2°
+  for (const k in fzHist)
+    for (const v of fzHist[k]) if (v !== null) peak = Math.max(peak, Math.abs(v));
+  peak *= 1.15;
+
+  const y = v => H/2 - (v / peak) * (H/2 - PAD/2);
+  const x = i => PAD + i * (W - PAD - 6) / (FZ_KEEP - 1);
+
+  g.strokeStyle = '#2c2c32'; g.lineWidth = 1;
+  g.beginPath(); g.moveTo(PAD, y(0)); g.lineTo(W - 6, y(0)); g.stroke();
+  g.fillStyle = '#52525b'; g.font = '10px system-ui'; g.textAlign = 'right';
+  g.fillText('+' + peak.toFixed(peak < 10 ? 1 : 0) + '°', PAD - 4, y(peak) + 9);
+  g.fillText('0°', PAD - 4, y(0) + 3);
+  g.fillText('-' + peak.toFixed(peak < 10 ? 1 : 0) + '°', PAD - 4, y(-peak) - 2);
+
+  const COLOURS = {wheel: '#fbbf24', imu: '#38bdf8', ekf: '#4ade80'};
+  // Dashes, not just colours: when the three agree they sit on exactly the
+  // same pixels and only the last one drawn is visible — which reads as two
+  // dead sources on a robot where everything is fine.
+  const DASH = {wheel: [6, 3], imu: [2, 3], ekf: []};
+  for (const k in fzHist){
+    const h = fzHist[k];
+    g.strokeStyle = COLOURS[k];
+    g.setLineDash(DASH[k]);
+    g.lineWidth = k === 'ekf' ? 2 : 1.5;
+    g.beginPath();
+    let pen = false;
+    // Right-aligned: the newest sample is always at the right edge, so the
+    // chart fills leftwards instead of creeping in from the left on connect.
+    const off = FZ_KEEP - h.length;
+    h.forEach((v, i) => {
+      if (v === null){ pen = false; return; }   // gap, not a line through zero
+      const px = x(i + off), py = y(v);
+      if (pen) g.lineTo(px, py); else g.moveTo(px, py);
+      pen = true;
+    });
+    g.stroke();
+  }
+  g.setLineDash([]);
+}
+
+// ── LiDAR vs camera, top down ──────────────────────────────────────────────
+// Both profiles are nearest-return-per-3°-bin in base_link, so the comparison
+// is a straight subtraction. Bin 0 is bearing -180°, bin 60 is straight ahead.
+const FP_RANGE = 4.0;      // metres drawn
+const FP_GAP   = 0.15;     // metres of disagreement worth calling a disagreement
+
+let fpState = null;
+
+function renderFuseProfile(m){
+  fpState = m;
+  const zn = $('fp-zmin'), zx = $('fp-zmax');
+  if (zn) zn.textContent = (m.zmin * 100).toFixed(0);
+  if (zx) zx.textContent = (m.zmax * 100).toFixed(0);
+  drawFuseProfile();
+}
+
+function drawFuseProfile(){
+  const c = $('fp-canvas'); if (!c) return;
+  const g = c.getContext('2d'), W = c.width, R = W / 2;
+  g.clearRect(0, 0, W, W);
+  g.save(); g.translate(R, R);
+  const px = r => r / FP_RANGE * (R - 12);
+
+  g.strokeStyle = '#26262c'; g.lineWidth = 1;
+  for (let r = 1; r <= FP_RANGE; r++){
+    g.beginPath(); g.arc(0, 0, px(r), 0, Math.PI*2); g.stroke();
+  }
+  g.fillStyle = '#52525b'; g.font = '9px system-ui'; g.textAlign = 'left';
+  for (let r = 1; r <= FP_RANGE; r++) g.fillText(r + 'm', 3, -px(r) - 3);
+
+  // Robot: a nose-up triangle, so "up is forward" needs no legend.
+  g.fillStyle = '#4ade80';
+  g.beginPath(); g.moveTo(0, -9); g.lineTo(6, 7); g.lineTo(-6, 7); g.closePath();
+  g.fill();
+
+  const m = fpState;
+  if (!m || !m.bins){ g.restore(); return; }
+  // base_link x forward, y left. Screen: x right, y down. Forward must point
+  // up and a positive (left) bearing must go left, hence the swap and the two
+  // negations — getting this wrong mirrors every disagreement onto the wrong
+  // side of the robot, which is worse than not drawing it.
+  const sx = (r, a) => -Math.sin(a) * px(r);
+  const sy = (r, a) => -Math.cos(a) * px(r);
+  const bearing = i => (i + 0.5) / m.bins * 2 * Math.PI - Math.PI;
+
+  const dot = (i, r, colour, size) => {
+    const a = bearing(i);
+    g.fillStyle = colour;
+    g.beginPath(); g.arc(sx(r, a), sy(r, a), size, 0, Math.PI*2); g.fill();
+  };
+
+  let both = 0, agree = 0, camOnly = 0, nearest = null;
+  for (let i = 0; i < m.bins; i++){
+    const L = m.lidar ? m.lidar[i] : null;
+    const C = m.cam   ? m.cam[i]   : null;
+    if (L !== null && L !== undefined && L <= FP_RANGE) dot(i, L, '#e4e4e7', 2.1);
+    if (C === null || C === undefined) continue;
+    const hidden = (L === null || L === undefined) ? false : C < L - FP_GAP;
+    if (L !== null && L !== undefined){
+      both++;
+      if (Math.abs(C - L) <= FP_GAP) agree++;
+    }
+    if (hidden){
+      camOnly++;
+      if (nearest === null || C < nearest) nearest = C;
+      // The line is the point: it shows how much nearer the camera says the
+      // obstacle is, which a lone dot cannot.
+      const a = bearing(i);
+      g.strokeStyle = '#f87171'; g.lineWidth = 2;
+      g.beginPath(); g.moveTo(sx(C, a), sy(C, a)); g.lineTo(sx(L, a), sy(L, a));
+      g.stroke();
+      if (C <= FP_RANGE) dot(i, C, '#f87171', 3.0);
+    } else if (C <= FP_RANGE){
+      dot(i, C, '#38bdf8', 2.4);
+    }
+  }
+  g.restore();
+
+  const stale = m.cam_age === null || m.cam_age === undefined || m.cam_age > 3;
+  $('fp-badge').innerHTML = !fuseCam ? fzPill('warn', t('ανενεργό'))
+    : stale ? fzPill('bad', t('χωρίς βάθος'))
+    : camOnly > 0 ? fzPill('warn', camOnly + ' ' + t('κρυφά'))
+                  : fzPill('ok', t('συμφωνούν'));
+  $('fp-agree').textContent = both
+    ? Math.round(agree / both * 100) + '% ' + t('σε') + ' ' + both + ' '
+      + t('κατευθύνσεις')
+    : '—';
+  $('fp-camonly').textContent = stale ? '—'
+    : camOnly + ' ' + t('κατευθύνσεις');
+  $('fp-near').textContent = nearest === null ? (stale ? '—' : t('κανένα'))
+    : nearest.toFixed(2) + ' m';
+}
+
+$('b-fz-reset').onclick = () => {
+  send({type: 'fusion_reset'});
+  // Clear the chart too: the history is in the OLD reference frame, and
+  // leaving it would draw a step change that looks like a sensor jump.
+  fzHist = {wheel: [], imu: [], ekf: []};
+  drawFzChart();
+};
+$('fp-on').onchange = e => {
+  fuseCam = e.target.checked;
+  if (!fuseCam){ fpState = null; drawFuseProfile(); }
+  fuseSend();
+};
+drawFzChart();
+drawFuseProfile();
 
 // ── keyboard driving ───────────────────────────────────────────────────────
 // There were no key bindings at all — the D-pad was mouse/touch only, so on a
