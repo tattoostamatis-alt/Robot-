@@ -1171,6 +1171,47 @@ TRANSLATIONS = {
                                'Korrektur insgesamt, über'),
     'περάσματα': ('passes', 'Durchgänge'),
 
+    # ── CPU frequency band for the power station (System pane) ────────────
+    'Ομαλό ρεύμα': ('Steady power draw', 'Gleichmäßige Leistung'),
+    '🔌 Πρίζα (κανονικό)': ('🔌 Wall power (normal)', '🔌 Steckdose (normal)'),
+    '🍃 Ήπιο': ('🍃 Gentle', '🍃 Sanft'),
+    '📏 Πολύ σταθερό': ('📏 Very steady', '📏 Sehr gleichmäßig'),
+    'κανονικό': ('normal', 'normal'),
+    'ήπιο': ('gentle', 'sanft'),
+    'πολύ σταθερό': ('very steady', 'sehr gleichmäßig'),
+    'Για όταν το mini PC τρέχει από την powerstation. Δεν φτιάχνει τον '
+    'inverter — του δίνει όμως πιο ήσυχο φορτίο: στενεύει τη ζώνη συχνότητας '
+    'της CPU, ώστε να μην πέφτει πολύ χαμηλά (idle-shutoff) ούτε να πετάγεται '
+    'ψηλά (αιχμή). Στην πρίζα άφησέ το στο «κανονικό».':
+        ('For when the mini PC runs off the power station. It does not fix the '
+         'inverter — it hands it a quieter load: the CPU frequency band is '
+         'narrowed so the draw neither falls far enough to trip an idle '
+         'shutoff nor spikes far enough to trip an overcurrent cutoff. On wall '
+         'power leave it on "normal".',
+         'Für den Betrieb des Mini-PCs an der Powerstation. Es repariert den '
+         'Wechselrichter nicht — es gibt ihm eine ruhigere Last: das '
+         'Frequenzband der CPU wird verengt, damit die Aufnahme weder tief '
+         'genug fällt für eine Leerlaufabschaltung noch hoch genug springt für '
+         'eine Überstromabschaltung. Am Netz auf „normal" lassen.'),
+    'Μετρημένο εδώ, άθροισμα συχνότητας 8 πυρήνων σε 45 δευτερόλεπτα:':
+        ('Measured here, summed clock across 8 cores over 45 seconds:',
+         'Hier gemessen, Summentakt über 8 Kerne in 45 Sekunden:'),
+    '9.6 GHz μέσος όρος με διακύμανση 12.5 και χειρότερο άλμα 10.8·':
+        ('9.6 GHz average, swing 12.5, worst jump 10.8;',
+         '9,6 GHz Mittel, Schwankung 12,5, größter Sprung 10,8;'),
+    '13.9 / 3.7 / 3.5. Όσο πιο σταθερό, τόσο περισσότερο ρεύμα κατά μέσο όρο '
+    '— η CPU δεν κατεβαίνει ποτέ στο χαμηλό της σκαλί.':
+        ('13.9 / 3.7 / 3.5. The steadier it is, the more it draws on average — '
+         'the CPU never drops to its low step.',
+         '13,9 / 3,7 / 3,5. Je gleichmäßiger, desto höher der '
+         'Durchschnittsverbrauch — die CPU fällt nie auf ihre niedrige Stufe.'),
+    '‼️ Δεν επιβιώνει σε restart — σε κάθε boot επανέρχεται το κανονικό. '
+    'Είναι διακόπτης για μία συνεδρία στην powerstation.':
+        ('‼️ It does not survive a restart — every boot comes back to normal. '
+         'This is a switch for one power-station session.',
+         '‼️ Übersteht keinen Neustart — jeder Boot kehrt zu „normal" zurück. '
+         'Das ist ein Schalter für eine Powerstation-Sitzung.'),
+
     # ── USB power cycle (System pane) ─────────────────────────────────────
     'Ξεκόλλα αισθητήρα': ('Unstick a sensor', 'Sensor entklemmen'),
     'Κόβει το ρεύμα στη θύρα USB της συσκευής για δύο δευτερόλεπτα και το '

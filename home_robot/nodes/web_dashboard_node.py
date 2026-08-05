@@ -2044,6 +2044,29 @@ class DashboardNode(Node):
             'error': error,
         }, remember=False)
 
+    def _power_profile(self, profile: str):
+        """Narrow or restore the CPU frequency band — see scripts/power_smooth.sh.
+
+        No sudo install of its own: the script leans on the cpufreq-set helper
+        that already has a NOPASSWD entry.
+        """
+        script = os.path.join(SRC_HOME, 'scripts', 'power_smooth.sh')
+        if not os.path.exists(script):
+            script = os.path.join(SHARE, 'scripts', 'power_smooth.sh')
+        try:
+            r = subprocess.run([script, profile], capture_output=True,
+                               text=True, timeout=30)
+            ok = r.returncode == 0
+            out = (r.stdout or '').strip()
+            err = '' if ok else (r.stderr or out or 'failed').strip()[:160]
+        except Exception as exc:                          # noqa: BLE001
+            ok, out, err = False, '', str(exc)[:160]
+        if not ok:
+            self.get_logger().error(f'power profile {profile}: {err}')
+        self._state.broadcast({'type': 'power_profile', 'profile': profile,
+                               'ok': ok, 'detail': out.splitlines()[-1] if out else '',
+                               'error': err}, remember=False)
+
     def _usb_power_cycle(self, name: str):
         """Cut power to one USB port for two seconds, from the other side of
         the house.
@@ -2560,6 +2583,14 @@ class DashboardNode(Node):
                     f'USB power cycle requested from the dashboard: {name}')
                 threading.Thread(target=self._usb_power_cycle,
                                  args=(name,), daemon=True).start()
+        elif t == 'power_profile':
+            # Same rule as the USB names: the profile is checked against a
+            # fixed set here, so nothing from the browser becomes an argument.
+            prof = str(msg.get('profile', ''))
+            if prof in ('off', 'eco', 'flat'):
+                self.get_logger().info(f'power profile -> {prof} (dashboard)')
+                threading.Thread(target=self._power_profile,
+                                 args=(prof,), daemon=True).start()
         elif t == 'echo_probe':
             self._echo_pub.publish(String(data=str(msg.get('room', ''))))
         elif t == 'people_add':
@@ -4438,6 +4469,24 @@ button{font:inherit;color:inherit}
         <div id="s-bars"></div>
       </div>
       <div class="card">
+        <h3>Ομαλό ρεύμα <span class="badge" id="pw-badge">—</span></h3>
+        <div class="row" style="flex-wrap:wrap;gap:8px">
+          <button class="btn" data-pw="off">🔌 Πρίζα (κανονικό)</button>
+          <button class="btn" data-pw="eco">🍃 Ήπιο</button>
+          <button class="btn" data-pw="flat">📏 Πολύ σταθερό</button>
+        </div>
+        <div id="pw-msg" style="font-size:11.5px;color:#71717a;margin-top:10px"></div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          Για όταν το mini PC τρέχει από την powerstation. Δεν φτιάχνει τον inverter — του δίνει όμως πιο ήσυχο φορτίο: στενεύει τη ζώνη συχνότητας της CPU, ώστε να μην πέφτει πολύ χαμηλά (idle-shutoff) ούτε να πετάγεται ψηλά (αιχμή). Στην πρίζα άφησέ το στο «κανονικό».
+        </p>
+        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+          Μετρημένο εδώ, άθροισμα συχνότητας 8 πυρήνων σε 45 δευτερόλεπτα: <b>κανονικό</b> 9.6 GHz μέσος όρος με διακύμανση 12.5 και χειρότερο άλμα 10.8· <b>ήπιο</b> 11.8 / 5.6 / 4.6· <b>πολύ σταθερό</b> 13.9 / 3.7 / 3.5. Όσο πιο σταθερό, τόσο περισσότερο ρεύμα κατά μέσο όρο — η CPU δεν κατεβαίνει ποτέ στο χαμηλό της σκαλί.
+        </p>
+        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+          ‼️ Δεν επιβιώνει σε restart — σε κάθε boot επανέρχεται το κανονικό. Είναι διακόπτης για μία συνεδρία στην powerstation.
+        </p>
+      </div>
+      <div class="card">
         <h3>Ξεκόλλα αισθητήρα <span class="badge" id="usb-badge">—</span></h3>
         <div class="row" style="flex-wrap:wrap;gap:8px" id="usb-buttons"></div>
         <div id="usb-msg" style="font-size:11.5px;color:#71717a;margin-top:10px"></div>
@@ -5146,6 +5195,7 @@ const HANDLERS = {
   compass(m){ compassOffset = m.offset; drawCompass2(); },
   fusion(m){ renderFusion(m); },
   usb_power(m){ usbResult(m); },
+  power_profile(m){ powerResult(m); },
   slip_map(m){ renderSlipMap(m); },
   camstate(m){ renderCamState(m); },
   fuseprof(m){ renderFuseProfile(m); },
@@ -6787,6 +6837,31 @@ function renderSlipMap(m){
   if (slipMapOn) draw();
 }
 
+// ── CPU frequency band, for the power station ──────────────────────────────
+const PW_LABEL = {off: 'κανονικό', eco: 'ήπιο', flat: 'πολύ σταθερό'};
+
+function powerBuild(){
+  document.querySelectorAll('#p-sys [data-pw]').forEach(b => {
+    b.onclick = () => {
+      document.querySelectorAll('#p-sys [data-pw]').forEach(x => x.disabled = true);
+      $('pw-badge').innerHTML = `<span class="pill warn">${t('σε εξέλιξη')}</span>`;
+      send({type: 'power_profile', profile: b.dataset.pw});
+    };
+  });
+}
+
+function powerResult(m){
+  document.querySelectorAll('#p-sys [data-pw]').forEach(x => x.disabled = false);
+  $('pw-badge').innerHTML = m.ok
+    ? `<span class="pill ${m.profile === 'off' ? 'ok' : 'warn'}">`
+      + t(PW_LABEL[m.profile] || m.profile) + '</span>'
+    : `<span class="pill bad">${t('απέτυχε')}</span>`;
+  // The script echoes the band it ended up with; showing that rather than a
+  // tick is what makes it checkable — the profile name alone would look
+  // identical whether or not the cores actually took the setting.
+  $('pw-msg').textContent = m.ok ? (m.detail || '') : (m.error || t('απέτυχε'));
+}
+
 // ── USB power cycle ────────────────────────────────────────────────────────
 // Pulling the plug on one sensor, from wherever you happen to be. Built from
 // the server's list so the browser cannot name a device the server would not
@@ -8019,6 +8094,7 @@ for(const [code, name] of LANGS){
 }
 safetyBuild();             // rows must exist before applyLang() translates them
 usbBuild();                // same: the buttons carry translatable labels
+powerBuild();
 applyLang();               // also builds the tabs, so it precedes showTab()
 
 // Set in JS so the stream carries the same token as the page.
