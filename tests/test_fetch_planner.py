@@ -10,7 +10,8 @@ import math
 import os
 
 from home_robot.fetch_planner import (approach_pose, memory_target,
-                                      nearest_detection, homing_twist)
+                                      nearest_detection, homing_twist,
+                                      is_stale_repeat)
 
 PKG = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NODES = f'{PKG}/home_robot/nodes'
@@ -123,6 +124,48 @@ def test_homing_eases_off_approaching_the_user():
     near, _, _ = homing_twist({'x': 0.0, 'z': 0.95}, deliver_distance=0.8)
     assert 0.0 < near < far
     assert far <= 0.12        # never exceeds the speed cap
+
+
+# ── is_stale_repeat (wrong memory must not loop) ───────────────────────
+#
+# 2026-08-06, found with scripts/fetch_sim.py --scenario stale: object memory
+# answers from its own store, so a remembered position that is WRONG comes
+# back identical from the re-query after a failed approach. The mission drove
+# to the same empty spot until the retry budget ran out and then gave up,
+# never running the room search it uses happily when memory knows nothing.
+# 5 of 6 objects still came back — the one that failed was the one whose
+# remembered position was nowhere near the truth, which is why this hid.
+
+def test_stale_repeat_detects_the_same_place():
+    assert is_stale_repeat({'x': 1.0, 'y': 2.0}, [(1.0, 2.0)])
+    assert is_stale_repeat({'x': 1.2, 'y': 2.1}, [(5.0, 5.0), (1.0, 2.0)])
+
+
+def test_stale_repeat_allows_a_genuinely_new_position():
+    assert not is_stale_repeat({'x': 4.0, 'y': 2.0}, [(1.0, 2.0)])
+    assert not is_stale_repeat({'x': 1.0, 'y': 2.0}, [])
+    assert not is_stale_repeat({'x': 1.0, 'y': 2.0}, None)
+
+
+def test_stale_repeat_ignores_empty_targets():
+    assert not is_stale_repeat(None, [(1.0, 2.0)])
+    assert not is_stale_repeat({}, [(1.0, 2.0)])
+
+
+def test_stale_repeat_tolerance_is_about_half_a_metre():
+    """Loose enough to catch "the same place" through approach-pose jitter,
+    tight enough that the far side of a room is still a new target."""
+    assert is_stale_repeat({'x': 1.4, 'y': 2.0}, [(1.0, 2.0)])       # 0.4 m
+    assert not is_stale_repeat({'x': 1.7, 'y': 2.0}, [(1.0, 2.0)])   # 0.7 m
+
+
+def test_fetch_falls_back_to_searching_when_memory_repeats():
+    """The mission must go and look, not spend every retry on one dud."""
+    src = open(f'{NODES}/mission_executor_node.py').read()
+    assert 'is_stale_repeat' in src, 'the stale-memory guard is gone'
+    assert '_search_rooms_for' in src, (
+        'the room-by-room search must be reachable from the fetch retry loop, '
+        'not only from the never-seen-it path')
 
 
 # ── static wiring contract ─────────────────────────────────────────────

@@ -56,7 +56,8 @@ from std_srvs.srv import Empty
 from home_robot import dock_geometry
 from home_robot.sort_planner import SortProgress, SortRules, plan_order
 from home_robot.fetch_planner import (approach_pose, memory_target,
-                                      nearest_detection, homing_twist)
+                                      nearest_detection, homing_twist,
+                                      is_stale_repeat)
 from home_robot.status_query import ROOM_NAMES_EL, rooms_from_locations
 
 
@@ -504,10 +505,28 @@ class MissionExecutorNode(Node):
             return
 
         # 2-4. approach → verify → grasp-and-hold, with retries
+        #
+        # ‼️ A wrong memory used to be unrecoverable. The loop re-queried
+        # object memory after a failed approach, and object memory answers
+        # from its own store — so it returned the SAME coordinates, the robot
+        # drove to the SAME empty spot, and the retry budget went entirely on
+        # one wrong place. It then gave up without ever running the
+        # room-by-room search that finds the object, which is the search it
+        # runs happily when memory has simply never seen the thing. Verified
+        # in scripts/fetch_sim.py --scenario stale: 5 of 6 objects came back,
+        # and the one that failed was the one whose remembered position was
+        # nowhere near the truth.
+        #
+        # Now a cleared position is remembered in `tried`, and a memory answer
+        # that points back at one of them is not accepted as progress — we go
+        # and look instead. A position found by actually looking gets a fresh
+        # retry budget, because it is evidence rather than a guess.
         picked = False
-        for attempt in range(self._fetch_max_retries + 1):
-            if self._cancel_flag.is_set():
-                break
+        tried = []            # approach targets that turned out to be empty
+        searched = False      # room-by-room fallback already used once
+        attempt = 0
+        while attempt <= self._fetch_max_retries and not self._cancel_flag.is_set():
+            attempt += 1
             rob = self._lookup_base_pose() or (target['x'] - 1.0, target['y'], 0.0)
             ax, ay, yaw = approach_pose((rob[0], rob[1]), (target['x'], target['y']),
                                         self._fetch_approach_dist)
@@ -517,17 +536,30 @@ class MissionExecutorNode(Node):
             self._set_state(State.INSPECTING)
             time.sleep(self._inspect_settle)
             det = nearest_detection(self._latest_objects, label, self._fetch_grasp_range)
-            if det is None:
-                # Memory was stale or the approach overshot — re-query and retry.
-                self._speak(f'Δεν βλέπω {label} εδώ, ξανακοιτάω.')
-                t2 = self._query_object_memory(label)
-                if t2:
-                    target = t2
+            if det is not None:
+                if self._do_pick(label, hold=True):
+                    picked = True
+                    break
                 continue
 
-            if self._do_pick(label, hold=True):
-                picked = True
+            # Not here. Note the dud, then ask memory for something better.
+            tried.append((target['x'], target['y']))
+            self._speak(f'Δεν βλέπω {label} εδώ, ξανακοιτάω.')
+            t2 = self._query_object_memory(label)
+            if t2 and not is_stale_repeat(t2, tried):
+                target = t2
+                continue
+
+            # Memory only has the place we just cleared. Go and look.
+            if searched:
                 break
+            searched = True
+            self._speak(f'Ψάχνω στα δωμάτια για {label}.')
+            t3 = self._search_rooms_for(label, tried)
+            if t3 is None:
+                break
+            target = t3
+            attempt = 0
 
         if not picked:
             self._finish(State.CANCELLED if self._cancel_flag.is_set() else State.FAILED,
@@ -559,6 +591,15 @@ class MissionExecutorNode(Node):
         if t:
             return t
         self._speak('Δεν το έχω στη μνήμη, ψάχνω στα δωμάτια.')
+        return self._search_rooms_for(label)
+
+    def _search_rooms_for(self, label: str, tried=None):
+        """Drive room to room until object memory has a position we trust.
+
+        `tried` is a list of (x, y) already visited and found empty; a memory
+        answer pointing back at one of them is not news, so the search keeps
+        going rather than declaring success on the same wrong spot.
+        """
         for room in rooms_from_locations(self._locations):
             if self._cancel_flag.is_set():
                 return None
@@ -567,7 +608,7 @@ class MissionExecutorNode(Node):
             self._set_state(State.INSPECTING)
             time.sleep(self._inspect_settle)
             t = self._query_object_memory(label)
-            if t:
+            if t and not is_stale_repeat(t, tried):
                 return t
         return None
 

@@ -86,6 +86,23 @@ def homing_twist(person, deliver_distance=0.8, center_tol=0.15,
     return lin, ang, (centred and close)
 
 
+def is_stale_repeat(target, tried, tol=0.5):
+    """True if `target` is somewhere we have already been and found nothing.
+
+    Object memory answers from its own store, so a remembered position that
+    turns out to be wrong is returned again, unchanged, by the very next
+    query. Without this check the fetch mission re-queries after a failed
+    approach, gets the same coordinates back, drives to the same spot, sees
+    nothing again, and burns its whole retry budget on one wrong place —
+    never reaching the room-by-room search that would actually find the
+    object. `tried` is a list of (x, y) that have been visited and cleared.
+    """
+    if not target:
+        return False
+    tx, ty = float(target['x']), float(target['y'])
+    return any(math.hypot(tx - px, ty - py) <= tol for px, py in (tried or []))
+
+
 def nearest_detection(objects, label, max_z):
     """Closest same-label detection in a detected_objects list, or None.
 
