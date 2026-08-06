@@ -14,9 +14,11 @@ def generate_launch_description():
     pkg = FindPackageShare('home_robot')
     roomba_port = LaunchConfiguration('roomba_port', default='/dev/roomba')
     use_joy = LaunchConfiguration('use_joy', default='true')
-    # DualSense is /dev/input/js0 by default (confirmed live 2026-06-22) —
-    # js1 is its motion-sensor sub-device, not the gamepad itself.
-    joy_device_id = LaunchConfiguration('joy_device_id', default='0')
+    # Selected by name so it does not matter which /dev/input/jsN the pad got —
+    # js0 is only "the DualSense" until something else claims it first, and js1
+    # is its motion-sensor sub-device rather than the gamepad.
+    joy_device_name = LaunchConfiguration('joy_device_name',
+                                          default='DualSense Wireless Controller')
 
     # SLAMTEC C1 LIDAR is provided by ros-sllidar-c1.service (systemd,
     # always running on /dev/sllidar = same physical port as /dev/lidar).
@@ -106,7 +108,16 @@ def generate_launch_description():
         package='joy',
         executable='joy_node',
         name='joy_node',
-        parameters=[{'device_id': joy_device_id, 'deadzone': 0.05}],
+        # By NAME, not device_id: id 0 is whichever pad enumerated first, which
+        # is the wrong one as soon as anything else with a js node is plugged
+        # in. autorepeat_rate is what keeps twists flowing while a stick is
+        # simply HELD — without it joy publishes only on change and the base
+        # stops under roomba_driver's watchdog.
+        parameters=[{
+            'device_name': joy_device_name,
+            'deadzone': 0.05,
+            'autorepeat_rate': 20.0,
+        }],
         output='screen',
         condition=IfCondition(use_joy),
     )
@@ -123,7 +134,8 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('roomba_port', default_value='/dev/roomba'),
         DeclareLaunchArgument('use_joy',     default_value='true'),
-        DeclareLaunchArgument('joy_device_id', default_value='0'),
+        DeclareLaunchArgument('joy_device_name',
+                              default_value='DualSense Wireless Controller'),
         roomba_node,
         tf_base_laser,
         tf_base_imu,

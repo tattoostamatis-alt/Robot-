@@ -53,9 +53,17 @@ case "${1:-}" in
     # SLAM, not localization: bringup's own default. use_dashboard is false in
     # bringup (localize is what normally turns it on), so ask for it explicitly
     # or the user loses the UI they started the mapping from.
+    #
+    # ‼️ use_joy is spelled out for the same reason, and it is the whole point
+    # of a mapping run: you drive the house by hand with the PS5 pad. It used
+    # to be left at bringup's default, which was FALSE — no joy_node started,
+    # so the pad did nothing for the entire run while the dashboard's
+    # arrow buttons still drove the base, which is exactly how it was reported.
+    # bringup now defaults it true as well; kept explicit so a future change to
+    # that default cannot silently take the controller away again.
     sudo systemctl start ros-sllidar-c1.service 2>/dev/null
     setsid nohup ros2 launch home_robot bringup.launch.py \
-      use_slam:=true use_dashboard:=true use_arm:=true "$@" \
+      use_slam:=true use_dashboard:=true use_arm:=true use_joy:=true "$@" \
       >> "$LOG" 2>&1 < /dev/null &
     echo "mapping started"
     ;;

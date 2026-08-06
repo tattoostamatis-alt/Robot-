@@ -69,8 +69,15 @@ def generate_launch_description():
     use_explore   = LaunchConfiguration('use_explore',   default='false')
     use_obstacle_safety = LaunchConfiguration('use_obstacle_safety', default='true')
     obstacle_safety_distance = LaunchConfiguration('obstacle_safety_distance', default='0.5')
-    use_joy       = LaunchConfiguration('use_joy',       default='false')
-    joy_dev       = LaunchConfiguration('joy_dev',       default='/dev/input/js0')
+    # ‼️ Default TRUE. bringup on its own is the MAPPING launch (use_slam
+    # defaults to true), and mapping is driven by hand with the PS5 pad — a
+    # default of false meant `map_session.sh new` came up with no joy_node at
+    # all, so the pad was dead for the whole mapping run while the dashboard
+    # arrows still worked. localize.launch.py passes use_joy:='false' into this
+    # include explicitly and starts its own pair, so this cannot double up.
+    use_joy       = LaunchConfiguration('use_joy',       default='true')
+    joy_device_name = LaunchConfiguration('joy_device_name',
+                                          default='DualSense Wireless Controller')
     use_rviz      = LaunchConfiguration('use_rviz',      default='true')
     roomba_port   = LaunchConfiguration('roomba_port',   default='/dev/roomba')
     arm_port      = LaunchConfiguration('arm_port',      default='/dev/arm')
@@ -1260,16 +1267,33 @@ def generate_launch_description():
     )
 
     # ── PS5 DualSense teleop (manual mapping drive) ──────────────
-    # joy_node reads the raw /dev/input/jsN device (already paired over
-    # Bluetooth, see config/teleop_twist_joy_ps5.yaml header for the
-    # confirmed axis/button layout); teleop_twist_joy_node turns it into
-    # cmd_vel, which flows through obstacle_safety_node like any other
-    # cmd_vel source (R1 is the required dead-man's switch).
+    # joy_node reads the pad (already paired over Bluetooth, see
+    # config/teleop_twist_joy_ps5.yaml header for the confirmed axis/button
+    # layout); teleop_twist_joy_node turns it into cmd_vel, which flows through
+    # obstacle_safety_node like any other cmd_vel source (R1 is the required
+    # dead-man's switch).
+    #
+    # ‼️ Three parameters, and every one of them was wrong or missing here
+    # while localize.launch.py had them right:
+    #
+    #   * `dev` DOES NOT EXIST on Jazzy's joy_node. That is the ROS 1 /
+    #     joy_linux name; this node takes device_id (int) or device_name
+    #     (string) and SILENTLY IGNORES anything else, so it fell back to
+    #     device_id 0 — whichever pad enumerated first. Selecting by name works
+    #     regardless of which /dev/input/jsN the DualSense landed on.
+    #   * autorepeat_rate: without it joy only publishes on CHANGE, so holding
+    #     the stick still sends nothing and roomba_driver's watchdog stops the
+    #     base a moment after you stop wiggling it.
+    #   * deadzone: the DualSense sticks do not rest at exactly 0.
     joy_node = Node(
         package='joy',
         executable='joy_node',
         name='joy_node',
-        parameters=[{'dev': joy_dev}],
+        parameters=[{
+            'device_name': joy_device_name,
+            'deadzone': 0.05,
+            'autorepeat_rate': 20.0,
+        }],
         output='screen',
         condition=IfCondition(use_joy),
     )
@@ -1353,8 +1377,9 @@ def generate_launch_description():
         DeclareLaunchArgument('use_tts',       default_value='false'),
         DeclareLaunchArgument('use_rtabmap',   default_value='false'),
         DeclareLaunchArgument('use_explore',   default_value='false'),
-        DeclareLaunchArgument('use_joy',       default_value='false'),
-        DeclareLaunchArgument('joy_dev',       default_value='/dev/input/js0'),
+        DeclareLaunchArgument('use_joy',       default_value='true'),
+        DeclareLaunchArgument('joy_device_name',
+                              default_value='DualSense Wireless Controller'),
         DeclareLaunchArgument('use_rviz',      default_value='true'),
         DeclareLaunchArgument('roomba_port',   default_value='/dev/roomba'),
         DeclareLaunchArgument('arm_port',      default_value='/dev/arm'),
