@@ -7338,10 +7338,15 @@ async function mapSwitch(name){
   catch(e){ /* the server is going down under us; that IS the success case */ }
 }
 
+// Same restart as mapSwitch — say so. The old text mentioned only that
+// "navigation stops", so when the whole stack went down and the tab froze for a
+// minute and a half it read as a crash rather than the documented behaviour.
 async function mapNew(){
   if(!confirm(t('Ξεκινά ΝΕΑ χαρτογράφηση (SLAM). Ο τρέχων χάρτης δεν χάνεται, '
-             + 'αλλά η πλοήγηση σταματά μέχρι να αποθηκεύσεις τον καινούργιο. Να συνεχίσω;'))) return;
-  mapMsg(t('Ξεκινά χαρτογράφηση… οδήγησε το ρομπότ σε όλο τον χώρο και μετά αποθήκευσε.'));
+             + 'αλλά ΟΛΑ ξαναξεκινούν (~90 δευτερόλεπτα) και η πλοήγηση σταματά '
+             + 'μέχρι να αποθηκεύσεις τον καινούργιο. Να συνεχίσω;'))) return;
+  mapMsg(t('Επανεκκίνηση σε χαρτογράφηση… η σελίδα θα ξανασυνδεθεί μόνη της. '
+           + 'Μετά οδήγησε το ρομπότ σε όλο τον χώρο και αποθήκευσε.'));
   try { await fetch('/maps/new/new' + (TOKEN_QS || '')); } catch(e){}
 }
 

@@ -47,13 +47,33 @@ def _resolve_map(map_arg: str, share_dir: str) -> str:
 
 def _launch_setup(context, *args, **kwargs):
     share_dir = FindPackageShare('home_robot').perform(context)
-    map_yaml = _resolve_map(LaunchConfiguration('map').perform(context), share_dir)
+    # ‼️ MAPPING MODE. slam_toolbox owns map->odom, there is no saved map to
+    # load, and AMCL/AprilTag would fight it — but EVERYTHING ELSE `robot max`
+    # brings up stays identical: voice, DOA, dashboard, perception, and the PS5
+    # pad selected BY NAME. That is the whole reason the dashboard's «Νέος
+    # χάρτης» routes through this file. It used to shell out to a bare
+    # `ros2 launch bringup.launch.py use_slam:=true`, and bringup defaults
+    # use_wake_word/use_stt/use_tts/use_llm to FALSE — so pressing the button
+    # tore the stack down and brought back a robot with no voice at all, no
+    # Foxglove, no VNC :2 (phone RViz) and bringup's own joy_node, which picks
+    # the pad with the ROS1 `dev` param that Jazzy ignores. From the browser it
+    # looked like the whole stack had simply died.
+    use_slam = LaunchConfiguration('use_slam').perform(context).lower() in ('true', '1')
+    # Not resolved while mapping: there is no map to open, and _resolve_map
+    # RAISES on a missing file — a fresh install with an empty maps/ could then
+    # never start its first mapping run.
+    map_yaml = '' if use_slam else _resolve_map(
+        LaunchConfiguration('map').perform(context), share_dir)
     use_depth = LaunchConfiguration('use_depth_camera').perform(context).lower() in ('true', '1')
     use_joy = LaunchConfiguration('use_joy').perform(context).lower() in ('true', '1')
     # Inherited by the nested bringup (which starts arm_driver); read here too
     # so the right stick can jog the arm in localize mode as well.
     use_arm = LaunchConfiguration('use_arm').perform(context).lower() in ('true', '1')
     use_apriltag = LaunchConfiguration('use_apriltag').perform(context).lower() in ('true', '1')
+    # A tag sighting publishes /initialpose, which is AMCL's input. Under SLAM
+    # there is no AMCL to accept it and slam_toolbox is already producing
+    # map->odom, so the relocalizer would only log at an empty topic.
+    use_apriltag = use_apriltag and not use_slam
     use_rviz = LaunchConfiguration('use_rviz').perform(context).lower() in ('true', '1')
     use_obstacle_safety = LaunchConfiguration('use_obstacle_safety').perform(context).lower() in ('true', '1')
     # Opt-in perception stack for navigation: YOLO detector + tracker feeding the
@@ -87,9 +107,11 @@ def _launch_setup(context, *args, **kwargs):
     actions.append(IncludeLaunchDescription(
         PythonLaunchDescriptionSource([pkg, '/launch/bringup.launch.py']),
         launch_arguments={
-            'use_localization':    'true',
+            # Exactly one of these two owns map->odom: AMCL against a saved map
+            # (the normal case), or slam_toolbox building a new one.
+            'use_localization':    'false' if use_slam else 'true',
             'localization_map':    map_yaml,
-            'use_slam':            'false',   # AMCL owns map->odom; no slam_toolbox
+            'use_slam':            'true' if use_slam else 'false',
             'use_rtabmap':         'false',
             'use_camera':          perc,      # detector on only with perception
             'use_tracker':         perc,      # track_id/velocity for prediction
@@ -302,6 +324,14 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'map', default_value='malou2',
             description='Saved map name (in maps/) or a full path to a .yaml'),
+        DeclareLaunchArgument(
+            'use_slam', default_value='false',
+            description='MAPPING run instead of localization: slam_toolbox '
+                        'builds a new map (no saved map, no AMCL, no AprilTag) '
+                        'while the rest of the stack — voice, dashboard, DOA, '
+                        'perception, the by-name PS5 pad — comes up exactly as '
+                        'in `robot max`. This is what `robot map` and the '
+                        "dashboard's «Νέος χάρτης» button use."),
         DeclareLaunchArgument(
             'use_depth_camera', default_value='true',
             description='Start the D435 depth stream so global_localizer fuses it '

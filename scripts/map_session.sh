@@ -50,21 +50,20 @@ case "${1:-}" in
     shift
     log "starting a new mapping run ($*)"
     "$ROBOT" stop >> "$LOG" 2>&1
-    # SLAM, not localization: bringup's own default. use_dashboard is false in
-    # bringup (localize is what normally turns it on), so ask for it explicitly
-    # or the user loses the UI they started the mapping from.
-    #
-    # ‼️ use_joy is spelled out for the same reason, and it is the whole point
-    # of a mapping run: you drive the house by hand with the PS5 pad. It used
-    # to be left at bringup's default, which was FALSE — no joy_node started,
-    # so the pad did nothing for the entire run while the dashboard's
-    # arrow buttons still drove the base, which is exactly how it was reported.
-    # bringup now defaults it true as well; kept explicit so a future change to
-    # that default cannot silently take the controller away again.
-    sudo systemctl start ros-sllidar-c1.service 2>/dev/null
-    setsid nohup ros2 launch home_robot bringup.launch.py \
-      use_slam:=true use_dashboard:=true use_arm:=true use_joy:=true "$@" \
-      >> "$LOG" 2>&1 < /dev/null &
+    # ‼️ `robot map`, NOT a bare `ros2 launch bringup.launch.py use_slam:=true`.
+    # That is what this branch used to do, and it is why pressing «Νέος χάρτης»
+    # looked like the whole stack terminating: `robot stop` above tears down
+    # EVERYTHING, and a bare bringup brings back only part of it. bringup
+    # defaults use_wake_word/use_stt/use_tts/use_llm to false, so the robot came
+    # back deaf and mute; use_doa was never passed either. The LiDAR service,
+    # Foxglove, VNC :2 (the phone's RViz, and what the dashboard's RViz tab
+    # streams) and the FastFlowLM decision are all `robot`'s job, not a launch
+    # file's, so none of them returned. Measured live 2026-08-06: 42 processes
+    # came back, zero of them voice, VNC :2 gone, foxglove inactive.
+    # `robot map` runs the identical preamble to `robot max` and only swaps
+    # AMCL for slam_toolbox. Nothing here needs spelling out any more — the
+    # dashboard, the arm and the by-name PS5 pad all come with it.
+    setsid nohup "$ROBOT" map "$@" >> "$LOG" 2>&1 < /dev/null &
     echo "mapping started"
     ;;
 
