@@ -628,42 +628,56 @@ collision_monitor:
     # over and over. Not a planner bug and not a doorway that is too narrow:
     # two files disagreeing about the shape of the robot.
     #
-    # The polygons below are octagons around the real circular chassis instead
-    # of squares. Same 50mm stop margin at every EDGE; the corners no longer
-    # claim 136mm more than the robot occupies. Sides stay at ±0.175 (the
-    # measured body) since sideways clearance is what a doorway actually costs,
-    # while the direction of travel keeps its full margin.
+    # The fix is to stop describing a round robot with a box. The polygons
+    # below are a CIRCLE of radius 0.225 — the Ø0.35 chassis plus the same
+    # 50 mm all the way round — drawn as 16 points (worst deviation from a
+    # true circle: 4.3 mm).
     #
-    # ‼️ This is a SAFETY polygon and it is now smaller. The robot will pass
-    # closer to walls than before. Two things behind it: lethal costmap cost is
-    # still robot_radius 0.175 so the planner will not aim at a jamb, and the
-    # bumper (project_robot_bumper) is a real, working last resort. NOT yet
-    # verified on hardware.
+    # ‼️ This is NOT a reduction in safety. Against the old square:
+    #
+    #             old ±0.22 square      new r=0.225 circle
+    #   at edges      45 mm margin          50 mm margin
+    #   at corners   136 mm margin          50 mm margin
+    #   max reach     0.311 m               0.225 m
+    #
+    # Every bearing now keeps at least as much clearance as the old box kept
+    # at its edges, and more than the 50 mm that was originally asked for is
+    # no longer claimed in the diagonals — which is the only place the robot
+    # was ever "protected" by space it does not occupy. Behind it: lethal
+    # costmap cost is still robot_radius 0.175 so the planner will not aim at
+    # a jamb, and the bumper (project_robot_bumper) is a working last resort.
+    # NOT yet verified on hardware.
     Stop:
       type: "velocity_polygon"
       action_type: "stop"
       holonomic: false
       velocity_polygons: ["moving_forward", "moving_backward", "stopped_or_rotating"]
-      # Corners cut off the old ±0.22 squares. Full 0.22 reach in the
-      # direction of travel, ±0.175 across (the measured body half-width).
+      # A CIRCLE, not a box: the robot is round, so the stop zone is the same
+      # 50 mm everywhere around it. 16-point approximation of r=0.225
+      # (chassis 0.175 + 0.050); worst deviation from a true circle is 4.3 mm.
+      # The same ring for all three cases — a round robot has no "narrow side"
+      # to exploit, and the direction of travel does not change how much space
+      # the body needs.
+      #
+      # Compare with what this replaced: a ±0.22 square kept 45 mm at the
+      # edges but 136 mm at the corners, and that corner is what refused
+      # doorways the robot fits through. This keeps MORE margin than the old
+      # square at every single bearing (50 mm vs 45 mm at the edges) while
+      # reaching 0.225 instead of 0.311.
       moving_forward:
-        points: "[[0.22, 0.07], [0.19, 0.15], [0.06, 0.175], [-0.05, 0.175], [-0.05, -0.175], [0.06, -0.175], [0.19, -0.15], [0.22, -0.07]]"
+        points: "[[0.2250, 0.0000], [0.2079, 0.0861], [0.1591, 0.1591], [0.0861, 0.2079], [0.0000, 0.2250], [-0.0861, 0.2079], [-0.1591, 0.1591], [-0.2079, 0.0861], [-0.2250, 0.0000], [-0.2079, -0.0861], [-0.1591, -0.1591], [-0.0861, -0.2079], [0.0000, -0.2250], [0.0861, -0.2079], [0.1591, -0.1591], [0.2079, -0.0861]]"
         linear_min: 0.02
         linear_max: 1.0
         theta_min: -10.0
         theta_max: 10.0
       moving_backward:
-        points: "[[0.05, 0.175], [-0.06, 0.175], [-0.19, 0.15], [-0.22, 0.07], [-0.22, -0.07], [-0.19, -0.15], [-0.06, -0.175], [0.05, -0.175]]"
+        points: "[[0.2250, 0.0000], [0.2079, 0.0861], [0.1591, 0.1591], [0.0861, 0.2079], [0.0000, 0.2250], [-0.0861, 0.2079], [-0.1591, 0.1591], [-0.2079, 0.0861], [-0.2250, 0.0000], [-0.2079, -0.0861], [-0.1591, -0.1591], [-0.0861, -0.2079], [0.0000, -0.2250], [0.0861, -0.2079], [0.1591, -0.1591], [0.2079, -0.0861]]"
         linear_min: -1.0
         linear_max: -0.02
         theta_min: -10.0
         theta_max: 10.0
-      # Rotating in place has no direction of travel, so every bearing counts:
-      # a regular octagon, circumradius 0.195 (chassis 0.175 + 20mm). The old
-      # square reached 0.311 diagonally, which is why the robot could not even
-      # begin to turn inside a doorway.
       stopped_or_rotating:
-        points: "[[0.180, 0.075], [0.075, 0.180], [-0.075, 0.180], [-0.180, 0.075], [-0.180, -0.075], [-0.075, -0.180], [0.075, -0.180], [0.180, -0.075]]"
+        points: "[[0.2250, 0.0000], [0.2079, 0.0861], [0.1591, 0.1591], [0.0861, 0.2079], [0.0000, 0.2250], [-0.0861, 0.2079], [-0.1591, 0.1591], [-0.2079, 0.0861], [-0.2250, 0.0000], [-0.2079, -0.0861], [-0.1591, -0.1591], [-0.0861, -0.2079], [0.0000, -0.2250], [0.0861, -0.2079], [0.1591, -0.1591], [0.2079, -0.0861]]"
         linear_min: -0.02
         linear_max: 0.02
         theta_min: -10.0

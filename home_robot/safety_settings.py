@@ -123,7 +123,11 @@ BY_KEY = {s.key: s for s in SPECS}
 # `value` is what nav2_params.yaml actually says, so the panel is not quoting a
 # number from memory; the tests check it against the file.
 INFO_ONLY = (
-    {'key': 'stop_skirt', 'value': 0.22, 'unit': 'm',
+    # 2026-08-06: the Stop zone became a circle (r=0.225, i.e. the Ø0.35
+    # chassis + 50 mm all round) instead of a ±0.22 box whose corners reached
+    # 0.311. This value is that radius — now the clearance in EVERY direction,
+    # not just at the flat of a box.
+    {'key': 'stop_skirt', 'value': 0.225, 'unit': 'm',
      'source': 'collision_monitor / Stop'},
     {'key': 'time_before_collision', 'value': 0.9, 'unit': 's',
      'source': 'collision_monitor / FootprintApproach'},

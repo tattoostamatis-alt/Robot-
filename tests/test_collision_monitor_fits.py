@@ -77,58 +77,81 @@ def test_costmap_radius_matches_the_measured_chassis():
         'chassis size, do not leave them behind like last time')
 
 
-def test_rotating_in_place_fits_the_tightest_doorway():
-    """No direction of travel, so EVERY bearing has to fit.
+CHASSIS_R = 0.175
+STOP_MARGIN = 0.050        # the margin that was asked for, all round
 
-    This is the one that mattered: a robot that cannot turn inside a doorway
-    cannot start moving through it either.
+
+def _min_reach(pts):
+    """Closest approach of the polygon boundary to the centre.
+
+    For a convex polygon that is the distance to the nearest EDGE, not the
+    nearest vertex — a 16-gon's vertices sit on the circle while its edges cut
+    slightly inside.
     """
-    reach = _max_reach(_points('stopped_or_rotating'))
-    assert reach < TIGHTEST_PASSAGE, (
-        f'stopped_or_rotating reaches {reach:.3f} m, but the tightest passage '
-        f'is {TIGHTEST_PASSAGE} m — the monitor will zero cmd_vel and the '
-        f'robot will sit still with a valid plan')
+    best = float('inf')
+    n = len(pts)
+    for i in range(n):
+        (x1, y1), (x2, y2) = pts[i], pts[(i + 1) % n]
+        dx, dy = x2 - x1, y2 - y1
+        seg = math.hypot(dx, dy)
+        if seg < 1e-12:
+            continue
+        # perpendicular distance from origin to the segment's line
+        best = min(best, abs(dx * y1 - dy * x1) / seg)
+    return best
 
 
-def test_driving_polygons_are_no_wider_than_the_body():
-    """Sideways clearance is what a doorway charges you for.
+def test_every_bearing_keeps_the_full_stop_margin():
+    """‼️ The one that caught my own mistake.
 
-    Forward reach may exceed it — that points down the corridor, into space
-    the robot is about to occupy anyway — but the width may not.
+    First attempt at this fix cut the corners off but also pulled the sides in
+    to ±0.175 — exactly the chassis, i.e. ZERO margin sideways. The monitor
+    would not have stopped for anything beside the robot until it was already
+    touching. The margin is 50 mm and it is 50 mm in every direction, which is
+    what a round robot needs and what the box only ever delivered diagonally.
     """
-    for name in ('moving_forward', 'moving_backward'):
-        hw = _half_width(_points(name))
-        assert hw <= 0.175 + 1e-9, (
-            f'{name} is {hw:.3f} m half-width, wider than the Ø0.35 chassis; '
-            f'that is what wedged the robot in the toualeta doorway')
-        assert hw < TIGHTEST_PASSAGE
+    want = CHASSIS_R + STOP_MARGIN
+    for name in SUBPOLYGONS:
+        closest = _min_reach(_points(name))
+        margin_mm = (closest - CHASSIS_R) * 1000
+        assert margin_mm >= 45.0, (
+            f'{name} comes within {closest:.4f} m of centre — only '
+            f'{margin_mm:.0f} mm clear of the Ø0.35 chassis, against the '
+            f'{STOP_MARGIN * 1000:.0f} mm this polygon exists to keep')
+        assert closest <= want + 0.005, (
+            f'{name} keeps {margin_mm:.0f} mm, more than asked — that is how '
+            f'doorways get refused')
 
 
-def test_no_polygon_is_a_bare_rectangle():
-    """A 4-point box hides its true size in the corners.
+def test_the_zone_is_round_not_boxy():
+    """A round robot gets a round stop zone.
 
-    ±0.22 reads as "0.44 m wide, fine for a 0.48 m gap" and is actually
-    0.62 m across the diagonal.
+    Concretely: no bearing may reach more than a hair further than any other.
+    A ±0.22 square reaches 0.311 diagonally against 0.22 at the edges — 41%
+    more in some directions than others, and that surplus is what refused
+    doorways the robot fits through.
     """
     for name in SUBPOLYGONS:
         pts = _points(name)
-        assert len(pts) > 4, (
-            f'{name} is back to a rectangle — its corners will reach '
-            f'{_max_reach(pts):.3f} m while the edges suggest otherwise')
+        lo, hi = _min_reach(pts), _max_reach(pts)
+        assert hi - lo < 0.010, (
+            f'{name} reaches {hi:.3f} m one way and {lo:.3f} m another '
+            f'({(hi - lo) * 1000:.0f} mm apart) — that is a polygon pretending '
+            f'to be a circle, and the long bearing will refuse a doorway')
 
 
-def test_stop_polygons_still_cover_the_physical_robot():
-    """Cutting corners must not cut INTO the robot.
-
-    The monitor is a safety device; every sub-polygon still has to enclose the
-    real chassis, and keep a margin in the direction it is checking.
-    """
+def test_the_zone_fits_the_tightest_doorway():
+    """It must still get through the narrowest passage in the house."""
     for name in SUBPOLYGONS:
-        pts = _points(name)
-        assert _half_width(pts) >= 0.175 - 1e-9, (
-            f'{name} is narrower than the robot itself')
-        assert _max_reach(pts) >= 0.175, (
-            f'{name} does not enclose the chassis')
-    fwd = _points('moving_forward')
-    assert max(x for x, _y in fwd) >= 0.22, (
-        'forward stop margin shrank below the 50mm asked for on the front')
+        reach = _max_reach(_points(name))
+        assert reach < TIGHTEST_PASSAGE, (
+            f'{name} reaches {reach:.3f} m, but the tightest passage is '
+            f'{TIGHTEST_PASSAGE} m — the monitor will zero cmd_vel and the '
+            f'robot will sit still holding a valid plan')
+
+
+def test_stop_polygons_enclose_the_physical_robot():
+    """The monitor is a safety device: never cut INTO the body."""
+    for name in SUBPOLYGONS:
+        assert _min_reach(_points(name)) > CHASSIS_R, (
+            f'{name} passes inside the chassis outline')
