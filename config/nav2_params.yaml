@@ -606,25 +606,64 @@ collision_monitor:
     #
     # This also buys doorway margin: kela3 doorways are only ~0.78 m, where a
     # 0.50 m-wide stop box would leave ~70mm per side; 0.44 m leaves ~170mm.
+    #
+    # ‼️ 2026-08-06 — THE CORNERS. Everything above reasons about box EDGES and
+    # is right about them; what it misses is that a square's corner sticks out
+    # much further than its edge. ±0.22 has a half-diagonal of 0.311 m, while
+    # the costmap models the very same robot as a circle of radius 0.175
+    # (chassis re-measured Ø0.35 on 2026-07-31 — robot_radius was updated then,
+    # this polygon was not). So the planner routes through gaps the collision
+    # monitor then refuses, and the robot sits still with a valid path in hand.
+    #
+    # Measured on malou2, half-width of the tightest passage to each room:
+    #
+    #   toualeta          0.241 m   square (0.311) NO   circle (0.175) fits
+    #   kouzina           0.300 m   square (0.311) NO   circle (0.175) fits
+    #   domatio tou max   0.333 m   square fits         fits
+    #   diadromos         0.433 m   square fits         fits
+    #
+    # Those first two are exactly the two rooms the fetch mission could not
+    # reach in scripts/fetch_sim_gazebo.py — Nav2 planned, the monitor zeroed
+    # cmd_vel, and recovery_manager reported "STUCK ... displacement=0.022m"
+    # over and over. Not a planner bug and not a doorway that is too narrow:
+    # two files disagreeing about the shape of the robot.
+    #
+    # The polygons below are octagons around the real circular chassis instead
+    # of squares. Same 50mm stop margin at every EDGE; the corners no longer
+    # claim 136mm more than the robot occupies. Sides stay at ±0.175 (the
+    # measured body) since sideways clearance is what a doorway actually costs,
+    # while the direction of travel keeps its full margin.
+    #
+    # ‼️ This is a SAFETY polygon and it is now smaller. The robot will pass
+    # closer to walls than before. Two things behind it: lethal costmap cost is
+    # still robot_radius 0.175 so the planner will not aim at a jamb, and the
+    # bumper (project_robot_bumper) is a real, working last resort. NOT yet
+    # verified on hardware.
     Stop:
       type: "velocity_polygon"
       action_type: "stop"
       holonomic: false
       velocity_polygons: ["moving_forward", "moving_backward", "stopped_or_rotating"]
+      # Corners cut off the old ±0.22 squares. Full 0.22 reach in the
+      # direction of travel, ±0.175 across (the measured body half-width).
       moving_forward:
-        points: "[[0.22, 0.22], [0.22, -0.22], [-0.05, -0.22], [-0.05, 0.22]]"
+        points: "[[0.22, 0.07], [0.19, 0.15], [0.06, 0.175], [-0.05, 0.175], [-0.05, -0.175], [0.06, -0.175], [0.19, -0.15], [0.22, -0.07]]"
         linear_min: 0.02
         linear_max: 1.0
         theta_min: -10.0
         theta_max: 10.0
       moving_backward:
-        points: "[[0.05, 0.22], [0.05, -0.22], [-0.22, -0.22], [-0.22, 0.22]]"
+        points: "[[0.05, 0.175], [-0.06, 0.175], [-0.19, 0.15], [-0.22, 0.07], [-0.22, -0.07], [-0.19, -0.15], [-0.06, -0.175], [0.05, -0.175]]"
         linear_min: -1.0
         linear_max: -0.02
         theta_min: -10.0
         theta_max: 10.0
+      # Rotating in place has no direction of travel, so every bearing counts:
+      # a regular octagon, circumradius 0.195 (chassis 0.175 + 20mm). The old
+      # square reached 0.311 diagonally, which is why the robot could not even
+      # begin to turn inside a doorway.
       stopped_or_rotating:
-        points: "[[0.22, 0.22], [0.22, -0.22], [-0.22, -0.22], [-0.22, 0.22]]"
+        points: "[[0.180, 0.075], [0.075, 0.180], [-0.075, 0.180], [-0.180, 0.075], [-0.180, -0.075], [-0.075, -0.180], [0.075, -0.180], [0.180, -0.075]]"
         linear_min: -0.02
         linear_max: 0.02
         theta_min: -10.0

@@ -573,6 +573,11 @@ def main():
             drv.status.clear()
             perception.events.clear()
             t0 = time.monotonic()
+            p_now = perception.pose
+            commanded_from = (p_now[0], p_now[1]) if p_now else None
+            if commanded_from:
+                print(f'   (asked from {commanded_from[0]:.2f}, '
+                      f'{commanded_from[1]:.2f})')
             drv.start_pub.publish(String(data=f'fetch:{label}'))
 
             verdict = None
@@ -592,8 +597,14 @@ def main():
             places = [e for e in perception.events if e[0] == 'place']
             picked = any(p[3] for p in picks)
             released = bool(places and places[0][1] == label)
-            back = bool(places and math.hypot(places[0][2] - START[0],
-                                              places[0][3] - START[1]) < 1.5)
+            # ‼️ Measure against where the robot WAS when the command was
+            # given, not against the fixed saloni start. The mission delivers
+            # to "where you asked me from" — after the first fetch the robot
+            # is wherever it released the last object, so comparing to START
+            # scored correct deliveries as failures.
+            ref = commanded_from or START[:2]
+            back = bool(places and math.hypot(places[0][2] - ref[0],
+                                              places[0][3] - ref[1]) < 1.5)
             results[label] = {'verdict': verdict, 'picked': picked,
                               'released': released, 'back': back,
                               'seconds': round(elapsed, 1)}
