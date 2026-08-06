@@ -524,6 +524,7 @@ class MissionExecutorNode(Node):
         picked = False
         tried = []            # approach targets that turned out to be empty
         searched = False      # room-by-room fallback already used once
+        reached = False       # did we ever actually get to the object?
         attempt = 0
         while attempt <= self._fetch_max_retries and not self._cancel_flag.is_set():
             attempt += 1
@@ -531,7 +532,9 @@ class MissionExecutorNode(Node):
             ax, ay, yaw = approach_pose((rob[0], rob[1]), (target['x'], target['y']),
                                         self._fetch_approach_dist)
             if not self._navigate_to_xy(ax, ay, yaw):
+                reached = False
                 continue
+            reached = True
 
             self._set_state(State.INSPECTING)
             time.sleep(self._inspect_settle)
@@ -562,8 +565,21 @@ class MissionExecutorNode(Node):
             attempt = 0
 
         if not picked:
+            # ‼️ Say WHICH half failed. This used to be "Δεν κατάφερα να πιάσω
+            # X" for every outcome, including the common one where Nav2 never
+            # got the robot there at all — it wedges in narrow doorways
+            # (reproduced in scripts/fetch_sim_gazebo.py: 4 of 6 objects, with
+            # "STUCK detected ... displacement=0.022m" in the log). Blaming the
+            # grasp sends whoever hears it to look at the arm, which is fine
+            # and was never involved.
+            if self._cancel_flag.is_set():
+                msg = 'Ακυρώθηκε.'
+            elif not reached:
+                msg = f'Δεν μπόρεσα να φτάσω στο {label}.'
+            else:
+                msg = f'Δεν κατάφερα να πιάσω {label}.'
             self._finish(State.CANCELLED if self._cancel_flag.is_set() else State.FAILED,
-                         'Ακυρώθηκε.' if self._cancel_flag.is_set() else f'Δεν κατάφερα να πιάσω {label}.')
+                         msg)
             return
 
         # 5. carry back to the user (skip the drive if cancelled, but still
