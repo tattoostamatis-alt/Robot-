@@ -199,3 +199,27 @@ def test_every_greek_label_survives_both_inflections():
         assert not acc.startswith(('ο ', 'η ', 'οι ')), f'{prompt}: {acc}'
         assert to.startswith('σ'), f'{prompt}: {to}'
         assert len(acc.split()) == len(nominative.split()), prompt
+
+
+# ── footwear: the 2026-08-06 «πιάσε την παντόφλα» failure ─────────────────────
+
+def test_a_slipper_is_a_name_the_robot_knows():
+    """COCO has no footwear class at all, so a slipper is only ever reachable
+    through the open-vocabulary detector. It used to map to nothing, the LLM
+    guessed the COCO-ish 'shoe' (also not a COCO class), and pick died with
+    «δεν βλέπω κάτι να σηκώσω» with the slipper in plain view."""
+    for spoken in ('παντόφλα', 'παντόφλες', 'την παντόφλα', 'ΠΑΝΤΟΦΛΑ'):
+        assert to_prompt(spoken) == 'slipper', spoken
+
+
+def test_footwear_always_routes_to_the_open_vocabulary_detector():
+    """The guard that makes the difference: if any of these were mistaken for
+    COCO classes, pick would wait forever on a detector that never emits them."""
+    for prompt in ('slipper', 'shoe', 'shoes'):
+        assert prompt not in COCO_NAMES, prompt
+        assert needs_open_vocab(prompt), prompt
+
+
+def test_a_slipper_can_be_spoken_back():
+    assert greek_for('slipper') == 'η παντόφλα'
+    assert greek_accusative('slipper') == 'την παντόφλα'

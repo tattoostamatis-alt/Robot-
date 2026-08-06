@@ -62,6 +62,13 @@ HOUSEHOLD_EL = {
     'μαξιλαρ':      'pillow',
     'κουβερτ':      'blanket',
     'παπουτσ':      'shoes',
+    # ‼️ COCO has NO footwear class at all. 'shoe' sits in object_detector's
+    # CLUTTER_CLASSES but yolo11n-seg can never emit it, so a slipper is only
+    # ever findable through the open-vocabulary detector. Listed here (before
+    # 'παντελον', which shares no stem) because on 2026-08-06 «πιάσε την
+    # παντόφλα» reached the LLM, which guessed the COCO-ish label 'shoe', and
+    # pick died with "δεν βλέπω κάτι να σηκώσω".
+    'παντοφλ':      'slipper',
     'καλτσ':        'socks',
     'ρουχ':         'clothes',
     'τσαντ':        'bag',
@@ -107,6 +114,7 @@ _EN_TO_EL = {
     'pill bottle': 'τα χάπια', 'trash': 'τα σκουπίδια',
     'basket': 'το καλάθι', 'towel': 'η πετσέτα', 'pillow': 'το μαξιλάρι',
     'blanket': 'η κουβέρτα', 'shoes': 'τα παπούτσια', 'socks': 'οι κάλτσες',
+    'slipper': 'η παντόφλα', 'slippers': 'οι παντόφλες', 'shoe': 'το παπούτσι',
     'clothes': 'τα ρούχα', 'bag': 'η τσάντα', 'umbrella': 'η ομπρέλα',
     'box': 'το κουτί', 'plastic bag': 'η σακούλα', 'plate': 'το πιάτο',
     'glass': 'το ποτήρι', 'cup': 'η κούπα', 'bottle': 'το μπουκάλι',

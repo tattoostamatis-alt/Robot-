@@ -99,6 +99,7 @@ class PickPlaceNode(Node):
         self.declare_parameter('arm_speed', 0)             # passed through to T:104 "spd", 0 = firmware default
         self.declare_parameter('movement_settle_time', 2.0)  # s — no completion feedback from arm_driver.py, see module docstring
         self.declare_parameter('tf_timeout', 2.0)
+        self.declare_parameter('max_reach', 0.45)          # m from arm_base — see _run_pick
         # Visual servoing (closed-loop XY refinement while hovering)
         self.declare_parameter('servo_enabled', True)
         self.declare_parameter('servo_tolerance', 0.015)   # m — XY estimate settled → descend
@@ -122,6 +123,7 @@ class PickPlaceNode(Node):
         self.arm_speed = self.get_parameter('arm_speed').value
         self.movement_settle_time = self.get_parameter('movement_settle_time').value
         self.tf_timeout = self.get_parameter('tf_timeout').value
+        self.max_reach = self.get_parameter('max_reach').value
         self.servo_enabled = self.get_parameter('servo_enabled').value
         self.servo_tolerance = self.get_parameter('servo_tolerance').value
         self.servo_max_iters = self.get_parameter('servo_max_iters').value
@@ -141,6 +143,11 @@ class PickPlaceNode(Node):
         self.place_result_pub = self.create_publisher(String, 'place_result', 10)
 
         self._latest_objects = None
+        # Open-vocabulary hits are kept SEPARATE from the COCO ones, not merged
+        # into _latest_objects: they arrive on their own topic at their own
+        # (much slower) rate, and _servo/_relock must be able to re-read them
+        # without a COCO frame overwriting the list in between.
+        self._latest_open_vocab = None
         self._busy = threading.Lock()
         # A pick is ~10 s of blocking arm moves with no way to interrupt it.
         # Cancellation here is deliberately CONSERVATIVE: it stops before
@@ -151,6 +158,14 @@ class PickPlaceNode(Node):
         self._cancel = threading.Event()
 
         self.create_subscription(String, 'detected_objects', self._on_detected_objects, 10)
+        # ‼️ Without this the arm could only ever grasp the 80 COCO classes, and
+        # anything the user names outside them ("η παντόφλα") died at
+        # _select_target with «δεν βλέπω κάτι να σηκώσω» — the failure observed
+        # on 2026-08-06. open_vocab_detector publishes the SAME schema
+        # (label/x/y/z in the camera optical frame), so the rest of the pipeline
+        # needs no changes.
+        self.create_subscription(String, 'open_vocab_detections',
+                                 self._on_open_vocab_detections, 10)
         self.create_subscription(String, 'pick_command', self._on_pick_command, 10)
         # Release a held object (used by the fetch mission after carrying it to
         # the user). JSON {} → drop at the default drop pose, or {"x","y","z"}.
@@ -162,6 +177,12 @@ class PickPlaceNode(Node):
     def _on_detected_objects(self, msg: String):
         try:
             self._latest_objects = json.loads(msg.data)
+        except json.JSONDecodeError:
+            pass
+
+    def _on_open_vocab_detections(self, msg: String):
+        try:
+            self._latest_open_vocab = json.loads(msg.data)
         except json.JSONDecodeError:
             pass
 
@@ -228,13 +249,40 @@ class PickPlaceNode(Node):
         if self._cancel.is_set():
             raise _Cancelled()
 
+    def _graspable(self, objects):
+        """Detections with a real 3D position — the only ones the arm can use.
+
+        open_vocab_detector reports x/y/z as None when depth was missing for
+        that box (see its _locate docstring), and object_detector can do the
+        same. Those would sail into _transform_to_arm_frame and fail there, or
+        worse, be read as a point at the camera origin.
+        """
+        return [o for o in (objects or [])
+                if o.get('x') is not None and o.get('y') is not None
+                and o.get('z') is not None]
+
     def _select_target(self, label):
-        if not self._latest_objects:
-            return None
-        candidates = [o for o in self._latest_objects if o.get('clutter')]
+        coco = self._graspable(self._latest_objects)
+        open_vocab = self._graspable(self._latest_open_vocab)
+
+        # An explicitly named target is matched across BOTH detectors, and a
+        # miss is now reported as a miss. It used to fall back to "any clutter
+        # object", which meant «πιάσε την παντόφλα» could have the robot
+        # confidently pick up an unrelated cup — worse than admitting it cannot
+        # see the thing. The no-label case ({} = "whatever clutter", used by
+        # sort/tidy) keeps the old behaviour.
         if label:
-            candidates = [o for o in candidates if o.get('label') == label] or candidates
-        return candidates[0] if candidates else None
+            named = [o for o in coco + open_vocab if o.get('label') == label]
+            # ‼️ Most-confident, not first-seen. Live run 2026-08-06: asked for
+            # a slipper, the open-vocabulary detector returned the real one at
+            # 0.90 m (conf 0.33) AND four phantoms on a far wall at ~3 m (conf
+            # 0.07-0.23). Taking whatever came first would send the arm at a
+            # wall three metres away. Low-confidence open-vocab hits are normal
+            # — the ranking is what makes them harmless.
+            return max(named, key=lambda o: o.get('conf', 0.0)) if named else None
+
+        clutter = [o for o in coco if o.get('clutter')]
+        return max(clutter, key=lambda o: o.get('conf', 0.0)) if clutter else None
 
     def _run_pick(self, label, hold=False):
         target = self._select_target(label)
@@ -251,6 +299,24 @@ class PickPlaceNode(Node):
         ax, ay, az = arm_point
         az += self.grasp_z_offset
         hover_z = az + self.approach_height
+
+        # ‼️ Refuse what the arm physically cannot touch, BEFORE announcing the
+        # pick. Without this the node answered «Πάω να σηκώσω: slipper» for a
+        # detection three metres away, sent T:104 at an unreachable point and
+        # left the user watching a motionless arm — the same "says it acted,
+        # did not act" failure that made «πιάσε την παντόφλα» so confusing on
+        # 2026-08-06. The reported reach of the RoArm-M3 is ~0.51 m from the
+        # base; max_reach stays under it because that figure is for a straight
+        # arm with nothing in the gripper.
+        distance = math.sqrt(ax * ax + ay * ay + az * az)
+        if distance > self.max_reach:
+            self._say(f'Το βλέπω, αλλά είναι πολύ μακριά για τον βραχίονα '
+                      f'— {distance:.1f} μέτρα. Πρέπει να πλησιάσω πρώτα.')
+            self.get_logger().warn(
+                f'Target "{target["label"]}" at {distance:.2f} m exceeds '
+                f'max_reach {self.max_reach:.2f} m — not moving the arm')
+            self._publish_result('error', f'out of reach ({distance:.2f} m)')
+            return
 
         self._say(f'Πάω να σηκώσω: {target["label"]}.')
         self.get_logger().info(
@@ -362,7 +428,11 @@ class PickPlaceNode(Node):
         of the one nearest the current estimate (so we track the *same* object,
         not jump to another). None if none within servo_relock_radius."""
         best, best_d = None, self.servo_relock_radius
-        for o in (self._latest_objects or []):
+        # Both detectors, same as _select_target — an open-vocab target that
+        # could be selected must also be re-lockable, or servoing silently
+        # degrades to open loop for exactly the objects that need it most.
+        for o in (self._graspable(self._latest_objects)
+                  + self._graspable(self._latest_open_vocab)):
             if o.get('label') != label:
                 continue
             p = self._transform_to_arm_frame(o['x'], o['y'], o['z'])

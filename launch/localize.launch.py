@@ -118,6 +118,14 @@ def _launch_setup(context, *args, **kwargs):
             'use_prediction':      perc,      # /predicted_obstacles costmap layer
             'use_semantic_costmap': perc,     # /semantic_obstacles costmap layer
             'use_object_memory':   perc,      # remembers where objects are (map frame)
+            # ‼️ Same omission as use_pose/use_situational below: declared in
+            # bringup, defaulting false, and never forwarded here — so no
+            # `robot max` could start it. That is why «πιάσε την παντόφλα»
+            # failed on 2026-08-06: the arm can only grasp what a detector
+            # publishes, object_detector publishes the COCO 80, and a slipper
+            # is not one of them. Defaults to `perc` (shares the camera and the
+            # iGPU) but the node idles until a tool asks for a non-COCO word.
+            'use_open_vocab':      LaunchConfiguration('use_open_vocab'),
             # ‼️ Skeleton tracking was UNREACHABLE from `robot max`: use_pose is
             # declared in bringup and defaults false, and this file never
             # forwarded it — the exact shape of the use_situational bug below.
@@ -378,6 +386,13 @@ def generate_launch_description():
             description="YOLO11n-pose on the iGPU: 17 COCO keypoints per person, "
                         "drawn as a skeleton on the dashboard's camera tab. "
                         "'auto' follows use_perception; true/false to force."),
+        DeclareLaunchArgument(
+            'use_open_vocab', default_value='false',
+            description='Bring up the YOLO-World + CLIP detector so `pick`, '
+                        '`fetch` and `find` can target things outside the COCO '
+                        '80 (a slipper, a charger, keys). Loads its own weights '
+                        'but stays idle — and off the iGPU — until a tool names '
+                        'a word COCO does not have.'),
         DeclareLaunchArgument(
             'use_perception', default_value='false',
             description='Bring up the YOLO detector + tracker, the dynamic-obstacle '

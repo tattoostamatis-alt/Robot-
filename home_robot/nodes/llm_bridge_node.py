@@ -53,7 +53,8 @@ from home_robot.motion_confirm import (MOTION_TOOLS, PENDING_TTL,
                                        is_negative)
 from home_robot.stop_command import is_stop_command, strip_accents
 from home_robot.tool_router import select_tools
-from home_robot.vocabulary import greek_for, to_prompt
+from home_robot.vocabulary import (greek_accusative, greek_for,
+                                   needs_open_vocab, to_prompt)
 from home_robot import desktop
 from nav2_msgs.action import NavigateToPose
 from rclpy.action import ActionClient
@@ -259,7 +260,13 @@ TOOLS = [
         'name': 'pick',
         'description': 'Πιάσε ένα ορατό αντικείμενο με τον βραχίονα και άφησέ το στο σημείο εναπόθεσης',
         'parameters': {'type': 'object', 'properties': {
-            'object': {'type': 'string', 'description': 'αγγλικό COCO label, π.χ. cup, bottle, book'},
+            # ‼️ NOT "COCO label" any more. That instruction made the model
+            # answer «παντόφλα» with the nearest COCO-ish word it could think of
+            # — 'shoe', which is not a COCO class either, so the pick was
+            # unsatisfiable from the start. pick now routes anything outside the
+            # 80 through the open-vocabulary detector, so the honest instruction
+            # is "name the thing in English".
+            'object': {'type': 'string', 'description': 'αγγλικά, π.χ. cup, book, slipper'},
         }, 'required': ['object']},
     }},
     {'type': 'function', 'function': {
@@ -501,6 +508,20 @@ class LLMBridgeNode(Node):
         self.declare_parameter('find_timeout', 8.0)
         self.find_timeout = self.get_parameter('find_timeout').value
 
+        # `pick` used to be fire-and-forget, so the model was free to answer
+        # «Απλώνομαι για να πιάσω την παντόφλα» while pick_place_node had
+        # already given up 9 ms earlier — on 2026-08-06 the user heard the
+        # refusal AND the confident lie, the lie last. We now wait just long
+        # enough to catch the fast rejections (no matching detection, TF
+        # failure, busy), which pick_place_node emits immediately. A pick that
+        # is genuinely under way takes ~10 s of arm moves and reports later; we
+        # do NOT wait for that, we just stop claiming success we cannot see.
+        self._pick_lock = threading.Lock()
+        self._pick_event = threading.Event()
+        self._pick_result = None
+        self.declare_parameter('pick_reject_window', 2.5)
+        self.pick_reject_window = self.get_parameter('pick_reject_window').value
+
         # Camera frame — encoded to JPEG once on arrival, reused per message
         self._bridge = CvBridge()
         self._frame_lock = threading.Lock()
@@ -531,6 +552,7 @@ class LLMBridgeNode(Node):
                                  self._cb_episodic_answer, 10)
         self.create_subscription(String, '/vocab/state',
                                  self._cb_vocab_state, 10)
+        self.create_subscription(String, 'pick_result', self._cb_pick_result, 10)
         self.create_subscription(String, 'situation_context', self._on_situation, 10)
         self.create_subscription(Image, '/camera/camera/color/image_raw', self._on_image, 1)
 
@@ -705,6 +727,77 @@ class LLMBridgeNode(Node):
                 'found': True, 'greek': greek_for(prompt),
                 'confidence': best.get('conf'),
                 'distance_m': best.get('z')}
+
+    def _cb_pick_result(self, msg):
+        try:
+            result = json.loads(msg.data) or {}
+        except (json.JSONDecodeError, TypeError):
+            return
+        with self._pick_lock:
+            self._pick_result = result
+        self._pick_event.set()
+
+    def _prepare_open_vocab_target(self, prompt):
+        """Point the open-vocabulary detector at `prompt` and confirm it sees it.
+
+        pick_place_node can only grasp what is in a detections message. For the
+        80 COCO classes object_detector supplies that continuously; for anything
+        else — a slipper, a charger — nothing is published until the
+        open-vocabulary detector is told what to hunt for. So `pick` has to ask
+        for it and wait for a hit BEFORE commanding the arm, otherwise the node
+        looks for a label nobody is producing and reports «δεν βλέπω κάτι να
+        σηκώσω» however plainly the object is sitting there.
+
+        Returns None on success, or an error dict ready to hand back to the LLM.
+        """
+        with self._vocab_lock:
+            self._vocab_baseline = self._vocab_inferences
+            self._vocab_hits = None
+        self._vocab_event.clear()
+        self.vocab_pub.publish(String(data=json.dumps([prompt])))
+
+        if not self._vocab_event.wait(timeout=self.find_timeout):
+            return {'status': 'error', 'action': 'pick',
+                    'reason': 'ο ανιχνευτής ανοιχτού λεξιλογίου δεν απάντησε — '
+                              'τρέχει με use_open_vocab:=true;'}
+        if not (self._vocab_hits or []):
+            return {'status': 'ok', 'action': 'pick', 'found': False,
+                    'reason': f'δεν βλέπω {greek_for(prompt)} μπροστά μου'}
+        return None
+
+    def _pick_object(self, name):
+        """`pick`, routed through whichever detector can actually see `name`."""
+        prompt = to_prompt(name)
+        if prompt is None:
+            return {'status': 'error', 'action': 'pick', 'object': name,
+                    'reason': f'δεν ξέρω τι είναι «{name}»'}
+
+        if needs_open_vocab(prompt):
+            failure = self._prepare_open_vocab_target(prompt)
+            if failure is not None:
+                failure['object'] = name
+                return failure
+            label = prompt
+        else:
+            # object_detector emits COCO labels with underscores ('cell_phone'),
+            # while to_prompt speaks them with spaces.
+            label = prompt.replace(' ', '_')
+
+        with self._pick_lock:
+            self._pick_result = None
+        self._pick_event.clear()
+        self.pick_pub.publish(String(data=json.dumps({'label': label})))
+
+        # Only a rejection arrives this fast; a real grasp is still moving.
+        if self._pick_event.wait(timeout=self.pick_reject_window):
+            with self._pick_lock:
+                result = self._pick_result or {}
+            if result.get('status') not in ('ok', 'started'):
+                return {'status': 'error', 'action': 'pick', 'object': name,
+                        'reason': result.get('detail') or result.get('status')
+                        or 'ο βραχίονας δεν μπόρεσε να το πιάσει'}
+        return {'status': 'started', 'action': 'pick', 'object': name,
+                'greek': greek_accusative(prompt)}
 
     def _cb_vocab_state(self, msg):
         try:
@@ -1582,8 +1675,7 @@ class LLMBridgeNode(Node):
             obj = (args.get('object') or '').strip().lower()
             if not obj:
                 return {'status': 'error', 'reason': 'no object specified'}
-            self.pick_pub.publish(String(data=json.dumps({'label': obj})))
-            return {'status': 'started', 'action': 'pick', 'object': obj}
+            return self._pick_object(obj)
 
         elif name == 'fetch':
             obj = (args.get('object') or '').strip().lower()
