@@ -288,7 +288,7 @@ class PickPlaceNode(Node):
         target = self._select_target(label)
         if target is None:
             self._say('Δεν βλέπω κάτι να σηκώσω αυτή τη στιγμή.')
-            self._publish_result('error', 'no matching object in detected_objects')
+            self._publish_result('error', 'δεν βλέπω τέτοιο αντικείμενο μπροστά μου')
             return
 
         arm_point = self._transform_to_arm_frame(target['x'], target['y'], target['z'])
@@ -315,7 +315,15 @@ class PickPlaceNode(Node):
             self.get_logger().warn(
                 f'Target "{target["label"]}" at {distance:.2f} m exceeds '
                 f'max_reach {self.max_reach:.2f} m — not moving the arm')
-            self._publish_result('error', f'out of reach ({distance:.2f} m)')
+            # ‼️ Greek, because this string is handed to the LLM as the reason
+            # the tool failed and it answers the user from it. With the English
+            # 'out of reach (0.88 m)' the model said «Δεν ξέρω γιατί απέτυχα» —
+            # it had the reason and did not use it.
+            self._publish_result(
+                'error',
+                f'το αντικείμενο είναι {distance:.2f} μέτρα μακριά, πιο πέρα '
+                f'από όσο φτάνει ο βραχίονας ({self.max_reach:.2f} m) — '
+                f'πρέπει να πλησιάσεις πρώτα')
             return
 
         self._say(f'Πάω να σηκώσω: {target["label"]}.')
