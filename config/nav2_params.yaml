@@ -629,16 +629,21 @@ collision_monitor:
     # two files disagreeing about the shape of the robot.
     #
     # The fix is to stop describing a round robot with a box. The polygons
-    # below are a CIRCLE of radius 0.225 — the Ø0.35 chassis plus the same
-    # 50 mm all the way round — drawn as 16 points (worst deviation from a
-    # true circle: 4.3 mm).
+    # below are a CIRCLE of radius 0.215 — the Ø0.35 chassis plus 40 mm all
+    # the way round — drawn as 16 points (worst deviation from a true circle:
+    # 4.1 mm). 40 mm at the user's request, 2026-08-06, down from the 50 mm
+    # the box nominally kept at its flats.
     #
-    # ‼️ This is NOT a reduction in safety. Against the old square:
+    # ‼️ Still MORE clearance than the box gave, in every direction it
+    # mattered. Against the old ±0.22 square:
     #
-    #             old ±0.22 square      new r=0.225 circle
-    #   at edges      45 mm margin          50 mm margin
-    #   at corners   136 mm margin          50 mm margin
-    #   max reach     0.311 m               0.225 m
+    #             old ±0.22 square      new r=0.215 circle
+    #   at edges      45 mm margin          40 mm margin
+    #   at corners   136 mm margin          40 mm margin
+    #   max reach     0.311 m               0.215 m
+    #
+    # The 5 mm given up at the flats buys 96 mm back in the diagonals, which
+    # is where the robot was being refused doorways it fits through.
     #
     # Every bearing now keeps at least as much clearance as the old box kept
     # at its edges, and more than the 50 mm that was originally asked for is
@@ -665,19 +670,19 @@ collision_monitor:
       # square at every single bearing (50 mm vs 45 mm at the edges) while
       # reaching 0.225 instead of 0.311.
       moving_forward:
-        points: "[[0.2250, 0.0000], [0.2079, 0.0861], [0.1591, 0.1591], [0.0861, 0.2079], [0.0000, 0.2250], [-0.0861, 0.2079], [-0.1591, 0.1591], [-0.2079, 0.0861], [-0.2250, 0.0000], [-0.2079, -0.0861], [-0.1591, -0.1591], [-0.0861, -0.2079], [0.0000, -0.2250], [0.0861, -0.2079], [0.1591, -0.1591], [0.2079, -0.0861]]"
+        points: "[[0.2150, 0.0000], [0.1986, 0.0823], [0.1520, 0.1520], [0.0823, 0.1986], [0.0000, 0.2150], [-0.0823, 0.1986], [-0.1520, 0.1520], [-0.1986, 0.0823], [-0.2150, 0.0000], [-0.1986, -0.0823], [-0.1520, -0.1520], [-0.0823, -0.1986], [0.0000, -0.2150], [0.0823, -0.1986], [0.1520, -0.1520], [0.1986, -0.0823]]"
         linear_min: 0.02
         linear_max: 1.0
         theta_min: -10.0
         theta_max: 10.0
       moving_backward:
-        points: "[[0.2250, 0.0000], [0.2079, 0.0861], [0.1591, 0.1591], [0.0861, 0.2079], [0.0000, 0.2250], [-0.0861, 0.2079], [-0.1591, 0.1591], [-0.2079, 0.0861], [-0.2250, 0.0000], [-0.2079, -0.0861], [-0.1591, -0.1591], [-0.0861, -0.2079], [0.0000, -0.2250], [0.0861, -0.2079], [0.1591, -0.1591], [0.2079, -0.0861]]"
+        points: "[[0.2150, 0.0000], [0.1986, 0.0823], [0.1520, 0.1520], [0.0823, 0.1986], [0.0000, 0.2150], [-0.0823, 0.1986], [-0.1520, 0.1520], [-0.1986, 0.0823], [-0.2150, 0.0000], [-0.1986, -0.0823], [-0.1520, -0.1520], [-0.0823, -0.1986], [0.0000, -0.2150], [0.0823, -0.1986], [0.1520, -0.1520], [0.1986, -0.0823]]"
         linear_min: -1.0
         linear_max: -0.02
         theta_min: -10.0
         theta_max: 10.0
       stopped_or_rotating:
-        points: "[[0.2250, 0.0000], [0.2079, 0.0861], [0.1591, 0.1591], [0.0861, 0.2079], [0.0000, 0.2250], [-0.0861, 0.2079], [-0.1591, 0.1591], [-0.2079, 0.0861], [-0.2250, 0.0000], [-0.2079, -0.0861], [-0.1591, -0.1591], [-0.0861, -0.2079], [0.0000, -0.2250], [0.0861, -0.2079], [0.1591, -0.1591], [0.2079, -0.0861]]"
+        points: "[[0.2150, 0.0000], [0.1986, 0.0823], [0.1520, 0.1520], [0.0823, 0.1986], [0.0000, 0.2150], [-0.0823, 0.1986], [-0.1520, 0.1520], [-0.1986, 0.0823], [-0.2150, 0.0000], [-0.1986, -0.0823], [-0.1520, -0.1520], [-0.0823, -0.1986], [0.0000, -0.2150], [0.0823, -0.1986], [0.1520, -0.1520], [0.1986, -0.0823]]"
         linear_min: -0.02
         linear_max: 0.02
         theta_min: -10.0

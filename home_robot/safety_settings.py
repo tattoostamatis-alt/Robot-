@@ -26,11 +26,19 @@ That rules out two clearances on purpose, and they are documented in
 INFO_ONLY so the dashboard can still show them rather than pretend the ones it
 does show are the whole story:
 
-  * collision_monitor's Stop polygon (the hard 50 mm skirt), and
+  * collision_monitor's Stop polygon (the hard 40 mm skirt), and
   * FootprintApproach's time_before_collision.
 
 Nav2 reads polygon parameters once, in on_configure, so writing them at runtime
 succeeds and changes nothing. They stay in nav2_params.yaml.
+
+‼️ This one gets asked about: the skirt is NOT adjustable from the web, even
+though the Safety tab displays it. It is shown so the page tells the whole
+truth about the robot's clearances, not because it can be moved. Changing it
+means editing nav2_params.yaml and relaunching — and since the polygon is a
+circle now, the four numbers per point have to be regenerated, not nudged.
+What the tab CAN change live, and what people usually mean when they ask, is
+`inflation_radius`: how much room the planner leaves around walls.
 
 ## The trap this file exists to keep visible
 
@@ -123,11 +131,13 @@ BY_KEY = {s.key: s for s in SPECS}
 # `value` is what nav2_params.yaml actually says, so the panel is not quoting a
 # number from memory; the tests check it against the file.
 INFO_ONLY = (
-    # 2026-08-06: the Stop zone became a circle (r=0.225, i.e. the Ø0.35
-    # chassis + 50 mm all round) instead of a ±0.22 box whose corners reached
-    # 0.311. This value is that radius — now the clearance in EVERY direction,
-    # not just at the flat of a box.
-    {'key': 'stop_skirt', 'value': 0.225, 'unit': 'm',
+    # 2026-08-06: the Stop zone became a circle instead of a ±0.22 box whose
+    # corners reached 0.311. r=0.215 is the Ø0.35 chassis + 40 mm, and unlike
+    # the box that 40 mm is the clearance in EVERY direction, not just at the
+    # flats. ‼️ Read-only here on purpose — see the module docstring: Nav2
+    # reads polygon parameters once in on_configure, so a slider for this
+    # would report success and change nothing until the next launch.
+    {'key': 'stop_skirt', 'value': 0.215, 'unit': 'm',
      'source': 'collision_monitor / Stop'},
     {'key': 'time_before_collision', 'value': 0.9, 'unit': 's',
      'source': 'collision_monitor / FootprintApproach'},

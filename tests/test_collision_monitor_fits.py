@@ -78,7 +78,15 @@ def test_costmap_radius_matches_the_measured_chassis():
 
 
 CHASSIS_R = 0.175
-STOP_MARGIN = 0.050        # the margin that was asked for, all round
+# The nominal skirt radius comes from safety_settings, which is what the
+# dashboard's Safety tab displays. Reading it here means the tab and the YAML
+# cannot drift apart: change one without the other and this file fails.
+import home_robot.safety_settings as _ss           # noqa: E402
+SKIRT_R = _ss.INFO_ONLY[0]['value']                # 0.215 = chassis + 40 mm
+STOP_MARGIN = SKIRT_R - CHASSIS_R
+# A 16-point polygon inscribes its circle: the edge midpoints fall ~4.1 mm
+# short of the radius. Allow that, and nothing more.
+POLY_SLACK = 0.006
 
 
 def _min_reach(pts):
@@ -107,20 +115,21 @@ def test_every_bearing_keeps_the_full_stop_margin():
     First attempt at this fix cut the corners off but also pulled the sides in
     to ±0.175 — exactly the chassis, i.e. ZERO margin sideways. The monitor
     would not have stopped for anything beside the robot until it was already
-    touching. The margin is 50 mm and it is 50 mm in every direction, which is
-    what a round robot needs and what the box only ever delivered diagonally.
+    touching. The margin is whatever the Safety tab says it is (40 mm since
+    2026-08-06) and it is that in EVERY direction, which is what a round robot
+    needs and what the box only ever delivered diagonally.
     """
-    want = CHASSIS_R + STOP_MARGIN
+    floor = SKIRT_R - POLY_SLACK
     for name in SUBPOLYGONS:
         closest = _min_reach(_points(name))
         margin_mm = (closest - CHASSIS_R) * 1000
-        assert margin_mm >= 45.0, (
+        assert closest >= floor, (
             f'{name} comes within {closest:.4f} m of centre — only '
             f'{margin_mm:.0f} mm clear of the Ø0.35 chassis, against the '
             f'{STOP_MARGIN * 1000:.0f} mm this polygon exists to keep')
-        assert closest <= want + 0.005, (
-            f'{name} keeps {margin_mm:.0f} mm, more than asked — that is how '
-            f'doorways get refused')
+        assert _max_reach(_points(name)) <= SKIRT_R + 1e-6, (
+            f'{name} reaches past the {SKIRT_R} m skirt the Safety tab '
+            f'reports — the page would be lying about the robot')
 
 
 def test_the_zone_is_round_not_boxy():
