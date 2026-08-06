@@ -756,14 +756,48 @@ class LLMBridgeNode(Node):
         self._vocab_event.clear()
         self.vocab_pub.publish(String(data=json.dumps([prompt])))
 
-        if not self._vocab_event.wait(timeout=self.find_timeout):
+        # ‼️ Keep looking until the deadline instead of settling for the first
+        # state message. `find` can settle, because "δεν το βλέπω" is a valid
+        # answer to a question. `pick` is an ACTION, and one empty frame is not
+        # a reason to refuse it — measured 2026-08-06: this returned hits=0
+        # after 128 ms while the slipper was being detected continuously at
+        # conf 0.25-0.33. Two ways that happens, both real:
+        #   * open_vocab_detector publishes its state on set_classes too, with
+        #     hits cleared. When the detector was ALREADY running (an earlier
+        #     find, or a previous pick), its inference count is past our
+        #     baseline the moment we look, so that empty publish satisfies the
+        #     "an inference ran after my request" test without a frame having
+        #     been examined for us.
+        #   * open-vocab confidences hover near the threshold, so any single
+        #     frame can legitimately come back empty.
+        # Re-arming the baseline on each pass makes every subsequent message a
+        # fresh inference, so this waits for frames rather than for messages.
+        deadline = time.monotonic() + self.find_timeout
+        answered = False
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if not self._vocab_event.wait(timeout=remaining):
+                break
+            answered = True
+            with self._vocab_lock:
+                hits = self._vocab_hits or []
+                self._vocab_baseline = self._vocab_inferences
+                self._vocab_hits = None
+            self._vocab_event.clear()
+            if hits:
+                return None
+
+        self.get_logger().info(
+            f'open-vocab prepare({prompt}): answered={answered}, no hits '
+            f'within {self.find_timeout:.0f}s')
+        if not answered:
             return {'status': 'error', 'action': 'pick',
                     'reason': 'ο ανιχνευτής ανοιχτού λεξιλογίου δεν απάντησε — '
                               'τρέχει με use_open_vocab:=true;'}
-        if not (self._vocab_hits or []):
-            return {'status': 'ok', 'action': 'pick', 'found': False,
-                    'reason': f'δεν βλέπω {greek_for(prompt)} μπροστά μου'}
-        return None
+        return {'status': 'ok', 'action': 'pick', 'found': False,
+                'reason': f'δεν βλέπω {greek_for(prompt)} μπροστά μου'}
 
     def _pick_object(self, name):
         """`pick`, routed through whichever detector can actually see `name`."""
@@ -804,9 +838,11 @@ class LLMBridgeNode(Node):
             with self._pick_lock:
                 result = self._pick_result or {}
             if result.get('status') not in ('ok', 'started'):
+                reason = (result.get('detail') or result.get('status')
+                          or 'ο βραχίονας δεν μπόρεσε να το πιάσει')
+                self.get_logger().info(f'pick({label}) refused: {reason}')
                 return {'status': 'error', 'action': 'pick', 'object': name,
-                        'reason': result.get('detail') or result.get('status')
-                        or 'ο βραχίονας δεν μπόρεσε να το πιάσει'}
+                        'reason': reason}
         return {'status': 'started', 'action': 'pick', 'object': name,
                 'greek': greek_accusative(prompt)}
 
