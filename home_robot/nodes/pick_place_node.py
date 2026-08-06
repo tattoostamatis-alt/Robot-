@@ -79,6 +79,10 @@ from home_robot.stop_command import is_stop_command
 
 CAMERA_FRAME = 'camera_color_optical_frame'
 ARM_FRAME = 'arm_base'
+# Where sightings are pinned. `odom` and not `map`: it is continuous and always
+# available, and a grasp only cares about the last few metres of driving, which
+# is exactly the span odom is trusted over.
+ODOM_FRAME = 'odom'
 
 
 class _Cancelled(Exception):
@@ -100,6 +104,8 @@ class PickPlaceNode(Node):
         self.declare_parameter('movement_settle_time', 2.0)  # s — no completion feedback from arm_driver.py, see module docstring
         self.declare_parameter('tf_timeout', 2.0)
         self.declare_parameter('max_reach', 0.45)          # m from arm_base — see _run_pick
+        self.declare_parameter('open_vocab_hold', 3.0)     # s — ride out flickering open-vocab frames
+        self.declare_parameter('pin_ttl', 30.0)            # s — how long a lost sighting stays usable
         # Visual servoing (closed-loop XY refinement while hovering)
         self.declare_parameter('servo_enabled', True)
         self.declare_parameter('servo_tolerance', 0.015)   # m — XY estimate settled → descend
@@ -124,6 +130,10 @@ class PickPlaceNode(Node):
         self.movement_settle_time = self.get_parameter('movement_settle_time').value
         self.tf_timeout = self.get_parameter('tf_timeout').value
         self.max_reach = self.get_parameter('max_reach').value
+        self.open_vocab_hold = self.get_parameter('open_vocab_hold').value
+        self.pin_ttl = self.get_parameter('pin_ttl').value
+        # label -> ((x, y, z) in odom, monotonic stamp of the sighting)
+        self._pinned = {}
         self.servo_enabled = self.get_parameter('servo_enabled').value
         self.servo_tolerance = self.get_parameter('servo_tolerance').value
         self.servo_max_iters = self.get_parameter('servo_max_iters').value
@@ -148,6 +158,7 @@ class PickPlaceNode(Node):
         # (much slower) rate, and _servo/_relock must be able to re-read them
         # without a COCO frame overwriting the list in between.
         self._latest_open_vocab = None
+        self._open_vocab_stamp = 0.0      # monotonic time of the last non-empty frame
         self._busy = threading.Lock()
         # A pick is ~10 s of blocking arm moves with no way to interrupt it.
         # Cancellation here is deliberately CONSERVATIVE: it stops before
@@ -181,10 +192,30 @@ class PickPlaceNode(Node):
             pass
 
     def _on_open_vocab_detections(self, msg: String):
+        """Latest open-vocabulary hits, with an empty frame held off briefly.
+
+        ‼️ These detections flicker. Confidences sit near the threshold (a
+        slipper on the floor measured 0.25-0.33), so the detector emits an
+        empty list every few frames for an object that is plainly there and
+        being reported the rest of the time. Overwriting on every message meant
+        a pick that arrived during one of those gaps answered «δεν βλέπω κάτι
+        να σηκώσω» — seen on 2026-08-06 immediately after a successful approach
+        drive, which made the approach itself look broken when it had worked.
+
+        So an empty frame does not erase a recent non-empty one; it only takes
+        effect once the last real sighting is `open_vocab_hold` seconds old,
+        which is what stops a genuinely removed object from lingering forever.
+        """
         try:
-            self._latest_open_vocab = json.loads(msg.data)
+            objects = json.loads(msg.data)
         except json.JSONDecodeError:
-            pass
+            return
+        now = time.monotonic()
+        if objects:
+            self._latest_open_vocab = objects
+            self._open_vocab_stamp = now
+        elif now - self._open_vocab_stamp > self.open_vocab_hold:
+            self._latest_open_vocab = []
 
     def _on_speech_text(self, msg: String):
         if is_stop_command(msg.data) and self._busy.locked():
@@ -286,15 +317,23 @@ class PickPlaceNode(Node):
 
     def _run_pick(self, label, hold=False):
         target = self._select_target(label)
-        if target is None:
-            self._say('Δεν βλέπω κάτι να σηκώσω αυτή τη στιγμή.')
-            self._publish_result('error', 'δεν βλέπω τέτοιο αντικείμενο μπροστά μου')
-            return
-
-        arm_point = self._transform_to_arm_frame(target['x'], target['y'], target['z'])
-        if arm_point is None:
-            self._publish_result('error', f'TF lookup {CAMERA_FRAME} -> {ARM_FRAME} failed (is tf_base_arm running?)')
-            return
+        if target is not None:
+            self._remember_target(label, target)
+            arm_point = self._transform_to_arm_frame(
+                target['x'], target['y'], target['z'])
+            if arm_point is None:
+                self._publish_result('error', f'TF lookup {CAMERA_FRAME} -> {ARM_FRAME} failed (is tf_base_arm running?)')
+                return
+        else:
+            # Out of view. For a floor object that is the NORMAL state once the
+            # robot is close enough to grasp it, so fall back to the pinned
+            # sighting rather than refusing — see _remember_target.
+            arm_point = self._recall_arm_point(label) if label else None
+            if arm_point is None:
+                self._say('Δεν βλέπω κάτι να σηκώσω αυτή τη στιγμή.')
+                self._publish_result('error', 'δεν βλέπω τέτοιο αντικείμενο μπροστά μου')
+                return
+            target = {'label': label}
 
         ax, ay, az = arm_point
         az += self.grasp_z_offset
@@ -320,10 +359,11 @@ class PickPlaceNode(Node):
             # 'out of reach (0.88 m)' the model said «Δεν ξέρω γιατί απέτυχα» —
             # it had the reason and did not use it.
             self._publish_result(
-                'error',
+                'out_of_reach',
                 f'το αντικείμενο είναι {distance:.2f} μέτρα μακριά, πιο πέρα '
                 f'από όσο φτάνει ο βραχίονας ({self.max_reach:.2f} m) — '
-                f'πρέπει να πλησιάσεις πρώτα')
+                f'πρέπει να πλησιάσεις πρώτα',
+                distance=round(distance, 3), max_reach=self.max_reach)
             return
 
         self._say(f'Πάω να σηκώσω: {target["label"]}.')
@@ -452,19 +492,55 @@ class PickPlaceNode(Node):
         return best
 
     def _transform_to_arm_frame(self, x, y, z):
+        return self._transform(x, y, z, CAMERA_FRAME, ARM_FRAME)
+
+    def _transform(self, x, y, z, src, dst):
         point = PointStamped()
-        point.header.frame_id = CAMERA_FRAME
+        point.header.frame_id = src
         point.header.stamp = rclpy.time.Time().to_msg()  # latest available transform
         point.point.x, point.point.y, point.point.z = x, y, z
         try:
             transform = self.tf_buffer.lookup_transform(
-                ARM_FRAME, CAMERA_FRAME, rclpy.time.Time(),
+                dst, src, rclpy.time.Time(),
                 timeout=rclpy.duration.Duration(seconds=self.tf_timeout))
         except tf2_ros.TransformException as e:
-            self.get_logger().error(f'TF lookup failed: {e}')
+            self.get_logger().error(f'TF lookup {src} -> {dst} failed: {e}')
             return None
         out = do_transform_point(point, transform)
         return out.point.x, out.point.y, out.point.z
+
+    def _remember_target(self, label, target):
+        """Pin a sighting to `odom`, which does not move when the robot does.
+
+        ‼️ This is what makes approaching a floor object possible at all. The
+        D435 is body-mounted and looks FORWARD, so something on the floor
+        leaves the bottom of the frame as the robot closes in — measured
+        2026-08-06, a slipper tracked cleanly at 1.17 m, 0.97 m and 0.70 m and
+        then vanished, at exactly the point where it was finally near enough to
+        grasp. Detections are in the camera frame, so they are worthless the
+        moment the robot moves; in `odom` the sighting stays put and TF does
+        the arithmetic. Losing sight of the target is then normal and expected,
+        not a failure.
+        """
+        pinned = self._transform(target['x'], target['y'], target['z'],
+                                 CAMERA_FRAME, ODOM_FRAME)
+        if pinned is not None:
+            self._pinned[label] = (pinned, time.monotonic())
+
+    def _recall_arm_point(self, label):
+        """Arm-frame position of the last sighting, if it is still fresh."""
+        entry = self._pinned.get(label)
+        if entry is None:
+            return None
+        (ox, oy, oz), stamp = entry
+        age = time.monotonic() - stamp
+        if age > self.pin_ttl:
+            return None
+        point = self._transform(ox, oy, oz, ODOM_FRAME, ARM_FRAME)
+        if point is not None:
+            self.get_logger().info(
+                f'"{label}" out of view — using the sighting from {age:.1f}s ago')
+        return point
 
     def _cartesian(self, x, y, z, settle=None, roll=0.0):
         self._raw({'T': 104, 'x': x, 'y': y, 'z': z, 't': 0, 'r': roll, 'spd': self.arm_speed})
@@ -481,8 +557,15 @@ class PickPlaceNode(Node):
         self.get_logger().info(f'Pick-place: {text}')
         self.response_pub.publish(String(data=text))
 
-    def _publish_result(self, status, detail):
-        self.result_pub.publish(String(data=json.dumps({'status': status, 'detail': detail})))
+    def _publish_result(self, status, detail, **extra):
+        """`extra` carries machine-readable fields alongside the spoken detail.
+
+        out-of-reach sends distance/max_reach so the caller can work out how far
+        to drive, instead of parsing metres back out of a Greek sentence.
+        """
+        payload = {'status': status, 'detail': detail}
+        payload.update(extra)
+        self.result_pub.publish(String(data=json.dumps(payload, ensure_ascii=False)))
 
 
 def main():

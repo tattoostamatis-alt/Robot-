@@ -272,13 +272,30 @@ def generate_launch_description():
     # being placed correctly in the map/costmap.
     # NOTE: the camera is NOT rotated like the lidar (lidar has yaw=pi because
     # its connector faces back); the D435 faces forward, so yaw=0 here.
+    #
+    # ‼️ pitch was 0 until 2026-08-06 and that was WRONG: the D435 is tilted
+    # down on its bracket. Measured by fitting a plane to the aligned depth
+    # image of bare floor (scripts/measure_camera_pitch.py): 30.1 deg down, and
+    # the height is 0.586 m rather than the 0.536 taped estimate.
+    #
+    # What that error did: with pitch=0 every detection is projected as if the
+    # optical axis were horizontal, so a thing on the FLOOR comes out ~0.45 m
+    # up in the air, and the further away it is the worse it gets. It is why
+    # «πιάσε την παντόφλα» drove up to the slipper correctly and then closed
+    # the gripper about 35 cm above it — the arm went exactly where it was
+    # told. Everything else consuming camera 3D (object memory positions, the
+    # semantic costmap, distance_to) was reading the same bad numbers, just
+    # less visibly.
+    #
+    # Remeasure after ANY change to the camera bracket, and prefer the plane
+    # fit over a protractor: 5 deg here is ~7 cm of height error at 0.8 m.
     tf_base_camera = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
-        name='tf_base_camera',
-        arguments=['--x', '0.14', '--y', '0.0', '--z', '0.536',
-                   '--roll', '0', '--pitch', '0', '--yaw', '0',
+        arguments=['--x', '0.14', '--y', '0.0', '--z', '0.586',
+                   '--roll', '0', '--pitch', '0.525', '--yaw', '0',
                    '--frame-id', 'base_link', '--child-frame-id', 'camera_link'],
+        name='tf_base_camera',
     )
 
     # ── Static TF: base_link → arm_base ───────────────────────────

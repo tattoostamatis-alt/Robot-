@@ -524,6 +524,29 @@ class LLMBridgeNode(Node):
         self.declare_parameter('pick_reject_window', 2.5)
         self.pick_reject_window = self.get_parameter('pick_reject_window').value
 
+        # Closing the last metre to something the arm can see but not reach.
+        # ‼️ _approach_cancel must be honoured by the drive loop: that loop
+        # publishes Twist at 20 Hz, so without it a spoken «σταμάτα» would have
+        # _emergency_stop's zero Twist overwritten on the very next cycle and
+        # the robot would keep rolling at the user.
+        self._approach_cancel = threading.Event()
+        self.declare_parameter('pick_approach_max', 1.5)      # m — further than this is a `fetch`, not a nudge
+        self.declare_parameter('pick_approach_margin', 0.7)   # fraction of reach to stop short at
+        self.declare_parameter('pick_approach_timeout', 15.0) # s — hard cap on one open-loop drive
+        self.declare_parameter('pick_approach_step', 0.25)    # m — max per nudge, re-measure between
+        self.declare_parameter('pick_approach_tries', 8)      # nudge/re-measure cycles before giving up
+        # ‼️ open_vocab_detector runs every 3rd frame and pick_place_node acts
+        # on the last message it received, so a retry fired too soon is
+        # answered from detections taken before the robot moved — which is how
+        # a successful approach reported «δεν βλέπω τέτοιο αντικείμενο».
+        self.declare_parameter('pick_approach_settle', 2.5)   # s — wait for fresh detections after moving
+        self.pick_approach_max = self.get_parameter('pick_approach_max').value
+        self.pick_approach_margin = self.get_parameter('pick_approach_margin').value
+        self.pick_approach_timeout = self.get_parameter('pick_approach_timeout').value
+        self.pick_approach_step = self.get_parameter('pick_approach_step').value
+        self.pick_approach_tries = self.get_parameter('pick_approach_tries').value
+        self.pick_approach_settle = self.get_parameter('pick_approach_settle').value
+
         # Camera frame — encoded to JPEG once on arrival, reused per message
         self._bridge = CvBridge()
         self._frame_lock = threading.Lock()
@@ -830,23 +853,106 @@ class LLMBridgeNode(Node):
             return {'status': 'error', 'action': 'pick', 'object': name,
                     'reason': 'ο κόμβος του βραχίονα δεν τρέχει (pick_place_node)'}
 
-        with self._pick_lock:
-            self._pick_result = None
-        self._pick_event.clear()
-        self.pick_pub.publish(String(data=json.dumps({'label': label})))
-
-        # Only a rejection arrives this fast; a real grasp is still moving.
-        if self._pick_event.wait(timeout=self.pick_reject_window):
-            with self._pick_lock:
-                result = self._pick_result or {}
-            if result.get('status') not in ('ok', 'started'):
+        # ‼️ Drive up to it rather than refusing. An object on the floor in
+        # front of the robot is typically ~1 m away and the arm reaches 0.45 m,
+        # so "πιάσε την παντόφλα" answered «είναι πολύ μακριά» essentially
+        # always — technically true and useless: the user pointed at a thing
+        # one step away and expected the robot to take that step. `fetch` can
+        # already approach, but it resolves the target through object memory
+        # and the map, which is the wrong machinery for something that is
+        # visible right now. So pick closes the gap itself and retries once.
+        # ‼️ Closed loop, not one corrective step. Measured on hardware: asked
+        # for 0.74 m, the robot covered ~0.30 m — soft_start_accel ramps the
+        # wheels slowly and obstacle_safety trims cmd_vel, so an open-loop
+        # timed drive under-shoots badly and unpredictably. Re-measuring from
+        # the camera after each nudge converges anyway; guessing a fudge factor
+        # for the drive would not.
+        for attempt in range(self.pick_approach_tries):
+            result = self._send_pick(label)
+            if result.get('status') in ('ok', 'started'):
+                break
+            last = attempt == self.pick_approach_tries - 1
+            if result.get('status') != 'out_of_reach' or last:
                 reason = (result.get('detail') or result.get('status')
                           or 'ο βραχίονας δεν μπόρεσε να το πιάσει')
                 self.get_logger().info(f'pick({label}) refused: {reason}')
                 return {'status': 'error', 'action': 'pick', 'object': name,
                         'reason': reason}
+
+            gap = self._approach_gap(result)
+            if gap is None:
+                return {'status': 'error', 'action': 'pick', 'object': name,
+                        'reason': result.get('detail') or 'είναι πολύ μακριά'}
+            if not attempt:            # announce the approach once, not per nudge
+                self.response_pub.publish(
+                    String(data=f'Πλησιάζω {greek_accusative(prompt)}.'))
+            if not self._drive_forward(gap):
+                return {'status': 'error', 'action': 'pick', 'object': name,
+                        'reason': 'με σταμάτησες ενώ πλησίαζα'}
+
         return {'status': 'started', 'action': 'pick', 'object': name,
                 'greek': greek_accusative(prompt)}
+
+    def _send_pick(self, label):
+        """One pick_command round trip. {} when nothing answered in time."""
+        with self._pick_lock:
+            self._pick_result = None
+        self._pick_event.clear()
+        self.pick_pub.publish(String(data=json.dumps({'label': label})))
+
+        # Only a rejection arrives this fast; a real grasp is still moving, so
+        # a timeout here means "under way", not "failed".
+        if not self._pick_event.wait(timeout=self.pick_reject_window):
+            return {'status': 'started'}
+        with self._pick_lock:
+            return self._pick_result or {}
+
+    def _approach_gap(self, result):
+        """How far to drive so the target lands inside the arm's envelope.
+
+        None when the object is further than one approach should cover — at
+        that range it is a `fetch` (navigate, avoid obstacles, re-look), not a
+        nudge, and driving blindly toward something metres away is exactly the
+        kind of open-loop motion this codebase keeps regretting.
+        """
+        distance, reach = result.get('distance'), result.get('max_reach')
+        if not isinstance(distance, (int, float)) or distance > self.pick_approach_max:
+            return None
+        reach = reach if isinstance(reach, (int, float)) else 0.45
+        # Stop short of the reach limit: the drive is open-loop (no odometry
+        # feedback here) and overshooting puts the robot on top of the object.
+        want = max(0.0, distance - reach * self.pick_approach_margin)
+        # ‼️ And never in one go. The camera looks forward, not down, so an
+        # object on the floor leaves the bottom of the frame as the robot gets
+        # close — overshoot is not "slightly too far", it is losing sight of
+        # the target entirely. Live 2026-08-06: one 0.45 m nudge drove past the
+        # slipper, and the next look saw only floor, which read as «δεν βλέπω
+        # τέτοιο αντικείμενο» right after a working approach. Small steps with
+        # a fresh measurement between them cost seconds and cannot overshoot.
+        return min(want, self.pick_approach_step)
+
+    def _drive_forward(self, metres):
+        """Blocking, open-loop nudge forward at the teleop speed.
+
+        Goes out on cmd_vel, which bringup remaps to cmd_vel_safe — so
+        obstacle_safety and collision_monitor can still stop it. Blocking on
+        purpose: the retry pick must not fire while the robot is still rolling.
+        """
+        self._approach_cancel.clear()
+        speed = 0.1                                   # m/s, matches `move`
+        duration = min(metres / speed, self.pick_approach_timeout)
+        self.get_logger().info(f'pick approach: {metres:.2f} m ({duration:.1f} s)')
+        twist = Twist()
+        twist.linear.x = speed
+        end = time.monotonic() + duration
+        while time.monotonic() < end and not self._approach_cancel.is_set():
+            self.cmd_vel_pub.publish(twist)
+            time.sleep(0.05)
+        self.cmd_vel_pub.publish(Twist())
+        if self._approach_cancel.is_set():
+            return False
+        time.sleep(self.pick_approach_settle)
+        return True
 
     def _cb_vocab_state(self, msg):
         try:
@@ -1099,6 +1205,10 @@ class LLMBridgeNode(Node):
 
     def _emergency_stop(self):
         """Halt everything: wheels, navigation, and any background behaviour."""
+        # Before any zero Twist: a pick approach drive publishes at 20 Hz and
+        # would simply overwrite it.
+        self._approach_cancel.set()
+
         # Wheels first and repeatedly — a single Twist can be lost in a DDS
         # hiccup, and Nav2's controller may still be publishing over us until
         # the goal cancel below lands.
