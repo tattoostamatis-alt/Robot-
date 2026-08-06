@@ -783,6 +783,17 @@ class LLMBridgeNode(Node):
             # while to_prompt speaks them with spaces.
             label = prompt.replace(' ', '_')
 
+        # ‼️ Nobody listening means nothing will ever happen, and the silence is
+        # indistinguishable from a grasp in progress — so the wait below would
+        # time out and we would report 'started'. Caught live on 2026-08-06:
+        # pick_place_node was down, the robot cheerfully said «Απλώνω τον
+        # βραχίονα για να πιάσω την παντόφλα», and the arm never moved. This is
+        # the same class of bug as tidy_command/patrol_command answering
+        # "Ξεκινάω περιπολία" into a topic with no subscriber.
+        if self.pick_pub.get_subscription_count() == 0:
+            return {'status': 'error', 'action': 'pick', 'object': name,
+                    'reason': 'ο κόμβος του βραχίονα δεν τρέχει (pick_place_node)'}
+
         with self._pick_lock:
             self._pick_result = None
         self._pick_event.clear()
