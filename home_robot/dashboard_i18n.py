@@ -506,6 +506,9 @@ TRANSLATIONS = {
          'Motion-Planning-Panel. Greifer ziehen, Plan, Execute.'),
     'Εκκίνηση':          ('Start', 'Starten'),
     '↻ Επανασύνδεση':    ('↻ Reconnect', '↻ Neu verbinden'),
+    '⛶ Πλήρης οθόνη':    ('⛶ Fullscreen', '⛶ Vollbild'),
+    'Έξοδος από πλήρη οθόνη':
+        ('Exit fullscreen', 'Vollbild verlassen'),
     '■ Τερματισμός':     ('■ Stop', '■ Beenden'),
     'ενεργό':            ('running', 'läuft'),
     'ξεκινά…':           ('starting…', 'startet…'),

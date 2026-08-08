@@ -3573,6 +3573,25 @@ button{font:inherit;color:inherit}
 .vnc-host{flex:1;position:relative;background:#0c0c0e;border:1px solid #2c2c32;
   border-radius:12px;overflow:hidden;min-height:240px}
 .vnc-host iframe{width:100%;height:100%;border:0;display:block}
+/* Fullscreen. Measured 2026-08-08 in WebKit: RViz runs 1600x900, so on a
+   390pt portrait phone the 16:9 image letterboxes to 374x210 and fills only
+   43% of the tab — the rest is black. Height was never the problem (486px
+   sat unused); the WIDTH is what caps the scale, which is why growing the
+   pane changes nothing and only reclaiming the whole viewport does.
+   ‼️ position:fixed, NOT Element.requestFullscreen. iPhone Safari does not
+   implement that API for anything but <video> — a native-only version is a
+   dead button on exactly the device this was asked for. The native call is
+   attempted underneath purely as a bonus (it also hides the browser chrome)
+   and its absence is not an error. */
+.vnc-host.fs{position:fixed;inset:0;z-index:9000;border:0;border-radius:0;
+  min-height:0;margin:0}
+.vnc-fs-exit{position:fixed;z-index:9001;
+  top:calc(env(safe-area-inset-top,0px) + 10px);
+  right:calc(env(safe-area-inset-right,0px) + 10px);
+  background:rgba(0,0,0,.62);color:#e4e4e7;border:1px solid #3a3a44;
+  border-radius:9px;padding:9px 13px;font-size:13px;cursor:pointer;
+  /* A 44pt target is the iOS minimum that a thumb hits reliably. */
+  min-width:44px;min-height:44px;line-height:1}
 /* Mirrors noVNC's own error text out of the iframe so it can be read/copied */
 .vnc-err{position:absolute;top:0;left:0;right:0;z-index:5;padding:8px 12px;
   background:#7f1d1d;color:#fecaca;font-size:12px;line-height:1.5;
@@ -4946,6 +4965,9 @@ function renderVnc(app, mode, detail){
     row.appendChild(b);
   };
   mk(t('↻ Επανασύνδεση'), '', () => refreshVnc(app));
+  // Only offered once something is actually painting — fullscreening the
+  // "press start" placeholder would just be a black screen with an X on it.
+  if (mode === 'live') mk(t('⛶ Πλήρης οθόνη'), '', () => enterVncFs(app));
   if (app !== 'rviz') mk(t('■ Τερματισμός'), 'warn', () => stopVnc(app));
   const s = document.createElement('span');
   s.className = 'pill ' + (mode === 'live' ? 'ok' : '');
@@ -4956,6 +4978,65 @@ function renderVnc(app, mode, detail){
 
   if (app === 'rtabmap') pane.appendChild(rtabControls());
 }
+
+// ── Fullscreen for a VNC pane ──────────────────────────────────────────────
+// See the .vnc-host.fs comment for why this is CSS-first: on iPhone Safari
+// Element.requestFullscreen simply does not exist, so the class is what does
+// the work everywhere and the native call is a best-effort extra.
+function enterVncFs(app){
+  const host = vncPane(app).querySelector('.vnc-host');
+  if (!host || host.classList.contains('fs')) return;
+  host.classList.add('fs');
+
+  const x = document.createElement('button');
+  x.className = 'vnc-fs-exit';
+  x.textContent = '✕';
+  x.setAttribute('aria-label', t('Έξοδος από πλήρη οθόνη'));
+  x.onclick = () => exitVncFs(app);
+  host.appendChild(x);
+
+  // Esc is the reflex on a laptop; the native handler below covers the case
+  // where the browser grants real fullscreen and eats the key itself.
+  host._fsKey = ev => { if (ev.key === 'Escape') exitVncFs(app); };
+  document.addEventListener('keydown', host._fsKey);
+
+  // Bonus only: also hides the URL bar where supported. A rejected promise
+  // (user gesture rules, iOS) leaves the CSS fullscreen perfectly usable.
+  const rq = host.requestFullscreen || host.webkitRequestFullscreen;
+  if (rq){ try { const p = rq.call(host); if (p && p.catch) p.catch(() => {}); }
+           catch (e) {} }
+
+  // noVNC rescales from a resize event; fixed-position changes do not always
+  // emit one inside the iframe, so nudge it once the class has taken effect.
+  setTimeout(() => { try { window.dispatchEvent(new Event('resize')); } catch(e){} }, 60);
+}
+
+function exitVncFs(app){
+  const host = vncPane(app).querySelector('.vnc-host');
+  if (!host || !host.classList.contains('fs')) return;
+  host.classList.remove('fs');
+  const x = host.querySelector('.vnc-fs-exit');
+  if (x) x.remove();
+  if (host._fsKey){ document.removeEventListener('keydown', host._fsKey); host._fsKey = null; }
+  if (document.fullscreenElement || document.webkitFullscreenElement){
+    const ex = document.exitFullscreen || document.webkitExitFullscreen;
+    if (ex){ try { const p = ex.call(document); if (p && p.catch) p.catch(() => {}); }
+             catch (e) {} }
+  }
+  setTimeout(() => { try { window.dispatchEvent(new Event('resize')); } catch(e){} }, 60);
+}
+
+// Leaving fullscreen by the browser's own affordance (Esc it handled, the iOS
+// swipe, the Android back gesture) must not strand the pane in the fs class —
+// it would stay pinned over the dashboard with no way back.
+['fullscreenchange', 'webkitfullscreenchange'].forEach(evt =>
+  document.addEventListener(evt, () => {
+    if (document.fullscreenElement || document.webkitFullscreenElement) return;
+    Object.keys(VNC_APPS).forEach(a => {
+      const p = vncPane(a), h = p && p.querySelector('.vnc-host.fs');
+      if (h) exitVncFs(a);
+    });
+  }));
 
 // ── RTAB-Map controls + progress ───────────────────────────────────────────
 // The VNC view already carries the full rtabmap_viz, so this strip deliberately

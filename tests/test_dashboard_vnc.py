@@ -353,3 +353,70 @@ def test_our_viewer_passes_no_wsProtocols():
     """The other half: the RFB options we hand rfb.js leave the default in."""
     assert 'wsProtocols' not in VIEW, \
         'the viewer now sets wsProtocols — the bridge echo must agree with it'
+
+
+# ── fullscreen ───────────────────────────────────────────────────────────────
+# 2026-08-08, asked from the phone: "στο tab rviz θέλω να μου το δείχνεις πιο
+# μεγάλο το παράθυρο να το βλέπω καλύτερα στο κινητό".
+#
+# Measured first, in WebKit, before touching anything — RViz runs 1600x900, so
+# the 16:9 image letterboxes into a portrait pane and fills only 43% of it
+# (374x210 inside 374x486 on a 390pt iPhone). ‼️ The height was NEVER the
+# constraint: 486px of pane sat unused. The WIDTH caps the scale, which is why
+# "make the window bigger" cannot be answered by growing the pane, and why
+# fullscreen is worth x1.62 in landscape but only x1.04 in portrait.
+
+def test_fullscreen_is_css_first_not_the_native_api():
+    """‼️ THE TRAP. iPhone Safari implements Element.requestFullscreen for
+    <video> and nothing else, so a native-only button is dead on exactly the
+    device this was requested for. The class is what does the work."""
+    assert '.vnc-host.fs{' in _SRC, 'the CSS fullscreen rule is gone'
+    rule = re.search(r'\.vnc-host\.fs\{(.*?)\}', _SRC, re.S).group(1)
+    flat = re.sub(r'\s+', '', rule)
+    assert 'position:fixed' in flat, 'fullscreen no longer pins to the viewport'
+    assert 'inset:0' in flat
+
+
+def test_the_native_call_is_optional_and_its_rejection_swallowed():
+    """It is a bonus (it also hides the URL bar). A browser that refuses must
+    leave the CSS fullscreen working, not throw into the console."""
+    fn = _fn('enterVncFs')
+    assert 'webkitRequestFullscreen' in fn, 'the Safari-prefixed form is gone'
+    assert 'catch' in fn, 'a rejected requestFullscreen would surface as an error'
+
+
+def test_there_is_a_way_back_out():
+    """The tab bar is covered while fullscreen, so the pane must carry its own
+    exit or the dashboard is unreachable until reload."""
+    assert "'vnc-fs-exit'" in _fn('enterVncFs'), 'the exit button is never built'
+    assert 'Escape' in _fn('enterVncFs'), 'Esc no longer exits'
+
+
+def test_exit_undoes_everything_enter_did():
+    fn = _fn('exitVncFs')
+    assert "classList.remove('fs')" in fn
+    assert 'removeEventListener' in fn, 'the Esc handler would leak per open'
+    assert '.vnc-fs-exit' in fn, 'the exit button is never removed'
+
+
+def test_leaving_fullscreen_by_the_browser_unpins_the_pane():
+    """iOS swipe / Android back / Esc handled natively all fire
+    fullscreenchange. Without this the host stays position:fixed over the
+    whole dashboard with its exit button gone."""
+    assert 'fullscreenchange' in _SRC, 'nothing listens for the browser exiting'
+    assert 'webkitfullscreenchange' in _SRC, 'the Safari-prefixed event is gone'
+
+
+def test_fullscreen_is_only_offered_once_something_paints():
+    """Fullscreening the 'press start' placeholder is a black screen."""
+    m = re.search(r"if \(mode === 'live'\) mk\(t\('⛶ Πλήρης οθόνη'\)", _SRC)
+    assert m, 'the fullscreen button is no longer gated on a live session'
+
+
+def test_the_exit_button_is_thumb_sized():
+    """44pt is the iOS minimum that a thumb hits reliably; this button sits
+    over a live RViz where a miss is a click into the 3D view."""
+    rule = re.search(r'\.vnc-fs-exit\{(.*?)\}', _SRC, re.S)
+    assert rule, 'the exit button lost its style'
+    flat = re.sub(r'\s+', '', rule.group(1))
+    assert 'min-width:44px' in flat and 'min-height:44px' in flat
