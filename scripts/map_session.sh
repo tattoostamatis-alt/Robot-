@@ -83,7 +83,18 @@ case "${1:-}" in
     # it — the save succeeded on disk while the browser waited for a reply that
     # never came. Saving a map from localize mode (no posegraph) is legitimate,
     # so this is a skip, not an error.
-    if timeout 10 ros2 service list 2>/dev/null | grep -q '/slam_toolbox/serialize_map'; then
+    # ‼️ The probe used to be `timeout 10 ros2 service list | grep serialize_map`
+    # and it FALSE-NEGATIVED on 2026-08-08: the branch went to the else and the
+    # save logged "slam_toolbox not running" while slam_toolbox had been mapping
+    # for 34 minutes. The .pgm was written, the .posegraph/.data were NOT — an
+    # unresumable map that looked saved. Measured on the mapping stack (71 nodes,
+    # load ~40): the FIRST `ros2 service list` after a cold daemon took 9.5 s,
+    # later ones 1-3 s. So 10 s was not a generous margin, it was a coin flip,
+    # and it lands on the wrong side exactly when the stack is busy — which is
+    # always, during a mapping run. pgrep on the executable answers instantly and
+    # cannot time out; the `timeout 60` on the call below is what still guards
+    # the original blocking case.
+    if pgrep -f async_slam_toolbox_node >/dev/null 2>&1; then
       timeout 60 ros2 service call /slam_toolbox/serialize_map \
         slam_toolbox/srv/SerializePoseGraph "{filename: '$MAPS/$NAME'}" \
         >> "$LOG" 2>&1 || log "serialize_map failed"
