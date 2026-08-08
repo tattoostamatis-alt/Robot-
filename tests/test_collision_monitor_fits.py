@@ -56,6 +56,12 @@ _STOP = _P['collision_monitor']['ros__parameters']['Stop']
 _COSTMAP_R = _P['local_costmap']['local_costmap']['ros__parameters']['robot_radius']
 
 SUBPOLYGONS = ['moving_forward', 'moving_backward', 'stopped_or_rotating']
+# ‼️ 2026-08-08: the three are NOT interchangeable any more, and the split is
+# the whole point — see test_rotation_is_not_gated_like_translation.
+# Translating sweeps new ground and keeps the full skirt; rotating in place
+# sweeps none, so its ring only has to catch actual contact.
+MOVING = ['moving_forward', 'moving_backward']
+ROTATING = 'stopped_or_rotating'
 
 
 def _points(name):
@@ -120,7 +126,7 @@ def test_every_bearing_keeps_the_full_stop_margin():
     needs and what the box only ever delivered diagonally.
     """
     floor = SKIRT_R - POLY_SLACK
-    for name in SUBPOLYGONS:
+    for name in MOVING:
         closest = _min_reach(_points(name))
         margin_mm = (closest - CHASSIS_R) * 1000
         assert closest >= floor, (
@@ -130,6 +136,46 @@ def test_every_bearing_keeps_the_full_stop_margin():
         assert _max_reach(_points(name)) <= SKIRT_R + 1e-6, (
             f'{name} reaches past the {SKIRT_R} m skirt the Safety tab '
             f'reports — the page would be lying about the robot')
+
+
+def test_rotation_is_not_gated_like_translation():
+    """‼️ 2026-08-08 — THE DEADLOCK. Read this before "restoring consistency".
+
+    All three rings used to be the same 0.215. That looks tidy and it froze
+    the robot solid: anything 40 mm off the body zeroed every command, and
+    since a spin is linear≈0 it fell in the `stopped_or_rotating` bucket, so
+    the robot could not even TURN to escape. Seen live on the (-4.43, 1.26)
+    goal — four rounds of "STUCK, displacement=0.000m", every recovery killed
+    by "Collision Ahead - Exiting Spin" / "Exiting DriveOnHeading". That is
+    the back-and-forth the user reported as "goes nowhere, just rocks".
+
+    The geometry: a CIRCLE rotating about its own centre sweeps no new ground
+    whatsoever. A spin cannot cause a collision that is not already happening,
+    so gating it on clearance is asking the wrong question. Translation is the
+    opposite — it does sweep new ground, and keeps the full 40 mm.
+
+    A/B in Gazebo (scratchpad cmtest/e2e.py), robot ~0.19 m off a wall:
+        0.215 ring: 0/60 rotate commands survived, 0.0° turned, goal rejected
+        0.180 ring: 57/57 survived, 70.4° turned, robot drove 3.88 m away
+    """
+    rot = _min_reach(_points(ROTATING))
+    tightest_moving = min(_min_reach(_points(n)) for n in MOVING)
+    assert rot < tightest_moving - 0.02, (
+        f'{ROTATING} reaches {rot:.4f} m, essentially the same as the moving '
+        f'rings ({tightest_moving:.4f} m). That is the deadlock: the robot '
+        f'cannot spin away from an obstacle it is allowed to sit next to.')
+
+
+def test_the_rotation_ring_still_refuses_actual_contact():
+    """The other side of it. Rotating is safe until something is genuinely
+    against the chassis — brushing a wall while spinning scrubs the wheels and
+    pushes the pose off. So the ring may shrink toward the body, never inside
+    it."""
+    rot = _min_reach(_points(ROTATING))
+    assert rot >= CHASSIS_R, (
+        f'{ROTATING} cuts to {rot:.4f} m, inside the {CHASSIS_R} m chassis — '
+        f'the robot would happily grind against a wall')
+    assert _max_reach(_points(ROTATING)) <= SKIRT_R + 1e-6
 
 
 def test_the_zone_is_round_not_boxy():

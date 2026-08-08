@@ -658,11 +658,32 @@ collision_monitor:
       holonomic: false
       velocity_polygons: ["moving_forward", "moving_backward", "stopped_or_rotating"]
       # A CIRCLE, not a box: the robot is round, so the stop zone is the same
-      # 50 mm everywhere around it. 16-point approximation of r=0.225
-      # (chassis 0.175 + 0.050); worst deviation from a true circle is 4.3 mm.
-      # The same ring for all three cases — a round robot has no "narrow side"
+      # 40 mm everywhere around it. 16-point approximation of r=0.215
+      # (chassis 0.175 + 0.040); worst deviation from a true circle is 4.1 mm.
+      #
+      # ‼️ 2026-08-08 — NOT the same ring for all three cases. That is what the
+      # previous version did, reasoning that "a round robot has no narrow side
       # to exploit, and the direction of travel does not change how much space
-      # the body needs.
+      # the body needs". True of the BODY, but it answers the wrong question.
+      # The question is not "how much room does it occupy" — it is "will THIS
+      # motion hit anything". A circle rotating about its own centre sweeps no
+      # new ground at all, so a spin can never cause a collision that is not
+      # already happening.
+      #
+      # With all three rings at 0.215 the robot deadlocked: anything 40 mm off
+      # the body zeroed every command, and because spinning counts as
+      # linear≈0 it could not even TURN to escape. Observed live on the
+      # (-4.43, 1.26) goal — "STUCK, displacement=0.000m" four times over, with
+      # every recovery killed by "Collision Ahead - Exiting Spin" /
+      # "Exiting DriveOnHeading", which is the back-and-forth the user saw.
+      # Measured on the isolated bench (scratchpad cmtest/harness.py): rotation
+      # passed at 0.215 and was zeroed from 0.210 down.
+      #
+      # So the rotating ring drops to the body plus 5 mm: it still refuses to
+      # spin when something is genuinely touching the chassis, and permits the
+      # one manoeuvre that can get a round robot out of a tight spot.
+      # Translation keeps the full 40 mm — moving forward or back DOES sweep
+      # new ground, and that is what the margin is for.
       #
       # Compare with what this replaced: a ±0.22 square kept 45 mm at the
       # edges but 136 mm at the corners, and that corner is what refused
@@ -681,8 +702,12 @@ collision_monitor:
         linear_max: -0.02
         theta_min: -10.0
         theta_max: 10.0
+      # r=0.18 — the chassis (0.175) plus 5 mm, NOT the 0.215 the two moving
+      # rings use. See the block above: this ring gates rotate-in-place, which
+      # sweeps no new ground, so its only honest job is to refuse a spin when
+      # something is already against the body.
       stopped_or_rotating:
-        points: "[[0.2150, 0.0000], [0.1986, 0.0823], [0.1520, 0.1520], [0.0823, 0.1986], [0.0000, 0.2150], [-0.0823, 0.1986], [-0.1520, 0.1520], [-0.1986, 0.0823], [-0.2150, 0.0000], [-0.1986, -0.0823], [-0.1520, -0.1520], [-0.0823, -0.1986], [0.0000, -0.2150], [0.0823, -0.1986], [0.1520, -0.1520], [0.1986, -0.0823]]"
+        points: "[[0.1800, 0.0000], [0.1663, 0.0689], [0.1273, 0.1273], [0.0689, 0.1663], [0.0000, 0.1800], [-0.0689, 0.1663], [-0.1273, 0.1273], [-0.1663, 0.0689], [-0.1800, 0.0000], [-0.1663, -0.0689], [-0.1273, -0.1273], [-0.0689, -0.1663], [0.0000, -0.1800], [0.0689, -0.1663], [0.1273, -0.1273], [0.1663, -0.0689]]"
         linear_min: -0.02
         linear_max: 0.02
         theta_min: -10.0
