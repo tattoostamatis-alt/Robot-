@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 
+from home_robot import collision_skirt as cs
 from home_robot import safety_settings as ss
 from home_robot.dashboard_i18n import LANGUAGES, as_js_table
 
@@ -62,6 +63,8 @@ _SUBS = {
                  'step': s.step, 'warn_above': s.warn_above,
                  'warn_below': s.warn_below} for s in ss.SPECS}),
     '__SAFETY_INFO__': json.dumps(ss.INFO_ONLY),
+    '__SKIRT_MARGINS__': json.dumps(cs.ALLOWED_MARGINS_MM),
+    '__SKIRT_DEFAULT_MM__': json.dumps(cs.MARGIN_DEFAULT_MM),
     '__I18N__': json.dumps(as_js_table(), ensure_ascii=False),
     '__LANGS__': json.dumps(LANGUAGES, ensure_ascii=False),
 }

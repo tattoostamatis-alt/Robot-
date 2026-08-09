@@ -126,6 +126,7 @@ _SUBS = {
 
 
 def _page_html():
+    from home_robot import collision_skirt as cs
     from home_robot import safety_settings as ss
     html = _DASH.split('HTML_TEMPLATE = r"""', 1)[1].split('"""', 1)[0]
     subs = dict(_SUBS)
@@ -134,6 +135,8 @@ def _page_html():
                  'step': s.step, 'warn_above': s.warn_above,
                  'warn_below': s.warn_below} for s in ss.SPECS})
     subs['__SAFETY_INFO__'] = json.dumps(ss.INFO_ONLY)
+    subs['__SKIRT_MARGINS__'] = json.dumps(cs.ALLOWED_MARGINS_MM)
+    subs['__SKIRT_DEFAULT_MM__'] = json.dumps(cs.MARGIN_DEFAULT_MM)
     for token, value in subs.items():
         html = html.replace(token, value)
     assert not re.findall(r'__[A-Z_]+__', html)

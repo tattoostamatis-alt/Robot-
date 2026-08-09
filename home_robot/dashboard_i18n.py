@@ -307,6 +307,14 @@ TRANSLATIONS = {
 
     # ── room colours (map pane) ───────────────────────────────────────────
     'Χρώματα':           ('Colours', 'Farben'),
+    '💾 Αποθήκευση ονομάτων/χρωμάτων':
+        ('💾 Save names/colours', '💾 Namen/Farben speichern'),
+    'Αποτυχία.':         ('Failed.', 'Fehlgeschlagen.'),
+    '🖱️ Κλικ στον χάρτη επιλέγει δωμάτιο (αντί να στέλνει το ρομπότ εκεί)':
+        ('🖱️ Click on the map picks a room (instead of sending the robot there)',
+         '🖱️ Klick auf die Karte wählt einen Raum (statt den Roboter dorthin zu schicken)'),
+    'Δεν βρέθηκε δωμάτιο εκεί.':
+        ('No room found there.', 'Dort wurde kein Raum gefunden.'),
 
     # ── 3D arm view ───────────────────────────────────────────────────────
     'Σύρε για περιστροφή · ροδέλα για ζουμ · κινείται με τις αρθρώσεις από κάτω':
@@ -998,16 +1006,16 @@ TRANSLATIONS = {
          'Wie lange nach einer Kante blockiert bleibt'),
     'Σκληρά όρια': ('Hard limits', 'Harte Grenzen'),
     'σταθερά': ('fixed', 'fest'),
-    'Αυτά ΔΕΝ αλλάζουν από εδώ. Ο collision_monitor τα διαβάζει μία φορά στην '
+    'ΔΕΝ αλλάζει από εδώ. Ο collision_monitor το διαβάζει μία φορά στην '
     'εκκίνηση, οπότε ένας διακόπτης εδώ θα έδειχνε νούμερο που το ρομπότ δεν '
-    'χρησιμοποιεί. Αλλάζουν στο config/nav2_params.yaml και θέλουν πλήρη '
+    'χρησιμοποιεί. Αλλάζει στο config/nav2_params.yaml και θέλει πλήρη '
     'επανεκκίνηση.':
-        ('These do NOT change from here. collision_monitor reads them once at '
+        ('Does NOT change from here. collision_monitor reads it once at '
          'startup, so a control here would show a number the robot is not '
-         'using. They change in config/nav2_params.yaml and need a full '
+         'using. It changes in config/nav2_params.yaml and needs a full '
          'restart.',
-         'Diese ändern sich hier NICHT. collision_monitor liest sie einmal '
-         'beim Start, ein Regler hier würde also einen Wert zeigen, den der '
+         'Ändert sich hier NICHT. collision_monitor liest ihn einmal beim '
+         'Start, ein Regler hier würde also einen Wert zeigen, den der '
          'Roboter nicht benutzt. Änderung in config/nav2_params.yaml, mit '
          'vollständigem Neustart.'),
     '↺ Επαναφορά προεπιλογών': ('↺ Restore defaults', '↺ Standardwerte'),
@@ -1018,6 +1026,41 @@ TRANSLATIONS = {
     'ΕΝΕΡΓΟ':            ('ON', 'AN'),
     'ΚΛΕΙΣΤΟ':           ('OFF', 'AUS'),
     'δεν τρέχει':        ('not running', 'läuft nicht'),
+
+    # ── collision_monitor hard-stop skirt (map tab → Ασφάλεια) ─────────────
+    '🛑 Απόσταση πλήρους στάσης':
+        ('🛑 Full-stop distance', '🛑 Vollstopp-Abstand'),
+    'Το τελευταίο όριο: μόλις το lidar δει κάτι μέσα σε αυτή την απόσταση '
+    'γύρω από το σώμα, ο collision_monitor μηδενίζει αμέσως την ταχύτητα — '
+    'ανεξάρτητα από το τι σχεδιάζει ο planner. Δεν είναι η «Απόσταση από '
+    'τοίχους» πιο πάνω: εκείνο επηρεάζει πού περνά η διαδρομή, αυτό είναι το '
+    'φρένο ανάγκης. Μικρότερη απόσταση αφήνει το ρομπότ να πλησιάσει '
+    'περισσότερο πριν σταματήσει απότομα.':
+        ('The last-resort limit: the instant the lidar sees anything inside '
+         'this distance around the body, collision_monitor zeroes the speed '
+         'immediately — regardless of what the planner is doing. This is NOT '
+         'the "Distance from walls" above: that decides where the path goes, '
+         'this is the emergency brake. A smaller distance lets the robot get '
+         'closer before it stops abruptly.',
+         'Die letzte Grenze: sobald der Lidar etwas innerhalb dieses Abstands '
+         'um den Körper sieht, setzt collision_monitor die Geschwindigkeit '
+         'sofort auf null — unabhängig davon, was der Planer vorhat. Das ist '
+         'NICHT der "Abstand von Wänden" oben: der entscheidet, wo die Route '
+         'verläuft, das hier ist die Notbremse. Ein kleinerer Abstand lässt '
+         'den Roboter näher herankommen, bevor er abrupt stoppt.'),
+    'Εφαρμογή (επανεκκίνηση ~90s)':
+        ('Apply (restart ~90s)', 'Anwenden (Neustart ~90s)'),
+    'Αυτό είναι το σκληρό όριο πλήρους στάσης, όχι η απόσταση σχεδίασης '
+    'διαδρομής. Χρειάζεται πλήρη επανεκκίνηση (~90 δευτερόλεπτα) και '
+    'μικρότερη απόσταση αφήνει το ρομπότ να πλησιάσει περισσότερο πριν '
+    'σταματήσει απότομα. Να συνεχίσω;':
+        ('This is the hard full-stop limit, not the path-planning distance. '
+         'It needs a full restart (~90 seconds), and a smaller distance lets '
+         'the robot get closer before it stops abruptly. Continue?',
+         'Das ist die harte Vollstopp-Grenze, nicht der Abstand für die '
+         'Routenplanung. Es braucht einen vollständigen Neustart (~90 '
+         'Sekunden), und ein kleinerer Abstand lässt den Roboter näher '
+         'herankommen, bevor er abrupt stoppt. Fortfahren?'),
 
     # ── dashboard key ─────────────────────────────────────────────────────
     'Κλειδί πρόσβασης':  ('Access key', 'Zugangsschlüssel'),

@@ -84,11 +84,15 @@ def test_costmap_radius_matches_the_measured_chassis():
 
 
 CHASSIS_R = 0.175
-# The nominal skirt radius comes from safety_settings, which is what the
-# dashboard's Safety tab displays. Reading it here means the tab and the YAML
-# cannot drift apart: change one without the other and this file fails.
-import home_robot.safety_settings as _ss           # noqa: E402
-SKIRT_R = _ss.INFO_ONLY[0]['value']                # 0.215 = chassis + 40 mm
+# The nominal skirt radius is derived from these SAME points, not a separately
+# maintained constant — the dashboard's Safety tab (home_robot/collision_skirt.py,
+# /safety/skirt/{mm}) can now rewrite moving_forward/moving_backward's margin
+# live, and a hardcoded SKIRT_R would go stale the moment that happens.
+# Deriving it from _STOP itself means this file stays self-consistent for
+# ANY margin the dashboard's slider allows, not just today's 40 mm.
+import home_robot.collision_skirt as _cskirt        # noqa: E402
+SKIRT_R = _cskirt.margin_to_radius(
+    _cskirt.current_margin_mm(open(PARAMS).read()))
 STOP_MARGIN = SKIRT_R - CHASSIS_R
 # A 16-point polygon inscribes its circle: the edge midpoints fall ~4.1 mm
 # short of the radius. Allow that, and nothing more.

@@ -100,16 +100,15 @@ def test_turning_a_contact_sensor_off_is_logged_loudly():
 # ── the fixed limits shown on the page match the file they come from ─────────
 
 def test_info_only_values_match_nav2_params():
-    stop = ss.INFO_ONLY[0]
-    assert stop['key'] == 'stop_skirt'
-    # The Stop zone is a circle now (2026-08-06), written as a 16-point
-    # approximation, so the radius appears as the point on the +x axis rather
-    # than as a box corner. Checking the radius itself also means the panel
-    # cannot quietly go on quoting the old 0.22 box.
-    assert f"[{stop['value']:.4f}, 0.0000]" in _NAV2, \
-        ('the Stop polygon in nav2_params.yaml no longer has this radius — '
-         'if the zone changed shape, update INFO_ONLY to match')
-    tbc = ss.INFO_ONLY[1]
+    """stop_skirt used to live here too, checked against the Stop polygon's
+    +x point the same way time_before_collision is below. It moved out once
+    it got its own editable control (home_robot/collision_skirt.py) — a
+    hardcoded value in INFO_ONLY would go stale the moment the dashboard's
+    Safety tab changes it live, which is exactly the drift this test exists
+    to catch. tests/test_collision_skirt.py now covers that number instead,
+    by deriving it FROM the file rather than comparing two copies of it."""
+    assert [row['key'] for row in ss.INFO_ONLY] == ['time_before_collision']
+    tbc = ss.INFO_ONLY[0]
     assert re.search(rf'time_before_collision:\s*{tbc["value"]}\b', _NAV2), \
         'time_before_collision drifted from nav2_params.yaml'
 

@@ -63,7 +63,7 @@ from action_msgs.srv import CancelGoal
 from std_srvs.srv import Empty
 
 from home_robot.compass import offset_from_known_bearing
-from home_robot import safety_settings
+from home_robot import collision_skirt, safety_settings
 from home_robot.system_settings import (
     bt_args, parse_bt_devices, parse_devices, parse_volume, parse_wifi_list,
     volume_args, wifi_connect_args)
@@ -228,6 +228,80 @@ def _load_locations() -> dict:
             return yaml.safe_load(f) or {}
     except Exception:
         return {}
+
+# ── Map display cleanup ──────────────────────────────────────────────────────
+# Cosmetic only: both functions below reshape/recolour a COPY of the grid used
+# to build the picture the browser gets. self._last_map (the raw OccupancyGrid)
+# and everything Nav2/slam_toolbox does with the real /map topic are untouched.
+
+def _despeckle_grid(grid: np.ndarray) -> np.ndarray:
+    """Fill small enclosed unknown holes and drop isolated obstacle pixels.
+
+    A raw slam_toolbox map is speckled: a few percent of free-space cells read
+    -1 from scan gaps (grey freckles inside an otherwise clean room), and a
+    stray return off dust or a mirror leaves a lone occupied pixel in open
+    floor. Neither is information — the room isn't unexplored in patches and
+    a single pixel isn't a wall. Both just make the picture look dirty.
+
+    The big unknown region OUTSIDE the house must survive untouched (that one
+    really is "never scanned"), which is why only unknown blobs that do NOT
+    touch the image border are filled — the exterior always does.
+    """
+    g = grid.copy()
+
+    unknown = (g == -1).astype(np.uint8)
+    if unknown.any():
+        n, labels = cv2.connectedComponents(unknown, connectivity=4)
+        border = set(labels[0, :]) | set(labels[-1, :]) \
+            | set(labels[:, 0]) | set(labels[:, -1])
+        border.discard(0)
+        max_hole_px = 30      # ~0.075 m^2 at a typical 0.05 m/px map
+        for lbl in range(1, n):
+            if lbl in border:
+                continue
+            blob = labels == lbl
+            if blob.sum() <= max_hole_px:
+                g[blob] = 0    # reclassify as free
+
+    occupied = (g == 100).astype(np.uint8)
+    if occupied.any():
+        n, labels, stats, _ = cv2.connectedComponentsWithStats(
+            occupied, connectivity=8)
+        for lbl in range(1, n):
+            if stats[lbl, cv2.CC_STAT_AREA] <= 2:   # 1-2 px noise, not a wall
+                g[labels == lbl] = 0
+
+    return g
+
+
+def _crop_to_content(img: np.ndarray, grid_flipped: np.ndarray,
+                      info, margin_px: int = 12):
+    """Crop the grey 'never scanned' padding a SLAM map is usually laid out
+    on, so the house fills the pane instead of a fraction of it.
+
+    `img`/`grid_flipped` are already flipped to image orientation (row 0 =
+    top). Only a translation, never a rotation — resolution is unchanged and
+    the client's w2c()/c2w() only ever add an origin offset, so click-to-nav
+    and the robot/laser overlays stay exactly correct on the cropped image.
+    Returns (image, width, height, origin) — origin unchanged if no crop.
+    """
+    h, w = grid_flipped.shape
+    known = grid_flipped != -1
+    rows = np.flatnonzero(known.any(axis=1))
+    cols = np.flatnonzero(known.any(axis=0))
+    ox, oy, res = info.origin.position.x, info.origin.position.y, info.resolution
+    if rows.size == 0 or cols.size == 0:
+        return img, w, h, [ox, oy]
+
+    top    = max(0, int(rows[0])  - margin_px)
+    bottom = min(h, int(rows[-1]) + 1 + margin_px)
+    left   = max(0, int(cols[0])  - margin_px)
+    right  = min(w, int(cols[-1]) + 1 + margin_px)
+    if top == 0 and bottom == h and left == 0 and right == w:
+        return img, w, h, [ox, oy]
+
+    new_origin = [ox + left * res, oy + (h - bottom) * res]
+    return img[top:bottom, left:right], right - left, bottom - top, new_origin
 
 # ── Shared state (thread-safe) ─────────────────────────────────────────────────
 
@@ -495,6 +569,7 @@ class DashboardNode(Node):
         self._room_size_warned = False
         self._rooms_tinted = True              # toggled from the map tab
         self._last_map = None                  # so the toggle can redraw
+        self._full_map_info = None             # see _room_at_xy()
         self.create_subscription(
             PointCloud2, '/camera/camera/depth/color/points', self._cb_cloud,
             QoSProfile(depth=1,
@@ -700,6 +775,9 @@ class DashboardNode(Node):
         self._safety_get: dict = {}
         self._safety_applied: set = set()
         self._safety_live: dict = {}     # what the nodes report back
+        # collision_skirt's live margin — see _current_skirt_margin_mm().
+        self._skirt_margin_mm = collision_skirt.MARGIN_DEFAULT_MM
+        self._skirt_margin_at = None
         self.create_timer(3.0, self._safety_tick)
 
         self.create_timer(2.0, self._publish_system)
@@ -734,7 +812,8 @@ class DashboardNode(Node):
                 self._safety_applied.add(node)
                 cli.call_async(self._safety_request(params))
         self._safety_read()
-        self._state.broadcast({'type': 'safety', 'v': self._safety_payload()})
+        self._state.broadcast({'type': 'safety', 'v': self._safety_payload(),
+                               'skirt_margin_mm': self._current_skirt_margin_mm()})
 
     @staticmethod
     def _safety_request(params: dict) -> SetParameters.Request:
@@ -821,11 +900,34 @@ class DashboardNode(Node):
             if cli.service_is_ready():
                 cli.call_async(self._safety_request({param: clamped}))
         self.get_logger().info(f'safety: {key} = {clamped}')
-        self._state.broadcast({'type': 'safety', 'v': self._safety_payload()})
+        self._state.broadcast({'type': 'safety', 'v': self._safety_payload(),
+                               'skirt_margin_mm': self._current_skirt_margin_mm()})
 
     def _safety_reset(self):
         for key, value in safety_settings.defaults().items():
             self._safety_apply(key, value)
+
+    def _current_skirt_margin_mm(self):
+        """collision_monitor's live moving-ring margin, mtime-cached like
+        _load_room_mask() — so a restart triggered by /safety/skirt/{mm}
+        shows up here as soon as the file changes, without re-parsing a
+        multi-hundred-line YAML file on every 3s safety tick."""
+        path = collision_skirt.default_params_path()
+        try:
+            stamp = os.path.getmtime(path)
+        except OSError:
+            return self._skirt_margin_mm
+        if self._skirt_margin_at == stamp:
+            return self._skirt_margin_mm
+        try:
+            with open(path) as f:
+                mm = collision_skirt.current_margin_mm(f.read())
+        except OSError:
+            mm = None
+        if mm is not None:
+            self._skirt_margin_mm = mm
+        self._skirt_margin_at = stamp
+        return self._skirt_margin_mm
 
     # ── ROS callbacks ────────────────────────────────────────────────────────
 
@@ -833,24 +935,36 @@ class DashboardNode(Node):
         self._last_map = msg          # kept so the room-tint toggle can redraw
         grid = np.array(msg.data, dtype=np.int8).reshape(
             msg.info.height, msg.info.width)
+        # Cosmetic pass on a COPY — Nav2/slam_toolbox still get msg.data raw
+        # via their own /map subscription, this only affects what gets drawn.
+        grid = _despeckle_grid(grid)
         img = np.full((msg.info.height, msg.info.width, 3), 180, dtype=np.uint8)
         img[grid == 0]   = [230, 230, 230]
         img[grid == 100] = [50,  50,  50]
         img[grid == -1]  = [160, 160, 160]
         img = cv2.flip(img, 0)
+        grid_flipped = cv2.flip(grid, 0)
         # Tint the free space with each room's colour, so "πήγαινε στην κουζίνα"
         # can be checked against something visible instead of a uniform grey
         # field. Only free cells are tinted: walls stay black or the map stops
         # reading as a floor plan.
-        img = self._tint_rooms(img, cv2.flip(grid, 0))
+        img = self._tint_rooms(img, grid_flipped)
+        # room_mask.png is pixel-aligned to this FULL, uncropped grid — kept
+        # for _room_at_xy() (map-tab click-to-pick-room), which must do the
+        # same origin/resolution math _tint_rooms/_room_from_mask do, not the
+        # cropped-and-shifted origin below.
+        self._full_map_info = (msg.info.origin.position.x,
+                               msg.info.origin.position.y, msg.info.resolution)
+        # room_mask.png must match the FULL, uncropped map (see _tint_rooms),
+        # so the crop happens last, after tinting.
+        img, width, height, origin = _crop_to_content(img, grid_flipped, msg.info)
         _, png = cv2.imencode('.png', img)
         self._state.map_png = png.tobytes()
         info = {
-            'width':      msg.info.width,
-            'height':     msg.info.height,
+            'width':      width,
+            'height':     height,
             'resolution': msg.info.resolution,
-            'origin':     [msg.info.origin.position.x,
-                           msg.info.origin.position.y],
+            'origin':     origin,
         }
         self._state.map_info = info
         # Drives the legend. Stashed on State rather than only broadcast, so
@@ -933,6 +1047,116 @@ class DashboardNode(Node):
         out[paint] = (out[paint] * (1 - self.ROOM_TINT)
                       + bgr[paint] * self.ROOM_TINT)
         return out.astype(np.uint8)
+
+    def _room_at_xy(self, x: float, y: float):
+        """Which room name is painted at this map-frame (x, y), or None.
+
+        Same pixel math and nearest-colour match as room_markers_node's
+        `_room_from_mask` — kept independent rather than imported so this file
+        does not need that node's ROS-only module just for two lines of math.
+        Used by the map tab's "click picks a room" toggle, so clicking a
+        colour on the map can jump straight to that room's row in the editor
+        instead of hunting for it by eye in a name-sorted list.
+        """
+        bgr, alpha, names = self._load_room_mask()
+        if bgr is None or not names or self._full_map_info is None:
+            return None
+        ox, oy, res = self._full_map_info
+        h, w = bgr.shape[:2]
+        col = int((x - ox) / res)
+        row = h - 1 - int((y - oy) / res)      # mask is stored image-side up
+        if not (0 <= col < w and 0 <= row < h) or not alpha[row, col]:
+            return None
+        b, g, r = bgr[row, col]
+        best, best_d = None, float('inf')
+        for name, rgb in names.items():
+            d = (int(r) - rgb[0]) ** 2 + (int(g) - rgb[1]) ** 2 + (int(b) - rgb[2]) ** 2
+            if d < best_d:
+                best_d, best = d, name
+        return best
+
+    def _save_rooms(self, edits):
+        """Rename/recolour rooms from the map tab's editor.
+
+        room_colors.yaml maps name -> [r,g,b] and room_mask.png is painted
+        with those EXACT rgb values per room (scripts/auto_rooms.py), so a
+        colour change has to repaint the mask, not just the yaml, or the
+        picture and the legend would disagree — and situational_awareness/
+        room_markers, which read the same two files, would still speak the
+        old colour's name for that patch of floor.
+        """
+        colours_path = os.path.join(SRC_MAPS_DIR, 'room_colors.yaml')
+        mask_path = os.path.join(SRC_MAPS_DIR, 'room_mask.png')
+        try:
+            if not isinstance(edits, list) or not edits:
+                raise ValueError('no rooms sent')
+            try:
+                with open(colours_path) as f:
+                    current = yaml.safe_load(f) or {}
+            except OSError:
+                current = {}
+
+            from PIL import Image
+            mask_arr = None
+            try:
+                mask_arr = np.array(Image.open(mask_path).convert('RGBA'))
+            except OSError:
+                pass
+
+            new_colours = {}
+            seen = set()
+            repaints = []   # (match-mask, new_rgb) pairs, applied after the loop
+            source = mask_arr.copy() if mask_arr is not None else None
+            for e in edits:
+                old = str(e.get('old', '')).strip()
+                name = str(e.get('name', '')).strip()
+                color = e.get('color')
+                if (not name or old not in current
+                        or not isinstance(color, list) or len(color) != 3):
+                    continue
+                if name in seen:               # two rows collapsed to one name
+                    name = old                  # keep it a no-op rather than merge rooms
+                seen.add(name)
+                rgb = [max(0, min(255, int(v))) for v in color]
+                old_rgb = list(current[old])
+                if source is not None and old_rgb != rgb:
+                    # Matched against `source`, a snapshot taken before any
+                    # repaint — otherwise swapping two rooms' colours would
+                    # have the second edit match pixels the first just wrote.
+                    match = ((source[:, :, 0] == old_rgb[0])
+                             & (source[:, :, 1] == old_rgb[1])
+                             & (source[:, :, 2] == old_rgb[2])
+                             & (source[:, :, 3] > 50))
+                    repaints.append((match, rgb))
+                new_colours[name] = rgb
+
+            if not new_colours:
+                raise ValueError('nothing usable in the edits')
+
+            for match, rgb in repaints:
+                mask_arr[match, 0] = rgb[0]
+                mask_arr[match, 1] = rgb[1]
+                mask_arr[match, 2] = rgb[2]
+
+            if mask_arr is not None:
+                Image.fromarray(mask_arr).save(mask_path)
+            with open(colours_path, 'w') as f:
+                yaml.safe_dump(new_colours, f, allow_unicode=True)
+        except Exception as exc:
+            self.get_logger().warn(f'save_rooms: {exc!r}')
+            self._state.broadcast({'type': 'room_saved', 'ok': False,
+                                   'error': str(exc)})
+            return
+
+        self._room_mask_at = None      # force _load_room_mask() to reread
+        if self._last_map is not None:
+            self._cb_map(self._last_map)   # repaints the tinted picture too
+        else:
+            _, _, names = self._load_room_mask()
+            self._state.map_rooms = {n: list(c) for n, c in (names or {}).items()}
+            self._state.broadcast({'type': 'map_rooms', 'rooms': self._state.map_rooms})
+        self.get_logger().info(f'rooms saved: {list(new_colours)}')
+        self._state.broadcast({'type': 'room_saved', 'ok': True})
 
     def _cb_semantic(self, msg: PointCloud2):
         """Obstacles the DETECTOR put into the costmap, not the LiDAR.
@@ -2507,6 +2731,14 @@ class DashboardNode(Node):
             # nothing until the next remap.
             if self._last_map is not None:
                 self._cb_map(self._last_map)
+        elif t == 'save_rooms':
+            self._save_rooms(msg.get('rooms', []))
+        elif t == 'pick_room':
+            try:
+                name = self._room_at_xy(float(msg.get('x', 0)), float(msg.get('y', 0)))
+            except (TypeError, ValueError):
+                name = None
+            self._state.broadcast({'type': 'room_picked', 'name': name}, remember=False)
         elif t == 'set_backend':
             threading.Thread(target=self._switch_backend,
                              args=(str(msg.get('backend', '')),),
@@ -3204,6 +3436,55 @@ async def maps_action(request: Request, action: str, name: str, t: str = ''):
         return JSONResponse({'error': repr(e)}, status_code=500)
 
 
+APPLY_SKIRT_SH = os.path.normpath(
+    os.path.join(SRC_MAPS_DIR, os.pardir, 'scripts', 'apply_skirt_margin.sh'))
+
+
+@app.get('/safety/skirt/{mm}')
+async def safety_skirt(request: Request, mm: int, t: str = ''):
+    """Rewrite collision_monitor's hard-stop margin and restart — see
+    home_robot/collision_skirt.py for why this can't be a live SetParameters
+    write like the rest of the Safety tab, and the module docstring there for
+    why moving_forward/moving_backward are the only rings this ever touches.
+    """
+    if not _authorised(t, request.cookies):
+        return JSONResponse({'error': 'unauthorized'}, status_code=401)
+    if mm not in collision_skirt.ALLOWED_MARGINS_MM:
+        return JSONResponse({'error': f'mm must be one of '
+                             f'{collision_skirt.ALLOWED_MARGINS_MM}'},
+                            status_code=400)
+    path = collision_skirt.default_params_path()
+    try:
+        with open(path) as f:
+            original = f.read()
+        patched = collision_skirt.patch_moving_points(original, mm)
+    except (OSError, ValueError) as exc:
+        # Never restart on a patch we're not sure about — the robot keeps
+        # running its old, still-valid safety config.
+        return JSONResponse({'error': str(exc)}, status_code=400)
+    try:
+        with open(path, 'w') as f:
+            f.write(patched)
+    except OSError as exc:
+        return JSONResponse({'error': str(exc)}, status_code=500)
+
+    # Same runtime-settings carry-forward maps_action does above — without
+    # this the relaunch would silently drop perception/LLM backend choices.
+    args = ['bash', APPLY_SKIRT_SH]
+    if ros_node:
+        if ros_node.perception_on():
+            args.append('use_perception:=true')
+        backend = await asyncio.to_thread(ros_node.llm_backend)
+        if backend and backend != 'lemonade':
+            args.append(f'llm_backend:={backend}')
+    try:
+        subprocess.Popen(args, start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        return JSONResponse({'error': repr(e)}, status_code=500)
+    return {'mm': mm, 'ok': True, 'result': 'restarting'}
+
+
 @app.websocket('/vnc/{app_name}')
 async def vnc_bridge(ws: WebSocket, app_name: str, t: str = ''):
     """noVNC <-> Xvnc. This is websockify, minus the extra daemon.
@@ -3361,6 +3642,8 @@ def _make_html(rooms: list, token: str = '') -> str:
                          'warn_above': s.warn_above, 'warn_below': s.warn_below}
                  for s in safety_settings.SPECS}))
             .replace('__SAFETY_INFO__', json.dumps(safety_settings.INFO_ONLY))
+            .replace('__SKIRT_MARGINS__', json.dumps(collision_skirt.ALLOWED_MARGINS_MM))
+            .replace('__SKIRT_DEFAULT_MM__', json.dumps(collision_skirt.MARGIN_DEFAULT_MM))
             .replace('__I18N__', json.dumps(as_js_table(), ensure_ascii=False))
             .replace('__LANGS__', json.dumps(LANGUAGES, ensure_ascii=False)))
 
@@ -3465,6 +3748,11 @@ button{font:inherit;color:inherit}
 .btn:active{background:#3d3d47}
 .btn.pri{background:#1d4ed8;border-color:#2563eb;color:#fff}
 .btn.warn{background:#7c2d12;border-color:#9a3412;color:#fed7aa}
+/* Flash the row a click-to-pick landed on, so the eye finds it in a list
+   sorted by name rather than by map position. Fade-out only (transition on
+   the base rule), instant on entry (transition:none on .picked itself). */
+#room-edit>[data-room]{transition:background-color 1.3s;border-radius:8px}
+#room-edit>[data-room].picked{background-color:#166534;transition:none}
 .grid2{display:grid;grid-template-columns:auto 1fr;gap:5px 14px;font-size:13px}
 .k{color:#71717a}.v{font-family:ui-monospace,Menlo,monospace;text-align:right;color:#d4d4d8}
 .pill{display:inline-block;padding:2px 9px;border-radius:9px;font-size:11px;
@@ -3711,6 +3999,16 @@ button{font:inherit;color:inherit}
         </h3>
         <div class="row" id="rooms"></div>
         <div class="row" id="room-legend" style="margin-top:8px;gap:11px"></div>
+        <label style="display:flex;align-items:center;gap:9px;font-size:12.5px;
+          cursor:pointer;user-select:none;margin-top:8px">
+          <input type="checkbox" id="b-pick-room" style="vertical-align:-2px">
+          🖱️ Κλικ στον χάρτη επιλέγει δωμάτιο (αντί να στέλνει το ρομπότ εκεί)
+        </label>
+        <div id="room-edit" style="margin-top:10px"></div>
+        <div class="row" style="margin-top:8px" id="room-edit-row">
+          <button class="btn" id="b-room-save">💾 Αποθήκευση ονομάτων/χρωμάτων</button>
+          <span id="room-edit-msg" style="font-size:11.5px;color:#71717a"></span>
+        </div>
         <div class="speedbox" style="margin-top:10px">
           <label style="display:flex;align-items:center;gap:9px;font-size:12.5px;
             cursor:pointer;user-select:none">
@@ -4741,15 +5039,32 @@ button{font:inherit;color:inherit}
         <h3>Σκληρά όρια <span class="badge">σταθερά</span></h3>
         <div id="sf-info" class="grid2"></div>
         <p class="sfhelp" style="margin-top:10px">
-          Αυτά ΔΕΝ αλλάζουν από εδώ. Ο collision_monitor τα διαβάζει μία φορά
-          στην εκκίνηση, οπότε ένας διακόπτης εδώ θα έδειχνε νούμερο που το
-          ρομπότ δεν χρησιμοποιεί. Αλλάζουν στο config/nav2_params.yaml και
-          θέλουν πλήρη επανεκκίνηση.
+          ΔΕΝ αλλάζει από εδώ. Ο collision_monitor το διαβάζει μία φορά στην
+          εκκίνηση, οπότε ένας διακόπτης εδώ θα έδειχνε νούμερο που το ρομπότ
+          δεν χρησιμοποιεί. Αλλάζει στο config/nav2_params.yaml και θέλει
+          πλήρη επανεκκίνηση.
         </p>
         <div class="row" style="margin-top:12px">
           <button class="btn warn" id="b-sf-reset">↺ Επαναφορά προεπιλογών</button>
         </div>
         <div id="sf-msg" class="sfhelp" style="margin-top:9px"></div>
+      </div>
+
+      <div class="card">
+        <h3>🛑 Απόσταση πλήρους στάσης <span class="badge" id="sk-badge">—</span></h3>
+        <p class="sfhelp">
+          Το τελευταίο όριο: μόλις το lidar δει κάτι μέσα σε αυτή την
+          απόσταση γύρω από το σώμα, ο collision_monitor μηδενίζει αμέσως
+          την ταχύτητα — ανεξάρτητα από το τι σχεδιάζει ο planner. Δεν είναι
+          η «Απόσταση από τοίχους» πιο πάνω: εκείνο επηρεάζει πού περνά η
+          διαδρομή, αυτό είναι το φρένο ανάγκης. Μικρότερη απόσταση αφήνει
+          το ρομπότ να πλησιάσει περισσότερο πριν σταματήσει απότομα.
+        </p>
+        <div class="row" style="margin-top:10px;align-items:center">
+          <select id="sk-mm" class="btn" style="padding:6px 9px"></select>
+          <button class="btn warn" id="b-sk-apply">Εφαρμογή (επανεκκίνηση ~90s)</button>
+        </div>
+        <div id="sk-msg" class="sfhelp" style="margin-top:9px"></div>
       </div>
     </section>
 
@@ -4803,6 +5118,7 @@ const LASER_X = 0.00, LASER_YAW_OFFSET = Math.PI;
 
 // ── state ──────────────────────────────────────────────────────────────────
 let ws=null, mapInfo=null, mapImg=null, pose=null, scan=null, goal=null, plan=null;
+let roomsData={};
 let driveTimer=null, vx=0, wz=0, estop=false, armPos={};
 const $ = id => document.getElementById(id);
 
@@ -5256,8 +5572,27 @@ const HANDLERS = {
   map(m){
     mapInfo={width:m.width,height:m.height,resolution:m.resolution,origin:m.origin};
     const i=new Image(); i.onload=()=>{mapImg=i;draw();}; i.src='data:image/png;base64,'+m.image;
-    if (m.rooms) roomLegend(m.rooms);
+    if (m.rooms) { roomsData=m.rooms; roomLegend(m.rooms); renderRoomEditor(m.rooms); }
     if (m.tinted !== undefined) $('b-tint').checked = m.tinted;
+  },
+  map_rooms(m){ roomsData=m.rooms||{}; roomLegend(roomsData); renderRoomEditor(roomsData); },
+  room_saved(m){
+    $('room-edit-msg').textContent = m.ok ? t('Αποθηκεύτηκε.') : (m.error || t('Αποτυχία.'));
+    $('room-edit-msg').style.color = m.ok ? '#4ade80' : '#f87171';
+  },
+  room_picked(m){
+    if(!m.name){
+      $('room-edit-msg').textContent = t('Δεν βρέθηκε δωμάτιο εκεί.');
+      $('room-edit-msg').style.color = '#71717a';
+      return;
+    }
+    const row = Array.from(document.querySelectorAll('#room-edit [data-room]'))
+      .find(el => el.dataset.room === m.name);
+    if(!row) return;
+    row.scrollIntoView({behavior:'smooth', block:'nearest'});
+    row.classList.add('picked');
+    setTimeout(()=>row.classList.remove('picked'), 1500);
+    row.querySelector('.re-name').focus();
   },
   pose(m){
     pose=m;
@@ -5382,7 +5717,7 @@ const HANDLERS = {
   fall_event(m){ onFallEvent(m); },
   speaker(m){ onSpeaker(m); },
   doa_rotate(m){ onDoaRotate(m); },
-  safety(m){ onSafety(m.v); },
+  safety(m){ onSafety(m.v); if (m.skirt_margin_mm !== undefined) skirtSetDisplay(m.skirt_margin_mm); },
 };
 
 // ── safety clearances ──────────────────────────────────────────────────────
@@ -5486,6 +5821,46 @@ function onSafety(v){
   $('sf-nav-badge').textContent  = navUp  ? t('ενεργό') : t('δεν τρέχει');
   $('sf-base-badge').textContent = baseUp ? t('ενεργό') : t('δεν τρέχει');
 }
+
+// ── collision_monitor hard-stop skirt ────────────────────────────────────────
+// NOT one of SAFETY_SPECS: this needs a restart to take effect (see
+// home_robot/collision_skirt.py), so it gets its own control instead of
+// pretending to be a live SetParameters slider like the rows above.
+const SKIRT_MARGINS = __SKIRT_MARGINS__;
+const SKIRT_DEFAULT_MM = __SKIRT_DEFAULT_MM__;
+
+function skirtBuild(){
+  const sel = $('sk-mm');
+  SKIRT_MARGINS.forEach(mm => {
+    const o = document.createElement('option');
+    o.value = mm; o.textContent = mm + ' mm';
+    sel.appendChild(o);
+  });
+  // Best guess before the first 'safety' broadcast lands (~3s at worst);
+  // skirtSetDisplay() overwrites this with the real, live-read value.
+  skirtSetDisplay(SKIRT_DEFAULT_MM);
+}
+
+function skirtSetDisplay(mm){
+  $('sk-badge').textContent = mm + ' mm';
+  // Never fight the user's finger: leave their pick alone while they're
+  // choosing, same rule safety sliders follow above.
+  if (document.activeElement !== $('sk-mm')) $('sk-mm').value = mm;
+}
+
+async function skirtApply(){
+  const mm = $('sk-mm').value;
+  if (!confirm(t('Αυτό είναι το σκληρό όριο πλήρους στάσης, όχι η απόσταση '
+      + 'σχεδίασης διαδρομής. Χρειάζεται πλήρη επανεκκίνηση (~90 δευτερόλεπτα) '
+      + 'και μικρότερη απόσταση αφήνει το ρομπότ να πλησιάσει περισσότερο πριν '
+      + 'σταματήσει απότομα. Να συνεχίσω;'))) return;
+  $('sk-msg').textContent = t('Επανεκκίνηση… η σελίδα θα ξανασυνδεθεί μόνη της.');
+  try {
+    const r = await (await fetch('/safety/skirt/' + mm + (TOKEN_QS || ''))).json();
+    if (r.error) $('sk-msg').textContent = t('Απέτυχε') + ': ' + r.error;
+  } catch(e) { /* the server is going down under us; that IS the success case */ }
+}
+$('b-sk-apply').onclick = skirtApply;
 
 // ── turn-toward-the-speaker switch ─────────────────────────────────────────
 // doa_node owns this bit; we only ever paint what it reports. Ticking the box
@@ -6336,6 +6711,10 @@ canvas.addEventListener('click',e=>{
   const cx=(e.clientX-r.left)*canvas.width/r.width;
   const cy=(e.clientY-r.top)*canvas.height/r.height;
   const wp=c2w(cx,cy); if(!wp) return;
+  if($('b-pick-room').checked){
+    send({type:'pick_room',x:wp.x,y:wp.y});
+    return;
+  }
   goal=wp; send({type:'nav_goal',x:wp.x,y:wp.y});
   draw();
 });
@@ -6365,6 +6744,45 @@ function roomLegend(rooms){
            'background:rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')"></i>' + n + '</span>';
   }).join('');
 }
+// ── room name/colour editor ─────────────────────────────────────────────────
+// Edits maps/room_colors.yaml (+ repaints room_mask.png server-side) so a
+// remap's room1/room2 placeholders can be named and coloured from the phone
+// instead of SSH-editing a YAML file. Greek names are data, not routed
+// through t() — same reasoning as roomLegend above.
+function renderRoomEditor(rooms){
+  const el = $('room-edit');
+  const names = Object.keys(rooms).sort();
+  if (!names.length){ el.innerHTML = ''; $('room-edit-row').style.display='none'; return; }
+  $('room-edit-row').style.display='';
+  el.innerHTML = names.map(n => {
+    const c = rooms[n];
+    const hex = '#' + c.map(v => Math.max(0, Math.min(255, v|0))
+                              .toString(16).padStart(2, '0')).join('');
+    return '<div class="row" style="gap:8px;margin-top:6px" data-room="' + esc(n) + '">' +
+      '<input type="color" class="re-color" value="' + hex + '" ' +
+        'style="width:34px;height:30px;padding:0;border:none;background:none;flex:0 0 auto">' +
+      '<input type="text" class="re-name" value="' + esc(n) + '" ' +
+        'style="flex:1;min-width:100px;background:#232329;border:1px solid #2c2c32;' +
+        'border-radius:8px;color:#e4e4e7;padding:6px 9px;font-size:12.5px">' +
+      '</div>';
+  }).join('');
+}
+$('b-room-save').onclick = () => {
+  const rows = $('room-edit').querySelectorAll('[data-room]');
+  const rooms = [];
+  rows.forEach(row => {
+    const old = row.dataset.room;
+    const name = row.querySelector('.re-name').value.trim();
+    const hex = row.querySelector('.re-color').value;
+    if (!name) return;
+    rooms.push({old, name, color:[
+      parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)]});
+  });
+  if (!rooms.length) return;
+  send({type:'save_rooms', rooms});
+  $('room-edit-msg').textContent = t('Αποθήκευση…');
+  $('room-edit-msg').style.color = '#71717a';
+};
 $('b-tint').onchange = e => send({type:'room_tint', on: e.target.checked});
 $('b-slipmap').onchange = e => { slipMapOn = e.target.checked; draw(); };
 
@@ -8185,6 +8603,7 @@ for(const [code, name] of LANGS){
   $('lang-buttons').appendChild(b);
 }
 safetyBuild();             // rows must exist before applyLang() translates them
+skirtBuild();
 usbBuild();                // same: the buttons carry translatable labels
 powerBuild();
 applyLang();               // also builds the tabs, so it precedes showTab()
