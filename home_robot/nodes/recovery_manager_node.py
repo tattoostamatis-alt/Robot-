@@ -196,8 +196,25 @@ class RecoveryManagerNode(Node):
         goal.header.frame_id = msg.header.frame_id or 'map'
         goal.pose = msg.poses[-1].pose
         with self._lock:
+            prev = self._last_goal
             self._last_goal = goal
             self._last_goal_rx = self.get_clock().now().nanoseconds / 1e9
+        # A goal endpoint that moved is a NEW navigation target, not a fresh
+        # /plan for the one we were already chasing (the planner republishes
+        # every cycle). The reissue budget belongs to that old goal, not this
+        # one — without this, a goal sent straight to navigate_to_pose
+        # (bypassing /mission/cancel, e.g. from the CLI or after an
+        # /emergency_stop, which this node doesn't watch) inherits a stale,
+        # possibly near-exhausted count from an unrelated earlier goal and
+        # can give up on a fresh goal almost immediately (seen 2026-08-09:
+        # "attempt 4/4" on the very first stuck event of a brand-new goal).
+        if prev is None or self._pose_dist(prev.pose, goal.pose) > self._reissue_prog:
+            self._reissue_count = 0
+            self._reissue_odom = None
+
+    @staticmethod
+    def _pose_dist(a, b) -> float:
+        return math.hypot(a.position.x - b.position.x, a.position.y - b.position.y)
 
     def _on_cancel(self, _msg: String):
         """Someone cancelled the navigation. Forget the goal; do not resume it.
