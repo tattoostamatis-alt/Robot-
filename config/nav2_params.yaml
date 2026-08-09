@@ -341,7 +341,26 @@ local_costmap:
         z_voxels: 16
         max_obstacle_height: 2.0
         mark_threshold: 0
-        observation_sources: scan depth_camera predicted_obstacles semantic_obstacles cliffs
+        # ‼️ 2026-08-09 — depth_camera REMOVED from this list at the user's
+        # request, after a session where the D435 logged "Hardware Notification:
+        # Incomplete video frame detected! ... Frame Corrupted" continuously
+        # from bringup onward. A corrupted depth frame drops phantom points
+        # right next to the robot, they mark the local costmap, and nothing
+        # retracts them promptly — that is how the robot ends up sitting on a
+        # cost-99 cell with a clean /scan (nearest real return 0.37 m) while
+        # every planner and every stock recovery refuses to move it. Chasing
+        # that with clear_costmap calls treats the symptom; the source of the
+        # bad marks is this topic. The block below is kept, unedited, so it can
+        # be switched back on by re-adding `depth_camera` here once the camera
+        # stops corrupting frames.
+        #
+        # Cost of removing it: the lidar plane sits at 0.606 m, so obstacles
+        # BELOW it (a low stool, a bag on the floor, a doorsill) are no longer
+        # seen by the costmap at all. The bumper is now the only thing that
+        # catches those, and it does work (project_robot_bumper). `cliffs`
+        # still marks drops — that source is the Roomba's own IR, not the
+        # camera.
+        observation_sources: scan predicted_obstacles semantic_obstacles cliffs
         scan:
           topic: /scan
           max_obstacle_height: 2.0
