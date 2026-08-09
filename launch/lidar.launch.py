@@ -59,7 +59,18 @@ def generate_launch_description():
                 'frame_id': 'laser',
                 'inverted': False,
                 'angle_compensate': True,
-                'scan_mode': 'Standard',
+                # ‼️ 2026-08-08: 'Standard' is REJECTED by this unit (Firmware
+                # 1.02, HW Rev 18) — "scan mode `Standard' is not supported by
+                # lidar" / "Can not start scan: 80008001!", so /scan never
+                # published a single message and nothing downstream (AMCL,
+                # global_localizer, the dashboard's map view) could show a
+                # pose. Empty string is sllidar_node's own documented
+                # fallback (sllidar_node.cpp: scan_mode.empty() ->
+                # drv->startScan(..., true /* use typical scan mode */, ...)),
+                # letting the SDK pick a mode this specific unit actually
+                # supports instead of a named one that may not exist on every
+                # C1 firmware revision.
+                'scan_mode': '',
             }],
             remappings=[('scan', scan_topic)],
         ),
