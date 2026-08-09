@@ -778,9 +778,39 @@ class GlobalLocalizerNode(Node):
             return
 
         bx, by, byaw = self._laser_to_base(nx, ny, nyaw)
+
+        # ‼️ 2026-08-09 — the nudge that teleports. On a stationary robot this
+        # logged "nudging pose 0.14 m" and AMCL then reported the pose landing
+        # 0.99 m and 65 deg away; the next one logged 0.34 m and moved it 1.90 m
+        # into a different room. `shift` only measures refine's own step, so
+        # anything that makes the pose this tick differ from the pose the last
+        # published nudge was computed against goes completely unreported — and
+        # a wrong room is exactly what a "small correction" must never cause.
+        #
+        # So gate on the number that actually matters: how far the pose we are
+        # about to publish sits from the one AMCL is holding right now. Same
+        # budget as the refine span; over it, the disagreement is a hypothesis
+        # change, not drift, and this code path is not allowed to make those
+        # (the lost/re-localize branch above is).
+        base_now = self._laser_to_base(lx, ly, lyaw)
+        jump = math.hypot(bx - base_now[0], by - base_now[1])
+        jump_deg = abs(math.degrees(_wrap(byaw - base_now[2])))
+        max_shift = self.get_parameter('watchdog_max_shift').value
+        if jump > max_shift or jump_deg > 30.0:
+            self.get_logger().warn(
+                f'Watchdog: ΑΠΟΡΡΙΨΗ — η νέα πόζα απέχει {jump:.2f} m / '
+                f'{jump_deg:.0f}° από την τρέχουσα ({base_now[0]:.2f},'
+                f'{base_now[1]:.2f}) → ({bx:.2f},{by:.2f}), πάνω από το όριο '
+                f'{max_shift:.2f} m. Αυτό είναι αλλαγή υπόθεσης, όχι διόρθωση.')
+            self._wd_backoff = min(max(self._wd_backoff * 2.0, cooldown), 300.0)
+            self._wd_next_ok = now + self._wd_backoff
+            self._wd_last_pose = None
+            return
+
         self.get_logger().info(
             f'Watchdog: scan->wall {err:.2f} -> {nerr:.2f} m — nudging pose '
-            f'{shift:.2f} m, {math.degrees(_wrap(nyaw - lyaw)):+.0f}°')
+            f'{shift:.2f} m, {math.degrees(_wrap(nyaw - lyaw)):+.0f}° '
+            f'| ({base_now[0]:.2f},{base_now[1]:.2f}) → ({bx:.2f},{by:.2f})')
         self._publish(bx, by, byaw, tight=True)
         self._wd_backoff = 0.0
         self._wd_next_ok = now + cooldown

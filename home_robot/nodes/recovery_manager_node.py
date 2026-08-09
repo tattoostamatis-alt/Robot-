@@ -36,6 +36,7 @@ from nav2_msgs.action import BackUp, DriveOnHeading, NavigateToPose, Spin
 from nav2_msgs.srv import ClearEntireCostmap
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String, Bool
 import rclpy
 
@@ -70,7 +71,15 @@ class RecoveryManagerNode(Node):
         # already see. The give-up line is spoken regardless — see _speak.
         self.declare_parameter('announce_progress', False)
         self.declare_parameter('nudge_linear_speed',  0.10)  # m/s — doorway pinch-point creep
-        self.declare_parameter('nudge_angular_speed', 0.10)  # rad/s
+        # ‼️ 2026-08-09: was 0.10 rad/s, which this chassis cannot execute AT
+        # ALL — the Roomba 879 has a hard rotation floor around 0.31 rad/s
+        # (project_robot_rotation_floor), below which the wheels simply do not
+        # turn. So the nudge step — the last raw-cmd_vel escape before the
+        # recovery gives up, deliberately placed below the collision monitor
+        # precisely because everything above it has already refused — published
+        # 1.2 s of a command the robot ignored, every single time, and then
+        # reported that it had tried. 0.45 clears the floor with margin.
+        self.declare_parameter('nudge_angular_speed', 0.45)  # rad/s
         self.declare_parameter('nudge_duration',      1.2)   # seconds per phase (turn, then creep)
         # After a successful escape, re-send the navigation goal that was
         # cancelled to run the recovery. recovery_manager cancels the active
@@ -173,6 +182,10 @@ class RecoveryManagerNode(Node):
         # publisher either.
         self.create_subscription(String, '/mission/cancel', self._on_cancel, 10)
         self.create_subscription(Odometry, '/odom', self._on_odom, 10)
+        # Only consumer is the nudge step, which needs a direction to escape in
+        # when the costmap-based behaviors have all refused.
+        self._scan = None
+        self.create_subscription(LaserScan, '/scan', self._on_scan, 10)
         # Teleop that remaps straight onto cmd_vel_safe bypasses this on
         # purpose: no auto-recovery fighting the joystick.
         self.create_subscription(Twist, 'cmd_vel_smoothed', self._on_cmd_vel, 10)
@@ -201,6 +214,9 @@ class RecoveryManagerNode(Node):
         x = msg.pose.pose.position.x
         y = msg.pose.pose.position.y
         self._positions.append((t, x, y))
+
+    def _on_scan(self, msg: LaserScan):
+        self._scan = msg
 
     def _on_cmd_vel(self, msg: Twist):
         mag = abs(msg.linear.x) + abs(msg.linear.y) + abs(msg.angular.z)
@@ -513,9 +529,54 @@ class RecoveryManagerNode(Node):
             if self._await_future(future, 2.0) is None:
                 self.get_logger().warn(f'{name} costmap clear timed out')
 
+    def _roomiest_bearing(self):
+        """Bearing (rad, robot frame) of the widest gap the lidar can see, or
+        None without a usable scan. Sectors of 30°, scored by their CLOSEST
+        return — a sector is only as passable as its nearest obstacle."""
+        scan = self._scan
+        if scan is None:
+            return None
+        width = math.radians(30)
+        best_a, best_r = None, 0.0
+        for k in range(int(2 * math.pi / width)):
+            lo = -math.pi + k * width
+            closest = float('inf')
+            for i, r in enumerate(scan.ranges):
+                if not (scan.range_min <= r <= scan.range_max):
+                    continue
+                a = scan.angle_min + i * scan.angle_increment
+                a = math.atan2(math.sin(a), math.cos(a))
+                if lo <= a < lo + width:
+                    closest = min(closest, r)
+            if closest != float('inf') and closest > best_r:
+                best_a, best_r = lo + width / 2, closest
+        if best_a is None:
+            return None
+        self.get_logger().info(
+            f'Nudge: roomiest bearing {math.degrees(best_a):+.0f}° '
+            f'({best_r:.2f} m clear)')
+        return best_a
+
     def _do_nudge(self):
-        self.get_logger().info('Nudge: turn then creep')
-        self._publish_twist_for(self._nudge_duration, angular_z=self._nudge_angular)
+        """Raw cmd_vel escape, aimed rather than blind.
+
+        This runs only after BackUp and DriveOnHeading have both refused, which
+        on this robot means the costmap believes the footprint is already in
+        contact — so there is no point asking the costmap where to go. Steer by
+        the live scan instead: turn toward the widest gap, then creep into it.
+        Turning a circular chassis in place sweeps no new ground
+        (project_robot_collision_monitor_corners), so the turn itself cannot
+        hit anything the robot is not already touching.
+        """
+        bearing = self._roomiest_bearing()
+        if bearing is None:
+            self.get_logger().info('Nudge: no scan — blind turn then creep')
+            self._publish_twist_for(self._nudge_duration,
+                                    angular_z=self._nudge_angular)
+        else:
+            turn_time = min(abs(bearing) / self._nudge_angular, 4.0)
+            self._publish_twist_for(
+                turn_time, angular_z=math.copysign(self._nudge_angular, bearing))
         self._publish_twist_for(self._nudge_duration, linear_x=self._nudge_linear)
         self.get_logger().info('Nudge done')
 
