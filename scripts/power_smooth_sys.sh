@@ -240,11 +240,17 @@ cmd_status() {
       echo "profile  : $name"
       [ -n "$saved" ] && [ "$saved" != "$name" ] \
         && echo "at boot  : $saved  ‼️ differs from what is running now"
-      return
+      # ‼️ Explicit 0. A bare `return` hands back the status of the last
+      # command, and that last command is the `!=` test — which is FALSE, and
+      # so returns 1, exactly when the saved profile matches the running one.
+      # That is the normal case, so `status` was reporting failure whenever
+      # everything was fine, and the dashboard would have rendered an error.
+      return 0
     fi
   done
   echo "profile  : custom"
   [ -n "$saved" ] && echo "at boot  : $saved"
+  return 0
 }
 
 # Sample PPT and report the swing and the worst step. Needs no root: the hwmon
