@@ -247,6 +247,15 @@ class RecoveryManagerNode(Node):
         return math.hypot(a.position.x - b.position.x, a.position.y - b.position.y)
 
     def _on_nav_feedback(self, msg):
+        # /plan only republishes on a SUCCESSFUL compute_path_to_pose, so a
+        # goal stuck in repeated planning failures (see above) never refreshes
+        # _last_goal_rx there. This feedback arrives for the goal regardless —
+        # proof it's still live — so touch the timestamp here too, or
+        # _maybe_reissue_goal silently drops a goal that is very much still
+        # active once goal_max_age (30s) has passed without a plan.
+        with self._lock:
+            if self._last_goal is not None:
+                self._last_goal_rx = self.get_clock().now().nanoseconds / 1e9
         n = msg.feedback.number_of_recoveries
         if self._last_num_recoveries is not None and n > self._last_num_recoveries:
             # bt_navigator's own RoundRobin clears costmaps on only 1 of its 5
