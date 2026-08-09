@@ -33,6 +33,7 @@ from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import Point, PoseStamped, Twist
 from nav_msgs.msg import Odometry, Path
 from nav2_msgs.action import BackUp, DriveOnHeading, NavigateToPose, Spin
+from nav2_msgs.srv import ClearEntireCostmap
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from std_msgs.msg import String, Bool
@@ -53,9 +54,14 @@ class RecoveryManagerNode(Node):
         self.declare_parameter('min_displacement', 0.03)  # meters — less than this = not moving
         self.declare_parameter('cmd_threshold',    0.01)  # m/s or rad/s — above = motion commanded
         self.declare_parameter('max_attempts',     3)
-        self.declare_parameter('backup_distance',  0.25)  # meters
+        # 0.25/0.15 originally — dropped 2026-08-09 after a live stuck event
+        # where a requested BackUp/DriveOnHeading as small as 8cm still hit
+        # "Collision Ahead" instantly (see _clear_costmaps): the smaller ask
+        # completes inside whatever real gap exists instead of demanding a
+        # guaranteed-clear 25cm runway that a tight doorway may not have.
+        self.declare_parameter('backup_distance',  0.10)  # meters
         self.declare_parameter('backup_speed',     0.05)  # m/s
-        self.declare_parameter('drive_distance',   0.15)  # meters — DriveOnHeading creep
+        self.declare_parameter('drive_distance',   0.08)  # meters — DriveOnHeading creep
         self.declare_parameter('drive_speed',      0.05)  # m/s
         self.declare_parameter('spin_angle',       1.571) # radians (π/2 = 90°)
         self.declare_parameter('enabled',          True)
@@ -108,6 +114,8 @@ class RecoveryManagerNode(Node):
         self._last_goal_rx: float | None = None
         self._reissue_count = 0
         self._reissue_odom: tuple | None = None   # odom (x,y) at the last re-issue
+        # bt_navigator's own number_of_recoveries feedback — see _on_nav_feedback.
+        self._last_num_recoveries: int | None = None
 
         # Sliding window: deque of (timestamp_sec, x, y)
         self._positions: deque = deque(maxlen=40)   # ~20s at 0.5Hz check
@@ -133,6 +141,19 @@ class RecoveryManagerNode(Node):
             CancelGoal, 'navigate_to_pose/_action/cancel_goal')
         # Our own NavigateToPose client to re-issue the goal after recovery.
         self._nav_ac = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+        # Cleared at the top of every recovery — see _clear_costmaps(). A STUCK
+        # event with real free space on all sides (confirmed live 2026-08-09:
+        # BackUp/DriveOnHeading both refused with "Collision Ahead" at a
+        # requested distance as small as 8cm, and the planner could not find a
+        # path even FROM the robot's own current cell) means the costmap, not
+        # the world, is blocking it — most likely stale voxel_layer marks from
+        # a corrupted RealSense frame (the camera logs "Frame Corrupted"
+        # continuously). Clearing before every attempt is what unstuck it by
+        # hand that day; this makes the same fix automatic.
+        self._clear_local_cli  = self.create_client(
+            ClearEntireCostmap, '/local_costmap/clear_entirely_local_costmap')
+        self._clear_global_cli = self.create_client(
+            ClearEntireCostmap, '/global_costmap/clear_entirely_global_costmap')
 
         # Publishers
         self._status_pub   = self.create_publisher(String, 'recovery/status',  10)
@@ -157,6 +178,14 @@ class RecoveryManagerNode(Node):
         self.create_subscription(Twist, 'cmd_vel_smoothed', self._on_cmd_vel, 10)
         # Learn the active goal (last plan pose, map frame) so we can re-issue it.
         self.create_subscription(Path, 'plan', self._on_plan, 10)
+        # bt_navigator's own recovery count for the ACTIVE goal, whoever owns
+        # it — catches the case _check_stuck cannot: a planner that keeps
+        # failing to find a path (own footprint pinned by a stale costmap
+        # mark, see _clear_costmaps) never commands cmd_vel, so the
+        # cmd_vel-vs-displacement watch never starts and STUCK never fires.
+        self.create_subscription(
+            NavigateToPose.Impl.FeedbackMessage, 'navigate_to_pose/_action/feedback',
+            self._on_nav_feedback, 10)
 
         self.create_timer(0.5, self._check_stuck)
 
@@ -211,10 +240,24 @@ class RecoveryManagerNode(Node):
         if prev is None or self._pose_dist(prev.pose, goal.pose) > self._reissue_prog:
             self._reissue_count = 0
             self._reissue_odom = None
+            self._last_num_recoveries = None
 
     @staticmethod
     def _pose_dist(a, b) -> float:
         return math.hypot(a.position.x - b.position.x, a.position.y - b.position.y)
+
+    def _on_nav_feedback(self, msg):
+        n = msg.feedback.number_of_recoveries
+        if self._last_num_recoveries is not None and n > self._last_num_recoveries:
+            # bt_navigator's own RoundRobin clears costmaps on only 1 of its 5
+            # recovery branches (BackUp/DriveOnHeading/Spin/Wait are the other
+            # 4), so a planner stuck on a stale costmap mark can burn through
+            # several recoveries between clears. Run from a fresh thread, same
+            # as _run_recovery — this callback is on the executor thread and
+            # _clear_costmaps' _await_future needs that thread free to spin.
+            self.get_logger().info(f'bt_navigator recovery #{n} — clearing costmaps too')
+            threading.Thread(target=self._clear_costmaps, daemon=True).start()
+        self._last_num_recoveries = n
 
     def _on_cancel(self, _msg: String):
         """Someone cancelled the navigation. Forget the goal; do not resume it.
@@ -314,6 +357,13 @@ class RecoveryManagerNode(Node):
 
         # Cancel any active navigation goal
         self._cancel_navigation()
+        # Stale costmap data (esp. camera-fed voxel_layer marks left by a
+        # corrupted depth frame) can pin the robot's own footprint against a
+        # phantom obstacle — every stock recovery step then refuses with
+        # "Collision Ahead" no matter how short the requested distance,
+        # because the very first simulated step already overlaps it. A clear
+        # costmap fixes exactly that without touching the map or amcl.
+        self._clear_costmaps()
 
         # Stock Nav2 behaviors first, translation before rotation: BackUp and
         # DriveOnHeading collision-check only the straight-line motion, so they
@@ -443,6 +493,16 @@ class RecoveryManagerNode(Node):
         # Empty request → cancel all active goals on navigate_to_pose.
         future = self._nav_cancel_cli.call_async(CancelGoal.Request())
         self._await_future(future, 3.0)
+
+    def _clear_costmaps(self):
+        for name, client in (('local', self._clear_local_cli),
+                              ('global', self._clear_global_cli)):
+            if not client.wait_for_service(timeout_sec=1.0):
+                self.get_logger().warn(f'{name} costmap clear service not available')
+                continue
+            future = client.call_async(ClearEntireCostmap.Request())
+            if self._await_future(future, 2.0) is None:
+                self.get_logger().warn(f'{name} costmap clear timed out')
 
     def _do_nudge(self):
         self.get_logger().info('Nudge: turn then creep')
