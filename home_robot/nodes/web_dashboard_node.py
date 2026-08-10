@@ -63,8 +63,9 @@ from action_msgs.srv import CancelGoal
 from std_srvs.srv import Empty
 
 from home_robot.compass import offset_from_known_bearing
-from home_robot import (collision_skirt, map_straighten, map_walls3d,
-                        room_files, room_segment, safety_settings)
+from home_robot import (collision_skirt, keepout_files, keepout_toggle,
+                        map_straighten, map_walls3d, room_files,
+                        room_segment, safety_settings)
 from home_robot.system_settings import (
     bt_args, parse_bt_devices, parse_devices, parse_volume, parse_wifi_list,
     volume_args, wifi_connect_args)
@@ -316,6 +317,9 @@ class State:
         # Room legend + tint state, replayed with the map on connect.
         self.map_rooms: dict = {}
         self.map_tinted: bool = True
+        # Keepout zones for the active map, replayed with the map on connect —
+        # see home_robot/keepout_files.py.
+        self.map_keepout: dict = {}
         self.camera_jpg: Optional[bytes] = None
         # When that frame arrived, and how many have arrived in total. The
         # stream needs both: the age decides whether the picture is still
@@ -983,12 +987,14 @@ class DashboardNode(Node):
         _, _, names = self._load_room_mask()
         self._state.map_rooms = {n: list(c) for n, c in (names or {}).items()}
         self._state.map_tinted = self._rooms_tinted
+        self._state.map_keepout = self._load_keepout_zones()
         self._state.broadcast({
             'type':  'map',
             **info,
             'image': base64.b64encode(self._state.map_png).decode(),
             'rooms': self._state.map_rooms,
             'tinted': self._state.map_tinted,
+            'keepout': self._state.map_keepout,
         }, remember=False)   # replayed from map_png on connect, not from latest
 
     # How strongly the room colour is mixed into the floor. Low on purpose: the
@@ -1273,6 +1279,148 @@ class DashboardNode(Node):
             self._state.broadcast({'type': 'map_rooms', 'rooms': self._state.map_rooms})
         self.get_logger().info(f'room placed on {map_name}: {name} ({label_id})')
         self._state.broadcast({'type': 'room_saved', 'ok': True})
+
+    # ── keepout zones ────────────────────────────────────────────────────
+    # Areas Nav2 must not enter — see home_robot/keepout_files.py for why the
+    # zones are per-map (maps/<map>_keepout_zones.yaml) but the rendered mask
+    # Nav2 actually reads is one fixed pair of files (config/keepout_mask.*):
+    # filter_mask_server's yaml_filename is set once at LAUNCH time
+    # (launch/bringup.launch.py), so there is no per-map path to point it at
+    # without also making the launch args per-map, which nothing else needs.
+
+    def _load_keepout_zones(self) -> dict:
+        name = self.active_map()
+        return keepout_files.load_zones(name) if name else {}
+
+    def _map_pgm_shape(self, map_name: str):
+        """(width, height) of a saved map's .pgm, straight from the file —
+        independent of whatever's currently live on /map, so a zone can still
+        be rasterized right after a map switch before the first /map arrives.
+        """
+        from PIL import Image
+        with Image.open(os.path.join(SRC_MAPS_DIR, f'{map_name}.pgm')) as im:
+            return im.size
+
+    def _add_keepout_zone(self, x1, y1, x2, y2, name):
+        """Two opposite corners (map frame) -> one rectangular zone, same
+        convention as scripts/collect_keepout_clicks.py's RViz workflow.
+        Threaded: active_map() + PIL/yaml I/O off the asyncio event loop —
+        same reasoning as _save_rooms/_place_room.
+        """
+        try:
+            name = str(name).strip()
+            if not name:
+                raise ValueError('όνομα ζώνης κενό')
+            x1, y1, x2, y2 = float(x1), float(y1), float(x2), float(y2)
+            w, h = abs(x2 - x1), abs(y2 - y1)
+            if w < 0.10 or h < 0.10:
+                raise ValueError('πολύ μικρή ζώνη — μάλλον misclick')
+
+            map_name = self.active_map()
+            if not map_name:
+                raise ValueError('κανένας αποθηκευμένος χάρτης ενεργός')
+
+            zones = keepout_files.load_zones(map_name)
+            zones[name] = {'shape': 'rect',
+                           'x': round((x1 + x2) / 2, 3),
+                           'y': round((y1 + y2) / 2, 3),
+                           'width': round(w, 2),
+                           'height': round(h, 2)}
+            keepout_files.save_zones(map_name, zones)
+            keepout_files.render_active_mask(
+                map_name, os.path.join(SRC_MAPS_DIR, f'{map_name}.yaml'),
+                self._map_pgm_shape(map_name))
+        except Exception as exc:
+            self.get_logger().warn(f'add_keepout_zone: {exc!r}')
+            self._state.broadcast({'type': 'keepout_saved', 'ok': False,
+                                   'error': str(exc)})
+            return
+        self._state.map_keepout = zones
+        self.get_logger().info(f'keepout zone added on {map_name}: {name}')
+        self._state.broadcast({'type': 'keepout_zones', 'zones': zones})
+        self._state.broadcast({'type': 'keepout_saved', 'ok': True})
+
+    def _delete_keepout_zone(self, name):
+        try:
+            name = str(name).strip()
+            map_name = self.active_map()
+            if not map_name:
+                raise ValueError('κανένας αποθηκευμένος χάρτης ενεργός')
+            zones = keepout_files.load_zones(map_name)
+            if name not in zones:
+                raise ValueError(f'δεν βρέθηκε ζώνη "{name}"')
+            del zones[name]
+            keepout_files.save_zones(map_name, zones)
+            keepout_files.render_active_mask(
+                map_name, os.path.join(SRC_MAPS_DIR, f'{map_name}.yaml'),
+                self._map_pgm_shape(map_name))
+        except Exception as exc:
+            self.get_logger().warn(f'delete_keepout_zone: {exc!r}')
+            self._state.broadcast({'type': 'keepout_saved', 'ok': False,
+                                   'error': str(exc)})
+            return
+        self._state.map_keepout = zones
+        self.get_logger().info(f'keepout zone removed on {map_name}: {name}')
+        self._state.broadcast({'type': 'keepout_zones', 'zones': zones})
+        self._state.broadcast({'type': 'keepout_saved', 'ok': True})
+
+    def _keepout_activate(self, on: bool):
+        """Flip both costmaps' keepout_filter to enabled/disabled in
+        nav2_params.yaml (home_robot/keepout_toggle.py — Nav2 reads costmap
+        plugin config once at on_configure, no live toggle exists) and
+        restart with/without use_keepout:=true, which starts/stops the mask
+        servers the layer depends on. Same restart shape as _switch_backend/
+        the /safety/skirt endpoint — scripts/apply_keepout_toggle.sh does the
+        actual `robot stop && robot max ...`.
+        """
+        path = keepout_toggle.default_params_path()
+        try:
+            with open(path) as f:
+                original = f.read()
+            patched = keepout_toggle.patch_enabled(original, on)
+        except (OSError, ValueError) as exc:
+            self._state.broadcast({'type': 'keepout_activated', 'ok': False,
+                                   'error': str(exc)})
+            return
+        if on:
+            map_name = self.active_map()
+            if not map_name:
+                self._state.broadcast({
+                    'type': 'keepout_activated', 'ok': False,
+                    'error': 'κανένας αποθηκευμένος χάρτης ενεργός'})
+                return
+            try:
+                keepout_files.render_active_mask(
+                    map_name, os.path.join(SRC_MAPS_DIR, f'{map_name}.yaml'),
+                    self._map_pgm_shape(map_name))
+            except Exception as exc:
+                self._state.broadcast({'type': 'keepout_activated', 'ok': False,
+                                       'error': str(exc)})
+                return
+        try:
+            with open(path, 'w') as f:
+                f.write(patched)
+        except OSError as exc:
+            self._state.broadcast({'type': 'keepout_activated', 'ok': False,
+                                   'error': str(exc)})
+            return
+
+        args = ['bash', KEEPOUT_APPLY_SH]
+        if on:
+            args.append('use_keepout:=true')
+        if self.perception_on():
+            args.append('use_perception:=true')
+        backend = self.llm_backend()
+        if backend and backend != 'lemonade':
+            args.append(f'llm_backend:={backend}')
+        try:
+            subprocess.Popen(args, start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as exc:
+            self._state.broadcast({'type': 'keepout_activated', 'ok': False,
+                                   'error': str(exc)})
+            return
+        self._state.broadcast({'type': 'keepout_activated', 'ok': True, 'on': on})
 
     def _cb_semantic(self, msg: PointCloud2):
         """Obstacles the DETECTOR put into the costmap, not the LiDAR.
@@ -2870,6 +3018,18 @@ class DashboardNode(Node):
                              args=(msg.get('x'), msg.get('y'),
                                    msg.get('name', ''), msg.get('color')),
                              daemon=True).start()
+        elif t == 'add_keepout_zone':
+            threading.Thread(target=self._add_keepout_zone,
+                             args=(msg.get('x1'), msg.get('y1'),
+                                   msg.get('x2'), msg.get('y2'),
+                                   msg.get('name', '')),
+                             daemon=True).start()
+        elif t == 'delete_keepout_zone':
+            threading.Thread(target=self._delete_keepout_zone,
+                             args=(msg.get('name', ''),), daemon=True).start()
+        elif t == 'keepout_activate':
+            threading.Thread(target=self._keepout_activate,
+                             args=(bool(msg.get('on')),), daemon=True).start()
         elif t == 'pick_room':
             try:
                 name = self._room_at_xy(float(msg.get('x', 0)), float(msg.get('y', 0)))
@@ -3615,7 +3775,7 @@ async def maps_straighten_apply(request: Request, name: str, t: str = ''):
 
 @app.get('/maps/walls3d')
 async def maps_walls3d(request: Request, t: str = '', map: str = ''):
-    """Wall footprints for the "Τοίχοι 3D" tab: the active map's clean
+    """Wall footprints for the map tab's 3D view: the active map's clean
     rectilinear polygons (see home_robot/map_walls3d.py), each edge as a
     world-metre quad the browser extrudes into a box. Defaults to whatever
     map Nav2 is currently using; ?map=<name> previews any saved map.
@@ -3692,6 +3852,8 @@ async def maps_action(request: Request, action: str, name: str, t: str = ''):
 
 APPLY_SKIRT_SH = os.path.normpath(
     os.path.join(SRC_MAPS_DIR, os.pardir, 'scripts', 'apply_skirt_margin.sh'))
+KEEPOUT_APPLY_SH = os.path.normpath(
+    os.path.join(SRC_MAPS_DIR, os.pardir, 'scripts', 'apply_keepout_toggle.sh'))
 
 
 @app.get('/safety/skirt/{mm}')
@@ -4239,9 +4401,24 @@ button{font:inherit;color:inherit}
     </div>
 
     <section class="pane active" id="p-map">
+      <div class="row" style="margin-bottom:8px">
+        <button class="btn pri" id="map-view-2d">🗺️ 2D</button>
+        <button class="btn" id="map-view-3d">🏗️ 3D</button>
+      </div>
       <div id="map-wrap">
         <canvas id="map-canvas"></canvas>
         <div class="ovl">ΧΑΡΤΗΣ · κλικ για πλοήγηση</div>
+      </div>
+      <div class="card" id="map-walls3d-card" style="display:none">
+        <h3>Τοίχοι 3D <span class="badge" id="walls3d-info">—</span>
+          <button class="btn" id="b-walls3d-reset" style="float:right">Επαναφορά όψης</button>
+        </h3>
+        <canvas id="walls3d" style="width:100%;height:min(58vh,600px);min-height:260px;
+          background:#0a0a0b;border-radius:8px;touch-action:none;cursor:grab;
+          display:block"></canvas>
+        <div style="color:#71717a;font-size:11.5px;margin-top:6px">
+          Σύρε για περιστροφή · ροδέλα για ζουμ · από τον καθαρό (τετραγωνισμένο) 2D χάρτη
+        </div>
       </div>
       <div class="card">
         <h3>Δωμάτια
@@ -4274,6 +4451,29 @@ button{font:inherit;color:inherit}
         <div class="row" style="margin-top:8px" id="room-edit-row">
           <button class="btn" id="b-room-save">💾 Αποθήκευση ονομάτων/χρωμάτων</button>
           <span id="room-edit-msg" style="font-size:11.5px;color:#71717a"></span>
+        </div>
+        <div class="speedbox" style="margin-top:10px">
+          <label style="display:flex;align-items:center;gap:9px;font-size:12.5px;
+            cursor:pointer;user-select:none">
+            <input type="checkbox" id="b-kz-add" style="vertical-align:-2px">
+            🚫 2 κλικ στον χάρτη ορίζουν απαγορευμένη ζώνη (απέναντι γωνίες)
+          </label>
+          <div class="row" id="kz-add-row" style="margin-top:6px;gap:8px;display:none">
+            <input type="text" id="kz-name" placeholder="π.χ. χαλάκι σκύλου"
+              style="flex:1;min-width:100px;background:#232329;border:1px solid #2c2c32;
+              border-radius:8px;color:#e4e4e7;padding:6px 9px;font-size:12.5px">
+          </div>
+          <div class="row" id="kz-list" style="margin-top:8px;flex-direction:column;
+            align-items:stretch;gap:4px"></div>
+          <div class="row" style="margin-top:8px">
+            <button class="btn warn" id="kz-on">🚫 Ενεργοποίηση ζωνών</button>
+            <button class="btn" id="kz-off">✅ Απενεργοποίηση</button>
+            <span id="kz-msg" style="font-size:11.5px;color:#71717a"></span>
+          </div>
+          <p style="font-size:11px;color:#71717a;margin-top:6px;line-height:1.5">
+            Χρειάζεται επανεκκίνηση (~90s) για να πιάσει η αλλαγή — το Nav2 διαβάζει
+            τις ζώνες μόνο στην εκκίνηση.
+          </p>
         </div>
         <div class="speedbox" style="margin-top:10px">
           <label style="display:flex;align-items:center;gap:9px;font-size:12.5px;
@@ -4379,21 +4579,6 @@ button{font:inherit;color:inherit}
     <section class="pane" id="p-moveit"></section>
     <section class="pane" id="p-gazebo"></section>
     <section class="pane" id="p-rtabmap"></section>
-
-    <!-- ── Walls 3D (floorplan extruded from the 2D map) ─────────── -->
-    <section class="pane" id="p-walls3d">
-      <div class="card">
-        <h3>Τοίχοι 3D <span class="badge" id="walls3d-info">—</span>
-          <button class="btn" id="b-walls3d-reset" style="float:right">Επαναφορά όψης</button>
-        </h3>
-        <canvas id="walls3d" style="width:100%;height:min(58vh,600px);min-height:260px;
-          background:#0a0a0b;border-radius:8px;touch-action:none;cursor:grab;
-          display:block"></canvas>
-        <div style="color:#71717a;font-size:11.5px;margin-top:6px">
-          Σύρε για περιστροφή · ροδέλα για ζουμ · από τον καθαρό (τετραγωνισμένο) 2D χάρτη
-        </div>
-      </div>
-    </section>
 
     <!-- ── Arm ─────────────────────────────────────────────────── -->
     <section class="pane" id="p-arm">
@@ -5424,6 +5609,7 @@ const LASER_X = 0.00, LASER_YAW_OFFSET = Math.PI;
 // ── state ──────────────────────────────────────────────────────────────────
 let ws=null, mapInfo=null, mapImg=null, pose=null, scan=null, goal=null, plan=null;
 let roomsData={};
+let kzData={};   // keepout zones for the active map, see keepout_files.py
 let driveTimer=null, vx=0, wz=0, estop=false, armPos={};
 const $ = id => document.getElementById(id);
 
@@ -5449,7 +5635,6 @@ const TABS = [
   // nuclear fusion, and this is the name the user asked for.
   ['fuse',   '🔀', 'Sensor fusion'],
   ['rtabmap','🏠', 'Σπίτι 3D'],
-  ['walls3d','🏗️', 'Τοίχοι 3D'],
   ['cost',   '🧱', 'Costmap'],
   ['nerf',   '✨', 'NeRF'],
   ['point',  '👉', 'Χειρονομίες'],
@@ -5485,7 +5670,11 @@ function showTab(id){
     t.classList.toggle('active', t.dataset.pane === id));
   document.querySelectorAll('.pane').forEach(p =>
     p.classList.toggle('active', p.id === 'p-' + id));
-  if (id === 'map') resize();
+  // The map tab holds two views (2D canvas / 3D walls) toggled by
+  // setMapView — re-run whichever is current, the same reason `resize()`
+  // below exists: a canvas sized while its pane was display:none reads 0
+  // for clientWidth/Height, so returning to the tab has to re-measure it.
+  if (id === 'map') setMapView(mapView);
   if (VNC_APPS[id]) ensureVnc(id);
   cloudSetActive(id === 'cloud');
   costSetActive(id === 'cost');
@@ -5495,8 +5684,24 @@ function showTab(id){
   // 170 kB of geometry, fetched the first time the tab is opened rather than
   // on every page load — most visits never look at the arm.
   if (id === 'arm'){ armLoad(); armDraw(); }
-  if (id === 'walls3d'){ wallsLoad(); wallsDraw(); }
 }
+
+// ── map tab: 2D / 3D toggle ─────────────────────────────────────────────────
+// One pane, two views of the SAME active map — replaces what used to be a
+// separate "Τοίχοι 3D" tab. 3D geometry (/maps/walls3d) is fetched lazily on
+// first switch to 3D (wallsLoad() is idempotent), same as the arm's model.
+let mapView = '2d';
+function setMapView(view){
+  mapView = view;
+  $('map-view-2d').classList.toggle('pri', view === '2d');
+  $('map-view-3d').classList.toggle('pri', view === '3d');
+  $('map-wrap').style.display = view === '2d' ? '' : 'none';
+  $('map-walls3d-card').style.display = view === '3d' ? '' : 'none';
+  if (view === '2d') resize();
+  else { wallsLoad(); wallsDraw(); }
+}
+$('map-view-2d').onclick = () => setMapView('2d');
+$('map-view-3d').onclick = () => setMapView('3d');
 // NB: the initial showTab() call lives at the bottom of the script — calling it
 // here would touch VNC_APPS before its `const` is initialised (temporal dead
 // zone), which throws and leaves the whole page unwired.
@@ -5819,6 +6024,30 @@ function draw(){
     });
   }
 
+  // Keepout zones — striped so they read as "excluded" rather than "tinted",
+  // the way rooms are. A half-drawn zone (first corner clicked, waiting for
+  // the second) gets a dashed preview so the pending click isn't invisible.
+  if(kzData){
+    ctx.fillStyle='rgba(248,113,113,.28)'; ctx.strokeStyle='rgba(248,113,113,.85)'; ctx.lineWidth=1.5;
+    Object.values(kzData).forEach(z=>{
+      if(z.shape==='circle'){
+        const c=w2c(z.x,z.y); const rp=z.radius/mapInfo.resolution*scale();
+        ctx.beginPath(); ctx.arc(c.x,c.y,rp,0,Math.PI*2); ctx.fill(); ctx.stroke();
+      } else {
+        const c=w2c(z.x,z.y);
+        const wpx=z.width/mapInfo.resolution*scale(), hpx=z.height/mapInfo.resolution*scale();
+        ctx.fillRect(c.x-wpx/2, c.y-hpx/2, wpx, hpx);
+        ctx.strokeRect(c.x-wpx/2, c.y-hpx/2, wpx, hpx);
+      }
+    });
+  }
+  if(kzCorner){
+    const c=w2c(kzCorner.x,kzCorner.y);
+    ctx.strokeStyle='#f87171'; ctx.setLineDash([4,3]); ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.arc(c.x,c.y,6,0,Math.PI*2); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
   // Global plan
   if(plan && plan.length>1){
     ctx.strokeStyle='rgba(96,165,250,.9)'; ctx.lineWidth=2.5;
@@ -5881,6 +6110,7 @@ const HANDLERS = {
     const i=new Image(); i.onload=()=>{mapImg=i;draw();}; i.src='data:image/png;base64,'+m.image;
     if (m.rooms) { roomsData=m.rooms; roomLegend(m.rooms); renderRoomEditor(m.rooms); }
     if (m.tinted !== undefined) $('b-tint').checked = m.tinted;
+    if (m.keepout) { kzData=m.keepout; renderKeepoutList(kzData); }
   },
   map_rooms(m){ roomsData=m.rooms||{}; roomLegend(roomsData); renderRoomEditor(roomsData); },
   room_saved(m){
@@ -5889,6 +6119,18 @@ const HANDLERS = {
     // place_room reuses this message: clear the name on success so the next
     // click starts a fresh room instead of re-painting the same one.
     if(m.ok && $('b-place-room').checked) $('pr-name').value = '';
+  },
+  keepout_zones(m){ kzData=m.zones||{}; renderKeepoutList(kzData); draw(); },
+  keepout_saved(m){
+    $('kz-msg').textContent = m.ok ? t('Αποθηκεύτηκε.') : (m.error || t('Αποτυχία.'));
+    $('kz-msg').style.color = m.ok ? '#4ade80' : '#f87171';
+    if(m.ok && $('b-kz-add').checked) $('kz-name').value = '';
+  },
+  keepout_activated(m){
+    $('kz-msg').textContent = m.ok
+      ? t('Επανεκκίνηση… η σελίδα θα ξανασυνδεθεί μόνη της.')
+      : (m.error || t('Αποτυχία.'));
+    $('kz-msg').style.color = m.ok ? '#4ade80' : '#f87171';
   },
   room_picked(m){
     if(!m.name){
@@ -7017,22 +7259,33 @@ function connect(){
 function send(o){ if(ws&&ws.readyState===1) ws.send(JSON.stringify(o)); }
 
 // ── map click ──────────────────────────────────────────────────────────────
-// Two click-modes share the canvas with plain navigation, so they are
-// mutually exclusive checkboxes: checking one un-checks the other, rather
-// than layering a second meaning onto the same click with no visual cue.
-$('b-pick-room').addEventListener('change', () => {
-  if ($('b-pick-room').checked) $('b-place-room').checked = false;
+// Three click-modes share the canvas with plain navigation, so they are
+// mutually exclusive checkboxes: checking one un-checks the others, rather
+// than layering meanings onto the same click with no visual cue.
+const CLICK_MODE_BOXES = ['b-pick-room', 'b-place-room', 'b-kz-add'];
+function syncClickModeRows(){
   $('place-room-row').style.display = $('b-place-room').checked ? '' : 'none';
-});
-$('b-place-room').addEventListener('change', () => {
-  if ($('b-place-room').checked) $('b-pick-room').checked = false;
-  $('place-room-row').style.display = $('b-place-room').checked ? '' : 'none';
-});
+  $('kz-add-row').style.display = $('b-kz-add').checked ? '' : 'none';
+  if(!$('b-kz-add').checked) kzCorner = null;   // abandon a half-drawn zone
+}
+CLICK_MODE_BOXES.forEach(id => $(id).addEventListener('change', () => {
+  if($(id).checked) CLICK_MODE_BOXES.filter(o => o !== id).forEach(o => $(o).checked = false);
+  syncClickModeRows();
+}));
+let kzCorner = null;    // first click of a 2-click keepout rectangle, or null
 canvas.addEventListener('click',e=>{
   const r=canvas.getBoundingClientRect();
   const cx=(e.clientX-r.left)*canvas.width/r.width;
   const cy=(e.clientY-r.top)*canvas.height/r.height;
   const wp=c2w(cx,cy); if(!wp) return;
+  if($('b-kz-add').checked){
+    if(!kzCorner){ kzCorner = wp; draw(); return; }
+    const name = $('kz-name').value.trim() || ('zone_' + (Object.keys(kzData).length + 1));
+    send({type:'add_keepout_zone', x1:kzCorner.x, y1:kzCorner.y, x2:wp.x, y2:wp.y, name});
+    kzCorner = null;
+    $('kz-msg').textContent = t('Προσθήκη…'); $('kz-msg').style.color = '#71717a';
+    return;
+  }
   if($('b-place-room').checked){
     const name = $('pr-name').value.trim();
     if(!name){
@@ -7121,6 +7374,39 @@ $('b-room-save').onclick = () => {
 };
 $('b-tint').onchange = e => send({type:'room_tint', on: e.target.checked});
 $('b-slipmap').onchange = e => { slipMapOn = e.target.checked; draw(); };
+
+// ── keepout zones ────────────────────────────────────────────────────────
+// Names are data (typed by the user, not routed through t()) — same
+// reasoning as roomLegend/renderRoomEditor above.
+function renderKeepoutList(zones){
+  const el = $('kz-list');
+  const names = Object.keys(zones).sort();
+  if (!names.length){ el.innerHTML = ''; return; }
+  el.innerHTML = names.map(n => {
+    const z = zones[n];
+    const dims = z.shape === 'circle' ? `r=${z.radius}m` : `${z.width}×${z.height}m`;
+    return '<div class="row" style="justify-content:space-between;font-size:11.5px">' +
+      '<span>🚫 ' + esc(n) + ' <span style="color:#71717a">(' + dims + ')</span></span>' +
+      '<button class="btn" data-kz-del="' + esc(n) + '" style="padding:3px 8px">✕</button>' +
+      '</div>';
+  }).join('');
+  el.querySelectorAll('[data-kz-del]').forEach(b => b.onclick = () => {
+    send({type:'delete_keepout_zone', name: b.dataset.kzDel});
+    $('kz-msg').textContent = t('Διαγραφή…'); $('kz-msg').style.color = '#71717a';
+  });
+}
+$('kz-on').onclick = () => {
+  if (!confirm(t('Θα επανεκκινήσει όλη τη στοίβα (~90 δευτερόλεπτα) με τις '
+              + 'απαγορευμένες ζώνες ενεργές. Να συνεχίσω;'))) return;
+  send({type:'keepout_activate', on: true});
+  $('kz-msg').textContent = t('Ενεργοποίηση…'); $('kz-msg').style.color = '#71717a';
+};
+$('kz-off').onclick = () => {
+  if (!confirm(t('Θα επανεκκινήσει όλη τη στοίβα (~90 δευτερόλεπτα) χωρίς τις '
+              + 'απαγορευμένες ζώνες. Να συνεχίσω;'))) return;
+  send({type:'keepout_activate', on: false});
+  $('kz-msg').textContent = t('Απενεργοποίηση…'); $('kz-msg').style.color = '#71717a';
+};
 
 // ── "πήγαινε να δεις" (check mission) ──────────────────────────────────────
 // The same mission the voice `check` tool starts: drive to the room, ask the

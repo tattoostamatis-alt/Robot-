@@ -9,7 +9,9 @@ view first (ros2 launch home_robot view_map.launch.py), then:
 
 With names given, it exits after 2 clicks per name. Without, it keeps
 collecting pairs and finishes after 45 s with no new clicks. Writes
-config/keepout_zones.yaml (overwrites the zones list), then run:
+maps/<active-map>_keepout_zones.yaml (overwrites that map's zones list — the
+active map is read from /map_server, same as every other per-map tool; see
+home_robot/keepout_files.py), then run:
 
     python3 scripts/draw_keepout.py
 """
@@ -17,19 +19,28 @@ import os
 import sys
 import time
 
-import yaml
 import rclpy
 from geometry_msgs.msg import PointStamped
-from ament_index_python.packages import get_package_share_directory
+from rcl_interfaces.srv import GetParameters
+
+sys.path.insert(0, os.path.expanduser('~/robot_ws/src/home_robot'))
+from home_robot import keepout_files  # noqa: E402
 
 IDLE_EXIT_S = 45.0
 MIN_SIZE_M = 0.10  # a zone thinner than this is probably a misclick
 
 
-def _zones_path() -> str:
-    share = os.path.join(get_package_share_directory('home_robot'),
-                         'config', 'keepout_zones.yaml')
-    return os.path.realpath(share)  # through the symlink into src/
+def _active_map(node) -> str:
+    cli = node.create_client(GetParameters, '/map_server/get_parameters')
+    if not cli.wait_for_service(timeout_sec=5.0):
+        sys.exit('map_server not reachable — is the robot up and localized?')
+    req = GetParameters.Request(names=['yaml_filename'])
+    fut = cli.call_async(req)
+    rclpy.spin_until_future_complete(node, fut, timeout_sec=5.0)
+    if not fut.done() or not fut.result().values:
+        sys.exit('could not read /map_server yaml_filename')
+    path = fut.result().values[0].string_value
+    return os.path.splitext(os.path.basename(path))[0]
 
 
 def main():
@@ -37,17 +48,20 @@ def main():
 
     rclpy.init()
     node = rclpy.create_node('collect_keepout_clicks')
+    map_name = _active_map(node)
+    existing = keepout_files.load_zones(map_name)
     clicks = []
     node.create_subscription(PointStamped, '/clicked_point',
                              lambda m: clicks.append(m), 10)
 
+    print(f'Ενεργός χάρτης: {map_name} ({len(existing)} υπάρχουσες ζώνες)')
     print('Publish Point στο RViz: 2 κλικ (απέναντι γωνίες) για κάθε ζώνη.')
     if names:
         print(f'Ζώνες: {", ".join(names)} — τέλος μετά από {2*len(names)} κλικ.')
     else:
         print(f'Ελεύθερη λειτουργία — τέλος μετά από {IDLE_EXIT_S:.0f}s χωρίς κλικ.')
 
-    zones = {}
+    zones = dict(existing)   # additive: re-running keeps what's already there
     corner = None
     zone_i = 0
     last_click_t = time.monotonic()
@@ -103,19 +117,11 @@ def main():
         print('Καμία ζώνη — το keepout_zones.yaml δεν αλλάζει.')
         sys.exit(1)
 
-    path = _zones_path()
-    with open(path, 'w') as f:
-        f.write('# Keepout zones — areas the robot must NOT navigate (map frame,\n'
-                '# clicked on the ACTIVE map). Recreate after a remap:\n'
-                '#   ros2 run home_robot collect_keepout_clicks.py   (RViz Publish Point)\n'
-                '#   python3 scripts/draw_keepout.py\n'
-                '# Shapes: rect (x,y=centre, width,height) | circle (x,y,radius), metres.\n'
-                '# To USE the zones: bringup with use_keepout:=true AND set the two\n'
-                '# keepout_filter layers to enabled: True in nav2_params.yaml.\n')
-        yaml.safe_dump({'zones': zones}, f, allow_unicode=True, sort_keys=False,
-                       default_flow_style=False)
+    keepout_files.save_zones(map_name, zones)
+    path = keepout_files.zones_path(map_name)
     print(f'{len(zones)} ζώνες γράφτηκαν στο {path}')
-    print('Τώρα: python3 scripts/draw_keepout.py')
+    print('Τώρα: python3 scripts/draw_keepout.py '
+         '(ή ενεργοποίησε από το dashboard\'s Χάρτες tab)')
 
 
 if __name__ == '__main__':

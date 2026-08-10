@@ -1,168 +1,47 @@
 #!/usr/bin/env python3
-"""Draw keepout zones onto keepout_mask.pgm from keepout_zones.yaml.
+"""Rasterize a map's keepout zones onto config/keepout_mask.pgm/.yaml — the
+FIXED path Nav2's filter_mask_server actually loads (see
+launch/bringup.launch.py's yaml_filename override). Zones themselves are
+per-map (maps/<map>_keepout_zones.yaml, home_robot/keepout_files.py, written
+by scripts/collect_keepout_clicks.py or the dashboard's Χάρτες tab).
 
 Usage:
-    python3 scripts/draw_keepout.py [map_name]    # default: kela3
+    python3 scripts/draw_keepout.py [map_name]    # default: malou2
 
-The mask copies the given map's size/origin, so REGENERATE after a remap —
-and re-click the zones too, since they are map-frame coordinates.
-After running, restart nav2 (or full bringup) for the new mask to take effect.
-No ROS or build step needed — the config files are symlinked.
+REGENERATE after a remap or after editing that map's zones — the mask is a
+snapshot, not live. After running, restart the stack with use_keepout:=true
+(the dashboard's Χάρτες tab does both steps at once).
 """
-
 import os
 import sys
 
-import yaml
+sys.path.insert(0, os.path.expanduser('~/robot_ws/src/home_robot'))
+from home_robot import keepout_files  # noqa: E402
 
-SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
-PKG_DIR     = os.path.dirname(SCRIPT_DIR)
-ZONES_FILE  = os.path.join(PKG_DIR, 'config', 'keepout_zones.yaml')
-MASK_PGM    = os.path.join(PKG_DIR, 'config', 'keepout_mask.pgm')
-MASK_YAML   = os.path.join(PKG_DIR, 'config', 'keepout_mask.yaml')
-MAP_NAME    = sys.argv[1] if len(sys.argv) > 1 else 'kela3'
-MAP_YAML    = os.path.join(PKG_DIR, 'maps', f'{MAP_NAME}.yaml')
-MAP_PGM     = os.path.join(PKG_DIR, 'maps', f'{MAP_NAME}.pgm')
+PKG = os.path.expanduser('~/robot_ws/src/home_robot')
+MAP_NAME = sys.argv[1] if len(sys.argv) > 1 else 'malou2'
+MAP_YAML = os.path.join(PKG, 'maps', f'{MAP_NAME}.yaml')
+MAP_PGM = os.path.join(PKG, 'maps', f'{MAP_NAME}.pgm')
 
-
-# ── helpers ────────────────────────────────────────────────────────────────────
-
-def read_pgm(path: str):
-    """Read a binary PGM (P5) → (pixels 2D list, width, height, maxval)."""
-    with open(path, 'rb') as f:
-        def next_token():
-            while True:
-                line = f.readline()
-                if not line:
-                    raise EOFError
-                line = line.split(b'#')[0].strip()
-                for tok in line.split():
-                    yield tok
-        tok = next_token()
-        magic  = next(tok)
-        assert magic == b'P5', f'Expected P5 PGM, got {magic}'
-        width  = int(next(tok))
-        height = int(next(tok))
-        maxval = int(next(tok))
-        raw    = f.read(width * height)
-    pixels = [[raw[r * width + c] for c in range(width)] for r in range(height)]
-    return pixels, width, height, maxval
-
-
-def write_pgm(path: str, pixels, width: int, height: int, maxval: int = 255):
-    """Write a binary PGM (P5)."""
-    with open(path, 'wb') as f:
-        f.write(f'P5\n{width} {height}\n{maxval}\n'.encode())
-        for row in pixels:
-            f.write(bytes(row))
-
-
-def world_to_pixel(wx: float, wy: float,
-                   ox: float, oy: float, res: float,
-                   height: int) -> tuple[int, int]:
-    """Map-frame (x, y) → pixel (col, row).  Row 0 = top of PGM = max y."""
-    col = int(round((wx - ox) / res))
-    row = height - 1 - int(round((wy - oy) / res))
-    return col, row
-
-
-# ── drawing ────────────────────────────────────────────────────────────────────
-
-def draw_circle(pixels, width: int, height: int,
-                cx: int, cy: int, r_px: int, value: int = 0):
-    for row in range(max(0, cy - r_px), min(height, cy + r_px + 1)):
-        for col in range(max(0, cx - r_px), min(width, cx + r_px + 1)):
-            if (col - cx) ** 2 + (row - cy) ** 2 <= r_px ** 2:
-                pixels[row][col] = value
-
-
-def draw_rect(pixels, width: int, height: int,
-              cx: int, cy: int, w_px: int, h_px: int, value: int = 0):
-    r0 = max(0, cy - h_px // 2)
-    r1 = min(height, cy + h_px // 2 + 1)
-    c0 = max(0, cx - w_px // 2)
-    c1 = min(width, cx + w_px // 2 + 1)
-    for row in range(r0, r1):
-        for col in range(c0, c1):
-            pixels[row][col] = value
-
-
-# ── main ───────────────────────────────────────────────────────────────────────
 
 def main():
-    # Load map metadata
-    with open(MAP_YAML) as f:
-        map_info = yaml.safe_load(f)
-    map_res    = float(map_info['resolution'])
-    map_origin = map_info['origin']            # [x, y, yaw]
-    ox, oy     = float(map_origin[0]), float(map_origin[1])
+    if not os.path.exists(MAP_YAML):
+        sys.exit(f'no such map: {MAP_YAML}')
+    from PIL import Image
+    with Image.open(MAP_PGM) as im:
+        width, height = im.size
 
-    # Load zones
-    with open(ZONES_FILE) as f:
-        cfg = yaml.safe_load(f)
-    zones = cfg.get('zones') or {}
-
+    zones = keepout_files.load_zones(MAP_NAME)
     if not zones:
-        print('No zones defined in keepout_zones.yaml — clearing mask to all-free.')
+        print(f'no zones for "{MAP_NAME}" — clearing mask to all-free.')
 
-    # Mask must match the map's dimensions — read them from its PGM header
-    _, map_w, map_h, _ = read_pgm(MAP_PGM)
-
-    # Start with all-free mask (254 = passable)
-    FREE    = 254
-    pixels = [[FREE] * map_w for _ in range(map_h)]
-
-    drawn = []
-    for name, z in zones.items():
-        shape = z.get('shape', 'rect').lower()
-        wx, wy = float(z['x']), float(z['y'])
-        cx, cy = world_to_pixel(wx, wy, ox, oy, map_res, map_h)
-
-        if shape == 'circle':
-            r_m  = float(z['radius'])
-            r_px = max(1, int(round(r_m / map_res)))
-            draw_circle(pixels, map_w, map_h, cx, cy, r_px)
-            drawn.append(f'  {name}: circle  centre=({wx:.2f},{wy:.2f})  r={r_m}m  →  pixel ({cx},{cy}) r={r_px}px')
-
-        elif shape == 'rect':
-            w_m, h_m = float(z['width']), float(z['height'])
-            w_px = max(1, int(round(w_m / map_res)))
-            h_px = max(1, int(round(h_m / map_res)))
-            draw_rect(pixels, map_w, map_h, cx, cy, w_px, h_px)
-            drawn.append(f'  {name}: rect    centre=({wx:.2f},{wy:.2f})  {w_m}×{h_m}m  →  pixel ({cx},{cy}) {w_px}×{h_px}px')
-
-        else:
-            print(f'  WARNING: unknown shape "{shape}" for zone {name} — skipped')
-
-    # Write new PGM
-    write_pgm(MASK_PGM, pixels, map_w, map_h)
-
-    # Update mask YAML to match map size/origin/resolution
-    mask_yaml_content = f"""\
-# Auto-generated by draw_keepout.py — do not edit directly.
-# Edit config/keepout_zones.yaml and re-run scripts/draw_keepout.py instead.
-image: keepout_mask.pgm
-mode: scale
-resolution: {map_res}
-origin: [{ox}, {oy}, 0.0]
-negate: 0
-occupied_thresh: 0.65
-free_thresh: 0.25
-"""
-    with open(MASK_YAML, 'w') as f:
-        f.write(mask_yaml_content)
-
-    print(f'keepout_mask.pgm  →  {map_w}×{map_h}px  origin=({ox},{oy})  res={map_res}m')
-    if drawn:
-        print(f'{len(drawn)} zone(s) drawn:')
-        for d in drawn:
-            print(d)
-    else:
-        print('Mask cleared (no active zones).')
-
+    keepout_files.render_active_mask(MAP_NAME, MAP_YAML, (width, height))
+    pgm_path, yaml_path = keepout_files.mask_paths()
+    print(f'{pgm_path}\n{yaml_path}')
+    print(f'{width}x{height}px, {len(zones)} zone(s): ' + ', '.join(sorted(zones)))
     print()
-    print('Done. Restart bringup (or just nav2) for the new mask to take effect.')
-    print('  use_keepout:=true  must be passed to bringup.launch.py')
+    print('Done. Restart with use_keepout:=true for it to take effect:')
+    print('  robot stop && robot max use_keepout:=true')
 
 
 if __name__ == '__main__':

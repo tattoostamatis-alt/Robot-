@@ -323,6 +323,36 @@ TRANSLATIONS = {
         ('Give the room a name first.', 'Gib dem Raum zuerst einen Namen.'),
     'Τοποθέτηση…':        ('Placing…', 'Platziere…'),
 
+    # ── keepout zones (map pane) ────────────────────────────────────────────
+    '🚫 2 κλικ στον χάρτη ορίζουν απαγορευμένη ζώνη (απέναντι γωνίες)':
+        ('🚫 2 clicks on the map define a keepout zone (opposite corners)',
+         '🚫 2 Klicks auf die Karte definieren eine Sperrzone (gegenüberliegende Ecken)'),
+    'π.χ. χαλάκι σκύλου': ('e.g. dog mat', 'z.B. Hundematte'),
+    '🚫 Ενεργοποίηση ζωνών': ('🚫 Enable zones', '🚫 Zonen aktivieren'),
+    '✅ Απενεργοποίηση':  ('✅ Disable', '✅ Deaktivieren'),
+    'Χρειάζεται επανεκκίνηση (~90s) για να πιάσει η αλλαγή — το Nav2 διαβάζει '
+    'τις ζώνες μόνο στην εκκίνηση.':
+        ('Needs a restart (~90s) to take effect — Nav2 only reads the zones '
+         'at startup.',
+         'Braucht einen Neustart (~90s), damit die Änderung wirkt — Nav2 '
+         'liest die Zonen nur beim Start.'),
+    'Προσθήκη…':          ('Adding…', 'Hinzufügen…'),
+    'Διαγραφή…':          ('Deleting…', 'Lösche…'),
+    'Θα επανεκκινήσει όλη τη στοίβα (~90 δευτερόλεπτα) με τις απαγορευμένες '
+    'ζώνες ενεργές. Να συνεχίσω;':
+        ('This will restart the whole stack (~90 seconds) with keepout zones '
+         'enabled. Continue?',
+         'Das startet den gesamten Stack neu (~90 Sekunden) mit aktivierten '
+         'Sperrzonen. Fortfahren?'),
+    'Ενεργοποίηση…':      ('Enabling…', 'Aktiviere…'),
+    'Θα επανεκκινήσει όλη τη στοίβα (~90 δευτερόλεπτα) χωρίς τις απαγορευμένες '
+    'ζώνες. Να συνεχίσω;':
+        ('This will restart the whole stack (~90 seconds) without keepout '
+         'zones. Continue?',
+         'Das startet den gesamten Stack neu (~90 Sekunden) ohne Sperrzonen. '
+         'Fortfahren?'),
+    'Απενεργοποίηση…':    ('Disabling…', 'Deaktiviere…'),
+
     # ── 3D arm view ───────────────────────────────────────────────────────
     'Σύρε για περιστροφή · ροδέλα για ζουμ · κινείται με τις αρθρώσεις από κάτω':
         ('Drag to rotate · wheel to zoom · follows the joints below',
