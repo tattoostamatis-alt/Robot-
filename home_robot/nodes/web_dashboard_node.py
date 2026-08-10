@@ -63,7 +63,8 @@ from action_msgs.srv import CancelGoal
 from std_srvs.srv import Empty
 
 from home_robot.compass import offset_from_known_bearing
-from home_robot import collision_skirt, safety_settings
+from home_robot import (collision_skirt, map_straighten, map_walls3d,
+                        room_files, room_segment, safety_settings)
 from home_robot.system_settings import (
     bt_args, parse_bt_devices, parse_devices, parse_volume, parse_wifi_list,
     volume_args, wifi_connect_args)
@@ -565,11 +566,19 @@ class DashboardNode(Node):
         self._cam_judge_at = 0.0        # see _judge_frame
         self._cam_state_last = None
         self._room_mask = (None, None, None)   # see _load_room_mask()
-        self._room_mask_at = None              # mtime the cache was built from
+        self._room_mask_key = None             # (map name, mtime) it was built from
         self._room_size_warned = False
+        self._room_seg_cache = None            # see _segmentation_for()
         self._rooms_tinted = True              # toggled from the map tab
         self._last_map = None                  # so the toggle can redraw
         self._full_map_info = None             # see _room_at_xy()
+        # Room-tab code (dispatch(), on the asyncio event loop) needs to know
+        # the active map's name, but active_map() shells out to `ros2 param
+        # get` on a cache miss (~1-2s, up to a 10s timeout) — blocking that
+        # would stall every connected socket, not just the one editing rooms.
+        # A background thread that refreshes the cache faster than its own TTL
+        # keeps every caller a cache hit instead. See active_map()/MAP_CACHE_TTL.
+        threading.Thread(target=self._map_name_keepwarm, daemon=True).start()
         self.create_subscription(
             PointCloud2, '/camera/camera/depth/color/points', self._cb_cloud,
             QoSProfile(depth=1,
@@ -988,39 +997,40 @@ class DashboardNode(Node):
     ROOM_TINT = 0.38
 
     def _load_room_mask(self):
-        """maps/room_mask.png as BGR + its per-room alpha, cached.
+        """maps/<active-map>_room_mask.png as BGR + its per-room alpha, cached.
 
-        Returns (bgr, alpha, names) or (None, None, None). The mask is the same
-        one situational_awareness and room_markers read, so what the dashboard
-        paints and what the robot calls the room can never disagree.
+        Returns (bgr, alpha, names) or (None, None, None). Scoped to whichever
+        map map_server currently has loaded (self.active_map(), itself cached —
+        see room_files.py's docstring for why the file is per-map at all): the
+        same file situational_awareness and room_markers read for THIS map, so
+        what the dashboard paints and what the robot calls the room can never
+        disagree.
 
         Reloaded when the file changes on disk, so regenerating it after a
         remap shows up without restarting the dashboard.
         """
-        path = os.path.join(SRC_MAPS_DIR, 'room_mask.png')
+        name = self.active_map()
+        if not name:
+            self._room_mask = (None, None, None)
+            self._room_mask_key = None
+            return self._room_mask
+        mask_path, _ = room_files.paths_for(name)
         try:
-            stamp = os.path.getmtime(path)
+            stamp = os.path.getmtime(mask_path)
         except OSError:
             self._room_mask = (None, None, None)
+            self._room_mask_key = None
             return self._room_mask
-        if self._room_mask_at == stamp:
+        key = (name, stamp)
+        if self._room_mask_key == key:
             return self._room_mask
         try:
-            from PIL import Image
-            arr = np.array(Image.open(path).convert('RGBA'))
-            names = {}
-            colours_path = os.path.join(SRC_MAPS_DIR, 'room_colors.yaml')
-            if os.path.exists(colours_path):
-                with open(colours_path) as f:
-                    names = yaml.safe_load(f) or {}
-            rgb = arr[:, :, :3].astype(np.float32)
-            bgr = rgb[:, :, ::-1]
-            alpha = (arr[:, :, 3] > 50)
-            self._room_mask = (bgr, alpha, names)
+            bgr, alpha, names = room_files.load(name)
+            self._room_mask = (bgr, alpha, names) if bgr is not None else (None, None, None)
         except Exception as e:
             self.get_logger().warn(f'room_mask unusable: {e}')
             self._room_mask = (None, None, None)
-        self._room_mask_at = stamp
+        self._room_mask_key = key
         return self._room_mask
 
     def _tint_rooms(self, img, grid):
@@ -1076,18 +1086,21 @@ class DashboardNode(Node):
         return best
 
     def _save_rooms(self, edits):
-        """Rename/recolour rooms from the map tab's editor.
+        """Rename/recolour rooms from the map tab's editor, for the active map.
 
-        room_colors.yaml maps name -> [r,g,b] and room_mask.png is painted
-        with those EXACT rgb values per room (scripts/auto_rooms.py), so a
-        colour change has to repaint the mask, not just the yaml, or the
-        picture and the legend would disagree — and situational_awareness/
-        room_markers, which read the same two files, would still speak the
-        old colour's name for that patch of floor.
+        <map>_room_colors.yaml maps name -> [r,g,b] and <map>_room_mask.png is
+        painted with those EXACT rgb values per room (scripts/auto_rooms.py or
+        the click-to-place tool, see _place_room), so a colour change has to
+        repaint the mask, not just the yaml, or the picture and the legend
+        would disagree — and situational_awareness/room_markers, which read
+        the same two files for this map, would still speak the old colour's
+        name for that patch of floor.
         """
-        colours_path = os.path.join(SRC_MAPS_DIR, 'room_colors.yaml')
-        mask_path = os.path.join(SRC_MAPS_DIR, 'room_mask.png')
         try:
+            map_name = self.active_map()
+            if not map_name:
+                raise ValueError('κανένας αποθηκευμένος χάρτης ενεργός')
+            mask_path, colours_path = room_files.paths_for(map_name)
             if not isinstance(edits, list) or not edits:
                 raise ValueError('no rooms sent')
             try:
@@ -1148,14 +1161,117 @@ class DashboardNode(Node):
                                    'error': str(exc)})
             return
 
-        self._room_mask_at = None      # force _load_room_mask() to reread
+        self._room_mask_key = None     # force _load_room_mask() to reread
         if self._last_map is not None:
             self._cb_map(self._last_map)   # repaints the tinted picture too
         else:
             _, _, names = self._load_room_mask()
             self._state.map_rooms = {n: list(c) for n, c in (names or {}).items()}
             self._state.broadcast({'type': 'map_rooms', 'rooms': self._state.map_rooms})
-        self.get_logger().info(f'rooms saved: {list(new_colours)}')
+        self.get_logger().info(f'rooms saved on {map_name}: {list(new_colours)}')
+        self._state.broadcast({'type': 'room_saved', 'ok': True})
+
+    def _segmentation_for(self, map_name: str):
+        """Shape-only room labels for map_name (see room_segment.py), cached
+        by (name, pgm mtime) so repeated clicks while placing several rooms on
+        the same map don't re-run the distance transform each time.
+
+        Returns (labels, resolution, (origin_x, origin_y)), or raises — callers
+        are the place_room worker thread, which already turns any exception
+        into a `room_saved` failure broadcast.
+        """
+        yaml_path = os.path.join(SRC_MAPS_DIR, f'{map_name}.yaml')
+        with open(yaml_path) as f:
+            meta = yaml.safe_load(f)
+        pgm = meta.get('image', f'{map_name}.pgm')
+        pgm_path = pgm if os.path.isabs(pgm) else os.path.join(SRC_MAPS_DIR, os.path.basename(pgm))
+        stamp = os.path.getmtime(pgm_path)
+        key = (map_name, stamp)
+        if self._room_seg_cache and self._room_seg_cache[0] == key:
+            return self._room_seg_cache[1]
+
+        from PIL import Image
+        img = np.array(Image.open(pgm_path))
+        if img.ndim == 3:
+            img = img[:, :, 0]
+        res = float(meta['resolution'])
+        origin = (float(meta['origin'][0]), float(meta['origin'][1]))
+        labels, _count = room_segment.segment(img, res)
+        result = (labels, res, origin)
+        self._room_seg_cache = (key, result)
+        return result
+
+    def _place_room(self, x, y, name, color):
+        """Click-inside-a-room from the map tab: segment the ACTIVE map by
+        shape (room_segment.segment — same distance-transform watershed
+        auto_rooms.py uses offline), take whichever blob (x, y) landed in, and
+        paint just that blob into <map>_room_mask.png / _room_colors.yaml under
+        `name`/`color`. Runs in a worker thread (dispatch() is on the asyncio
+        event loop — self.active_map() alone can block ~1-2s shelling out to
+        `ros2 param get`, and the PIL/scipy work on top of that would stall
+        every other websocket for the duration).
+        """
+        try:
+            name = str(name).strip()
+            if not name:
+                raise ValueError('όνομα δωματίου κενό')
+            if not (isinstance(color, list) and len(color) == 3):
+                raise ValueError('άκυρο χρώμα')
+            rgb = [max(0, min(255, int(v))) for v in color]
+
+            map_name = self.active_map()
+            if not map_name:
+                raise ValueError('κανένας αποθηκευμένος χάρτης ενεργός')
+
+            labels, res, (ox, oy) = self._segmentation_for(map_name)
+            h, w = labels.shape
+            col = int((x - ox) / res)
+            row = h - 1 - int((y - oy) / res)     # image-side up, same as _room_at_xy
+            if not (0 <= col < w and 0 <= row < h):
+                raise ValueError('εκτός χάρτη')
+            label_id = int(labels[row, col])
+            if label_id == 0:
+                raise ValueError('Δεν βρέθηκε δωμάτιο εκεί — πολύ κοντά σε τοίχο ή πόρτα.')
+
+            from PIL import Image
+            mask_path, colours_path = room_files.paths_for(map_name)
+            mask_arr = None
+            if os.path.exists(mask_path):
+                mask_arr = np.array(Image.open(mask_path).convert('RGBA'))
+                if mask_arr.shape[:2] != (h, w):
+                    mask_arr = None    # stale mask from a different map size
+            if mask_arr is None:
+                mask_arr = np.zeros((h, w, 4), np.uint8)
+            try:
+                with open(colours_path) as f:
+                    colours = yaml.safe_load(f) or {}
+            except OSError:
+                colours = {}
+
+            paint = labels == label_id
+            mask_arr[paint, 0] = rgb[0]
+            mask_arr[paint, 1] = rgb[1]
+            mask_arr[paint, 2] = rgb[2]
+            mask_arr[paint, 3] = 255
+            colours[name] = rgb
+
+            Image.fromarray(mask_arr).save(mask_path)
+            with open(colours_path, 'w') as f:
+                yaml.safe_dump(colours, f, allow_unicode=True)
+        except Exception as exc:
+            self.get_logger().warn(f'place_room: {exc!r}')
+            self._state.broadcast({'type': 'room_saved', 'ok': False,
+                                   'error': str(exc)})
+            return
+
+        self._room_mask_key = None
+        if self._last_map is not None:
+            self._cb_map(self._last_map)
+        else:
+            _, _, names = self._load_room_mask()
+            self._state.map_rooms = {n: list(c) for n, c in (names or {}).items()}
+            self._state.broadcast({'type': 'map_rooms', 'rooms': self._state.map_rooms})
+        self.get_logger().info(f'room placed on {map_name}: {name} ({label_id})')
         self._state.broadcast({'type': 'room_saved', 'ok': True})
 
     def _cb_semantic(self, msg: PointCloud2):
@@ -2618,6 +2734,17 @@ class DashboardNode(Node):
         self._map_cache = (now, name)
         return name
 
+    def _map_name_keepwarm(self):
+        """Runs forever on its own thread, refreshing active_map()'s cache
+        before its 15s TTL lapses — see the comment on the thread that starts
+        this in __init__."""
+        while True:
+            try:
+                self.active_map()
+            except Exception:
+                pass
+            time.sleep(self.MAP_CACHE_TTL - 5.0)
+
     def release_client(self, client):
         """A browser went away — forget anything it had switched on."""
         self._cloud_ws.discard(client)
@@ -2732,7 +2859,17 @@ class DashboardNode(Node):
             if self._last_map is not None:
                 self._cb_map(self._last_map)
         elif t == 'save_rooms':
-            self._save_rooms(msg.get('rooms', []))
+            # Threaded: as of the per-map room files, this now calls
+            # self.active_map() too, which shells out to `ros2 param get` on a
+            # cache miss (~1-2s) — dispatch() runs on the asyncio event loop,
+            # so anything blocking here stalls every other connected socket.
+            threading.Thread(target=self._save_rooms,
+                             args=(msg.get('rooms', []),), daemon=True).start()
+        elif t == 'place_room':
+            threading.Thread(target=self._place_room,
+                             args=(msg.get('x'), msg.get('y'),
+                                   msg.get('name', ''), msg.get('color')),
+                             daemon=True).start()
         elif t == 'pick_room':
             try:
                 name = self._room_at_xy(float(msg.get('x', 0)), float(msg.get('y', 0)))
@@ -3394,6 +3531,123 @@ async def maps(request: Request, t: str = ''):
             'mapping': ros_node.is_mapping()}
 
 
+def _map_pgm_path(name: str) -> Optional[str]:
+    for m in _list_maps():
+        if m['name'] == name:
+            path = os.path.join(SRC_MAPS_DIR, name + '.pgm')
+            return path if os.path.exists(path) else None
+    return None
+
+
+@app.get('/maps/straighten/{name}')
+async def maps_straighten_preview(request: Request, name: str, t: str = ''):
+    """Side-by-side PNGs of the saved map as-is and cosmetically straightened —
+    lets the Χάρτες tab show a choice right after a save, without writing
+    anything. See home_robot/map_straighten.py for what "straightened" means
+    and why it must stay a display-only option until the user picks it.
+
+    ‼️ Must be registered BEFORE /maps/{action}/{name} below: both routes
+    match /maps/<seg>/<seg>, and FastAPI dispatches to whichever was added to
+    the app first. Defined after it, this 400'd on every call ("bad request"
+    from maps_action's action-not-in-(switch,save,new) check) and never ran.
+    """
+    if not _authorised(t, request.cookies):
+        return JSONResponse({'error': 'unauthorized'}, status_code=401)
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,40}', name):
+        return JSONResponse({'error': 'bad request'}, status_code=400)
+    pgm_path = _map_pgm_path(name)
+    if pgm_path is None:
+        return JSONResponse({'error': f'no such map: {name}'}, status_code=404)
+
+    def render():
+        gray = cv2.imread(pgm_path, cv2.IMREAD_GRAYSCALE)
+        if gray is None:
+            return None
+        cleaned = map_straighten.straighten(gray)
+        upscale = max(1, min(6, 900 // max(gray.shape)))
+        return (map_straighten.encode_png(gray, upscale),
+                map_straighten.encode_png(cleaned, upscale))
+
+    result = await asyncio.to_thread(render)
+    if result is None:
+        return JSONResponse({'error': f'could not read {name}.pgm'}, status_code=500)
+    original_png, straightened_png = result
+    return {'name': name,
+            'original': base64.b64encode(original_png).decode(),
+            'straightened': base64.b64encode(straightened_png).decode()}
+
+
+@app.get('/maps/straighten_apply/{name}')
+async def maps_straighten_apply(request: Request, name: str, t: str = ''):
+    """Replace <name>.pgm with the straightened version, after the user has
+    seen both previews and chosen. The old file is kept as a timestamped
+    .bak — nothing is destroyed, and restoring it is a plain file copy. Only
+    the image changes: resolution/origin/frame in the .yaml are untouched, so
+    a currently-active map still needs the existing "Ενεργοποίηση" (switch)
+    restart to pick up the new pixels — same rule as any other map edit here.
+    """
+    if not _authorised(t, request.cookies):
+        return JSONResponse({'error': 'unauthorized'}, status_code=401)
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,40}', name):
+        return JSONResponse({'error': 'bad request'}, status_code=400)
+    pgm_path = _map_pgm_path(name)
+    if pgm_path is None:
+        return JSONResponse({'error': f'no such map: {name}'}, status_code=404)
+
+    def apply():
+        gray = cv2.imread(pgm_path, cv2.IMREAD_GRAYSCALE)
+        if gray is None:
+            return None
+        cleaned = map_straighten.straighten(gray)
+        backup = pgm_path + '.bak-' + time.strftime('%Y%m%d-%H%M%S')
+        os.replace(pgm_path, backup)
+        ok = cv2.imwrite(pgm_path, cleaned)
+        if not ok:
+            os.replace(backup, pgm_path)  # restore rather than leave no map file
+            return None
+        return backup
+
+    backup = await asyncio.to_thread(apply)
+    if backup is None:
+        return JSONResponse({'error': f'could not straighten {name}.pgm'}, status_code=500)
+    return {'name': name, 'ok': True, 'backup': os.path.basename(backup)}
+
+
+@app.get('/maps/walls3d')
+async def maps_walls3d(request: Request, t: str = '', map: str = ''):
+    """Wall footprints for the "Τοίχοι 3D" tab: the active map's clean
+    rectilinear polygons (see home_robot/map_walls3d.py), each edge as a
+    world-metre quad the browser extrudes into a box. Defaults to whatever
+    map Nav2 is currently using; ?map=<name> previews any saved map.
+    """
+    if not _authorised(t, request.cookies):
+        return JSONResponse({'error': 'unauthorized'}, status_code=401)
+    name = map or (await asyncio.to_thread(ros_node.active_map) if ros_node else None)
+    if not name:
+        return JSONResponse({'error': 'no active map'}, status_code=404)
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,40}', name):
+        return JSONResponse({'error': 'bad request'}, status_code=400)
+    yaml_path = os.path.join(SRC_MAPS_DIR, name + '.yaml')
+    pgm_path = _map_pgm_path(name)
+    if pgm_path is None or not os.path.exists(yaml_path):
+        return JSONResponse({'error': f'no such map: {name}'}, status_code=404)
+
+    def build():
+        with open(yaml_path) as f:
+            meta = yaml.safe_load(f)
+        gray = cv2.imread(pgm_path, cv2.IMREAD_GRAYSCALE)
+        if gray is None:
+            return None
+        boxes = map_walls3d.wall_footprints(
+            gray, float(meta['resolution']), meta['origin'][:2])
+        return {'name': name, 'walls': [{'corners': c, 'height': h} for c, h in boxes]}
+
+    result = await asyncio.to_thread(build)
+    if result is None:
+        return JSONResponse({'error': f'could not read {name}.pgm'}, status_code=500)
+    return result
+
+
 @app.get('/maps/{action}/{name}')
 async def maps_action(request: Request, action: str, name: str, t: str = ''):
     if not _authorised(t, request.cookies):
@@ -4004,6 +4258,18 @@ button{font:inherit;color:inherit}
           <input type="checkbox" id="b-pick-room" style="vertical-align:-2px">
           🖱️ Κλικ στον χάρτη επιλέγει δωμάτιο (αντί να στέλνει το ρομπότ εκεί)
         </label>
+        <label style="display:flex;align-items:center;gap:9px;font-size:12.5px;
+          cursor:pointer;user-select:none;margin-top:6px">
+          <input type="checkbox" id="b-place-room" style="vertical-align:-2px">
+          ➕ Κλικ στον χάρτη ΠΡΟΣΘΕΤΕΙ δωμάτιο εδώ, με το όνομα/χρώμα από κάτω
+        </label>
+        <div class="row" id="place-room-row" style="margin-top:6px;gap:8px;display:none">
+          <input type="color" id="pr-color" value="#cc44ff"
+            style="width:34px;height:30px;padding:0;border:none;background:none;flex:0 0 auto">
+          <input type="text" id="pr-name" placeholder="π.χ. κρεβατοκάμαρα"
+            style="flex:1;min-width:100px;background:#232329;border:1px solid #2c2c32;
+            border-radius:8px;color:#e4e4e7;padding:6px 9px;font-size:12.5px">
+        </div>
         <div id="room-edit" style="margin-top:10px"></div>
         <div class="row" style="margin-top:8px" id="room-edit-row">
           <button class="btn" id="b-room-save">💾 Αποθήκευση ονομάτων/χρωμάτων</button>
@@ -4113,6 +4379,21 @@ button{font:inherit;color:inherit}
     <section class="pane" id="p-moveit"></section>
     <section class="pane" id="p-gazebo"></section>
     <section class="pane" id="p-rtabmap"></section>
+
+    <!-- ── Walls 3D (floorplan extruded from the 2D map) ─────────── -->
+    <section class="pane" id="p-walls3d">
+      <div class="card">
+        <h3>Τοίχοι 3D <span class="badge" id="walls3d-info">—</span>
+          <button class="btn" id="b-walls3d-reset" style="float:right">Επαναφορά όψης</button>
+        </h3>
+        <canvas id="walls3d" style="width:100%;height:min(58vh,600px);min-height:260px;
+          background:#0a0a0b;border-radius:8px;touch-action:none;cursor:grab;
+          display:block"></canvas>
+        <div style="color:#71717a;font-size:11.5px;margin-top:6px">
+          Σύρε για περιστροφή · ροδέλα για ζουμ · από τον καθαρό (τετραγωνισμένο) 2D χάρτη
+        </div>
+      </div>
+    </section>
 
     <!-- ── Arm ─────────────────────────────────────────────────── -->
     <section class="pane" id="p-arm">
@@ -4893,6 +5174,30 @@ button{font:inherit;color:inherit}
           <button class="btn" id="b-map-save">💾 Αποθήκευση</button>
         </div>
         <div id="map-msg" style="color:#71717a;font-size:11.5px;margin-top:8px"></div>
+        <div id="map-straighten" style="display:none;margin-top:12px;padding-top:12px;
+                                        border-top:1px solid #27272a">
+          <div style="font-size:12.5px;color:#a1a1aa;margin-bottom:8px">
+            🧹 Καθαρή εκδοχή — ισιώνει τα σκαλοπάτια των τοίχων. <b>Μόνο εμφάνιση</b> μέχρι
+            να διαλέξεις: μπορεί να μετατοπίσει τοίχους λίγα εκατοστά ή να αφαιρέσει ένα
+            πραγματικό εμπόδιο που έμοιαζε με θόρυβο σάρωσης — σύγκρινε οπτικά πριν διαλέξεις.
+          </div>
+          <div class="row" style="gap:12px">
+            <div style="flex:1;text-align:center;min-width:0">
+              <div style="font-size:11px;color:#71717a;margin-bottom:4px">Πρωτότυπο</div>
+              <img id="map-straighten-orig" style="max-width:100%;border-radius:6px;
+                                                    border:1px solid #27272a">
+            </div>
+            <div style="flex:1;text-align:center;min-width:0">
+              <div style="font-size:11px;color:#71717a;margin-bottom:4px">Ισιωμένο</div>
+              <img id="map-straighten-clean" style="max-width:100%;border-radius:6px;
+                                                     border:1px solid #27272a">
+            </div>
+          </div>
+          <div class="row" style="margin-top:10px">
+            <button class="btn" id="b-map-straighten-keep">Κράτησε το πρωτότυπο</button>
+            <button class="btn pri" id="b-map-straighten-use">Χρήση ισιωμένης εκδοχής</button>
+          </div>
+        </div>
       </div>
       <div class="card" style="margin-bottom:9px">
         <h3>Δίκτυο <span class="badge" id="sn-badge">—</span></h3>
@@ -5144,6 +5449,7 @@ const TABS = [
   // nuclear fusion, and this is the name the user asked for.
   ['fuse',   '🔀', 'Sensor fusion'],
   ['rtabmap','🏠', 'Σπίτι 3D'],
+  ['walls3d','🏗️', 'Τοίχοι 3D'],
   ['cost',   '🧱', 'Costmap'],
   ['nerf',   '✨', 'NeRF'],
   ['point',  '👉', 'Χειρονομίες'],
@@ -5189,6 +5495,7 @@ function showTab(id){
   // 170 kB of geometry, fetched the first time the tab is opened rather than
   // on every page load — most visits never look at the arm.
   if (id === 'arm'){ armLoad(); armDraw(); }
+  if (id === 'walls3d'){ wallsLoad(); wallsDraw(); }
 }
 // NB: the initial showTab() call lives at the bottom of the script — calling it
 // here would touch VNC_APPS before its `const` is initialised (temporal dead
@@ -5579,6 +5886,9 @@ const HANDLERS = {
   room_saved(m){
     $('room-edit-msg').textContent = m.ok ? t('Αποθηκεύτηκε.') : (m.error || t('Αποτυχία.'));
     $('room-edit-msg').style.color = m.ok ? '#4ade80' : '#f87171';
+    // place_room reuses this message: clear the name on success so the next
+    // click starts a fresh room instead of re-painting the same one.
+    if(m.ok && $('b-place-room').checked) $('pr-name').value = '';
   },
   room_picked(m){
     if(!m.name){
@@ -6017,7 +6327,7 @@ function renderAcoustic(m){
 // ── resizable viewers ──────────────────────────────────────────────────────
 // The big panels are flex:1 so they fill the pane. Dragging the grip pins an
 // explicit height instead; double-tapping it gives the pane back its space.
-const VIEWERS = ['map-wrap', 'cam-wrap', 'cost-wrap', 'arm3d', 'cloud-canvas'];
+const VIEWERS = ['map-wrap', 'cam-wrap', 'cost-wrap', 'arm3d', 'cloud-canvas', 'walls3d'];
 
 function loadSizes(){
   try { return JSON.parse(localStorage.getItem('hr_sizes') || '{}'); }
@@ -6153,7 +6463,8 @@ function setupCards(){
 // A canvas inside a folded card has no size; on unfold it needs repainting.
 function redrawVisible(){
   for (const f of [window.draw, window.armDraw, window.drawCompass2,
-                   window.drawPointRing, window.drawCost, window.cloudDraw]){
+                   window.drawPointRing, window.drawCost, window.cloudDraw,
+                   window.wallsDraw]){
     if (typeof f === 'function') { try { f(); } catch(e){} }
   }
   window.dispatchEvent(new Event('resize'));
@@ -6706,11 +7017,36 @@ function connect(){
 function send(o){ if(ws&&ws.readyState===1) ws.send(JSON.stringify(o)); }
 
 // ── map click ──────────────────────────────────────────────────────────────
+// Two click-modes share the canvas with plain navigation, so they are
+// mutually exclusive checkboxes: checking one un-checks the other, rather
+// than layering a second meaning onto the same click with no visual cue.
+$('b-pick-room').addEventListener('change', () => {
+  if ($('b-pick-room').checked) $('b-place-room').checked = false;
+  $('place-room-row').style.display = $('b-place-room').checked ? '' : 'none';
+});
+$('b-place-room').addEventListener('change', () => {
+  if ($('b-place-room').checked) $('b-pick-room').checked = false;
+  $('place-room-row').style.display = $('b-place-room').checked ? '' : 'none';
+});
 canvas.addEventListener('click',e=>{
   const r=canvas.getBoundingClientRect();
   const cx=(e.clientX-r.left)*canvas.width/r.width;
   const cy=(e.clientY-r.top)*canvas.height/r.height;
   const wp=c2w(cx,cy); if(!wp) return;
+  if($('b-place-room').checked){
+    const name = $('pr-name').value.trim();
+    if(!name){
+      $('room-edit-msg').textContent = t('Δώσε πρώτα όνομα δωματίου.');
+      $('room-edit-msg').style.color = '#f87171';
+      return;
+    }
+    const hex = $('pr-color').value;
+    send({type:'place_room', x:wp.x, y:wp.y, name,
+          color:[parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)]});
+    $('room-edit-msg').textContent = t('Τοποθέτηση…');
+    $('room-edit-msg').style.color = '#71717a';
+    return;
+  }
   if($('b-pick-room').checked){
     send({type:'pick_room',x:wp.x,y:wp.y});
     return;
@@ -7801,6 +8137,10 @@ function setLang(code){
 // launch parameter and there is no runtime swap. Hence the confirm() — losing
 // navigation for ~90 s should never be one stray tap away.
 async function mapsRefresh(){
+  // active_map() shells out to `ros2 param get`, which takes a second or two
+  // (see the Python side) — without this the ΧΑΡΤΕΣ card looks empty/broken
+  // for that whole stretch, including the 🧹 straighten button on each row.
+  if(!$('map-list').children.length) $('map-list').textContent = t('Φόρτωση…');
   let d;
   try { d = await (await fetch('/maps' + (TOKEN_QS || ''))).json(); }
   catch(e){ return; }
@@ -7823,6 +8163,11 @@ async function mapsRefresh(){
       b.onclick = () => mapSwitch(m.name);
       row.appendChild(b);
     }
+    const clean = document.createElement('button');
+    clean.className = 'btn'; clean.textContent = '🧹';
+    clean.title = t('Καθαρή εκδοχή');
+    clean.onclick = () => mapStraightenPreview(m.name);
+    row.appendChild(clean);
     box.appendChild(row);
   }
 }
@@ -7854,13 +8199,41 @@ async function mapSave(){
   if(!/^[A-Za-z0-9_-]{1,40}$/.test(name)){
     mapMsg(t('Δώσε όνομα με λατινικά γράμματα, αριθμούς, - ή _')); return;
   }
+  $('map-straighten').style.display = 'none';
   mapMsg(t('Αποθήκευση…'));
   try {
     const r = await (await fetch('/maps/save/' + encodeURIComponent(name)
                                  + (TOKEN_QS || ''))).json();
     mapMsg(r.ok ? t('Αποθηκεύτηκε') + ': ' + name : t('Απέτυχε') + ': ' + (r.result || ''));
     mapsRefresh();
+    if(r.ok) mapStraightenPreview(name);
   } catch(e){ mapMsg(t('Απέτυχε') + ': ' + e); }
+}
+
+async function mapStraightenPreview(name){
+  let d;
+  try { d = await (await fetch('/maps/straighten/' + encodeURIComponent(name)
+                               + (TOKEN_QS || ''))).json(); }
+  catch(e){ return; }
+  if(!d || d.error) return;
+  $('map-straighten-orig').src  = 'data:image/png;base64,' + d.original;
+  $('map-straighten-clean').src = 'data:image/png;base64,' + d.straightened;
+  $('map-straighten').style.display = '';
+  $('b-map-straighten-keep').onclick = () => { $('map-straighten').style.display = 'none'; };
+  $('b-map-straighten-use').onclick = async () => {
+    if(!confirm(t('Θα αντικαταστήσει τον χάρτη') + ' "' + name + '" '
+               + t('με την ισιωμένη εκδοχή (κρατά αντίγραφο ασφαλείας). Αν αυτός ο '
+                  + 'χάρτης είναι ήδη ενεργός, θέλει "Ενεργοποίηση" για να φανεί η '
+                  + 'αλλαγή. Να συνεχίσω;'))) return;
+    mapMsg(t('Εφαρμογή ισιωμένης εκδοχής…'));
+    try {
+      const r = await (await fetch('/maps/straighten_apply/' + encodeURIComponent(name)
+                                   + (TOKEN_QS || ''))).json();
+      mapMsg(r.ok ? t('Έγινε') + ' — ' + t('αντίγραφο ασφαλείας') + ': ' + r.backup
+                  : t('Απέτυχε') + ': ' + (r.error || ''));
+    } catch(e){ mapMsg(t('Απέτυχε') + ': ' + e); }
+    $('map-straighten').style.display = 'none';
+  };
 }
 
 // ── 3D point cloud ─────────────────────────────────────────────────────────
@@ -8206,6 +8579,187 @@ function armDraw(){
   }, {passive:false});
   $('b-arm3d-reset').onclick = () => {
     armYaw=-0.9; armPitch=-0.35; armZoom=1; armDraw();
+  };
+})();
+
+// ── Τοίχοι 3D (floorplan extruded from the 2D map) ─────────────────────────
+// Same painter's-algorithm canvas approach as the arm/point-cloud tabs above
+// — no three.js, self-contained page. Geometry is /maps/walls3d: one quad
+// per straight wall segment, already rectilinear (see map_walls3d.py), so
+// there is no mesh to walk, just a box per wall. World axes here match the
+// arm's convention (Z up, yaw rotates the XY ground plane) so toView/project
+// below are the identical formulas, just renamed.
+let wallsModel = null, wallsBounds = null, wallsLoading = false;
+let wallsYaw = -0.7, wallsPitch = -0.55, wallsZoom = 1;
+
+function wallsLoad(){
+  if (wallsModel || wallsLoading) return;
+  wallsLoading = true;
+  $('walls3d-info').textContent = t('φόρτωση…');
+  fetch('/maps/walls3d' + TOKEN_QS)
+    .then(r => r.ok ? r.json() : Promise.reject(r.status))
+    .then(m => {
+      wallsModel = m.walls || [];
+      let minX=1e9, maxX=-1e9, minY=1e9, maxY=-1e9;
+      for (const wobj of wallsModel) for (const [x,y] of wobj.corners){
+        if (x<minX) minX=x; if (x>maxX) maxX=x;
+        if (y<minY) minY=y; if (y>maxY) maxY=y;
+      }
+      wallsBounds = wallsModel.length ? {minX,maxX,minY,maxY} : null;
+      $('walls3d-info').textContent = wallsModel.length + ' ' + t('τοίχοι');
+      wallsDraw();
+    })
+    .catch(e => {
+      wallsLoading = false;
+      $('walls3d-info').textContent = t('δεν φορτώθηκε');
+    });
+}
+
+// One wall footprint (a world-XY quad) extruded into 6 quad faces -> 12 tris.
+// No backface culling here (unlike the arm): the outer-boundary edges and
+// the interior-wall rectangles come from two different contour sources with
+// no shared winding guarantee, and at ~50 boxes drawing both sides of every
+// face costs nothing worth chasing that down for.
+function wallsAddBox(corners, height, out){
+  const b  = corners.map(([x,y]) => [x, y, 0]);
+  const tp = corners.map(([x,y]) => [x, y, height]);
+  const quads = [
+    [b[0],b[1],b[2],b[3]], [tp[0],tp[1],tp[2],tp[3]],
+    [b[0],b[1],tp[1],tp[0]], [b[1],b[2],tp[2],tp[1]],
+    [b[2],b[3],tp[3],tp[2]], [b[3],b[0],tp[0],tp[3]],
+  ];
+  for (const q of quads){
+    out.push([q[0],q[1],q[2]]);
+    out.push([q[0],q[2],q[3]]);
+  }
+}
+
+const WALLS_COLOR = [150, 155, 168];
+
+function wallsDraw(){
+  const cv = $('walls3d'); if (!cv) return;
+  const ctx = cv.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== w*dpr || cv.height !== h*dpr){ cv.width = w*dpr; cv.height = h*dpr; }
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,w,h);
+  if (!wallsModel || !wallsBounds) return;
+
+  const b = wallsBounds;
+  const span = Math.max(b.maxX-b.minX, b.maxY-b.minY, 1);
+  const cx0 = (b.minX+b.maxX)/2, cy0 = (b.minY+b.maxY)/2;
+
+  const cy = Math.cos(wallsYaw), sy = Math.sin(wallsYaw);
+  const cp = Math.cos(wallsPitch), sp = Math.sin(wallsPitch);
+  const toView = v => {
+    const xr =  v[0]*cy + v[1]*sy;
+    const yr = -v[0]*sy + v[1]*cy;
+    return [xr, yr*sp + v[2]*cp, yr*cp - v[2]*sp];
+  };
+  // Gentle perspective, scaled to the building rather than a fixed metre
+  // count — same reasoning as the arm tab's FOCAL, different unit (metres of
+  // floorplan instead of metres of arm reach).
+  const FOCAL = span * 2.0;
+  const scale = (Math.min(w, h) * 0.8 / span) * wallsZoom;
+  let ox = 0, oy = 0;
+  const project = p => {
+    const k = FOCAL / (FOCAL + p[2]);
+    return [ox + p[0]*scale*k, oy - p[1]*scale*k, k];
+  };
+  const centre = v => [v[0]-cx0, v[1]-cy0, v[2]];
+
+  const faces = [];
+  const tris = [];
+  for (const wobj of wallsModel) wallsAddBox(wobj.corners, wobj.height, tris);
+  for (const [p0,p1,p2] of tris){
+    const vv = [toView(centre(p0)), toView(centre(p1)), toView(centre(p2))];
+    const ux=vv[1][0]-vv[0][0], uy=vv[1][1]-vv[0][1], uz=vv[1][2]-vv[0][2];
+    const wx=vv[2][0]-vv[0][0], wy=vv[2][1]-vv[0][1], wz=vv[2][2]-vv[0][2];
+    let nx=uy*wz-uz*wy, ny=uz*wx-ux*wz, nz=ux*wy-uy*wx;
+    const nl = Math.hypot(nx,ny,nz) || 1;
+    nx/=nl; ny/=nl; nz/=nl;
+    const p = vv.map(project);
+    faces.push([(vv[0][2]+vv[1][2]+vv[2][2])/3, p, [nx,ny,nz]]);
+  }
+  faces.sort((a,b2) => b2[0]-a[0]);
+
+  // Centre on the projected bounding box, not a world-space guess — same
+  // trick the arm tab uses, so panning while dragging keeps the model on
+  // screen instead of drifting off one edge.
+  let bx0=1e9, by0=1e9, bx1=-1e9, by1=-1e9;
+  for (const f of faces) for (const q of f[1]){
+    if (q[0]<bx0) bx0=q[0]; if (q[0]>bx1) bx1=q[0];
+    if (q[1]<by0) by0=q[1]; if (q[1]>by1) by1=q[1];
+  }
+  ox = bx1>bx0 ? w/2-(bx0+bx1)/2 : w/2;
+  oy = bx1>bx0 ? h/2-(by0+by1)/2 : h/2;
+
+  // Floor grid, drawn before the walls so it always sits behind them.
+  const gridStep = span/10, gridN = 6;
+  ctx.lineWidth = 1;
+  for (let i=-gridN; i<=gridN; i++){
+    for (const axis of [0,1]){
+      const p0 = project(toView(centre(axis===0 ? [cx0+i*gridStep, cy0-gridN*gridStep, 0]
+                                                 : [cx0-gridN*gridStep, cy0+i*gridStep, 0])));
+      const p1 = project(toView(centre(axis===0 ? [cx0+i*gridStep, cy0+gridN*gridStep, 0]
+                                                 : [cx0+gridN*gridStep, cy0+i*gridStep, 0])));
+      ctx.strokeStyle = (i===0) ? '#33333d' : '#1e1e24';
+      ctx.beginPath(); ctx.moveTo(p0[0]+ox, p0[1]+oy); ctx.lineTo(p1[0]+ox, p1[1]+oy); ctx.stroke();
+    }
+  }
+
+  // Two-sided Lambert (abs of the dot) — see wallsAddBox for why nothing is
+  // culled: an inward-wound triangle should still read as lit, not black.
+  const L = ARM_LIGHT;
+  for (const [, p, n] of faces){
+    const diff = Math.abs(n[0]*L[0] + n[1]*L[1] + n[2]*L[2]);
+    const f = 0.35 + 0.65*diff;
+    const r  = Math.min(255, WALLS_COLOR[0]*f)|0;
+    const g2 = Math.min(255, WALLS_COLOR[1]*f)|0;
+    const bl = Math.min(255, WALLS_COLOR[2]*f)|0;
+    ctx.fillStyle = ctx.strokeStyle = `rgb(${r},${g2},${bl})`;
+    ctx.beginPath();
+    ctx.moveTo(p[0][0]+ox, p[0][1]+oy);
+    ctx.lineTo(p[1][0]+ox, p[1][1]+oy);
+    ctx.lineTo(p[2][0]+ox, p[2][1]+oy);
+    ctx.closePath();
+    ctx.fill();
+    ctx.lineWidth = 0.6;
+    ctx.stroke();
+  }
+}
+
+(function wallsWireInteraction(){
+  const cv = $('walls3d'); if (!cv) return;
+  let drag = null;
+  const pos = e => e.touches ? [e.touches[0].clientX, e.touches[0].clientY]
+                             : [e.clientX, e.clientY];
+  const down = e => { drag = pos(e); cv.style.cursor='grabbing'; };
+  const move = e => {
+    if (!drag) return;
+    const [x,y] = pos(e);
+    wallsYaw   += (x - drag[0]) * 0.01;
+    wallsPitch += (y - drag[1]) * 0.01;
+    wallsPitch = Math.max(-1.4, Math.min(1.4, wallsPitch));
+    drag = [x,y];
+    e.preventDefault();
+    wallsDraw();
+  };
+  const up = () => { drag = null; cv.style.cursor='grab'; };
+  cv.addEventListener('mousedown', down);
+  cv.addEventListener('touchstart', down, {passive:true});
+  window.addEventListener('mousemove', move);
+  cv.addEventListener('touchmove', move, {passive:false});
+  window.addEventListener('mouseup', up);
+  cv.addEventListener('touchend', up);
+  cv.addEventListener('wheel', e => {
+    e.preventDefault();
+    wallsZoom = Math.max(0.4, Math.min(3, wallsZoom * (e.deltaY > 0 ? 0.9 : 1.1)));
+    wallsDraw();
+  }, {passive:false});
+  $('b-walls3d-reset').onclick = () => {
+    wallsYaw=-0.7; wallsPitch=-0.55; wallsZoom=1; wallsDraw();
   };
 })();
 

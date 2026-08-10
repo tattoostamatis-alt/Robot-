@@ -34,30 +34,30 @@ Two knobs, both in metres, both physical rather than tuning constants:
 
 Output goes to maps/<map>_autorooms.png plus a _preview.png you can actually
 look at. Nothing is installed until you pass --apply, and even then the old
-mask is kept as room_mask.png.bak — the mask decides what the robot CALLS each
-room (situational_awareness, room_markers, the dashboard tint all read it), so
-overwriting it silently would change the robot's answers with no way back.
+mask is kept as maps/<map>_room_mask.png.bak — the mask decides what the robot
+CALLS each room in THAT map (situational_awareness, room_markers, the
+dashboard tint all read the file scoped to the active map), so overwriting it
+silently would change the robot's answers with no way back.
+
+Room files are per-map (maps/<map>_room_mask.png + maps/<map>_room_colors.yaml,
+see home_robot/room_files.py) — switching maps in the dashboard's Settings tab
+switches rooms with it. You rarely need this CLI at all any more: the Χάρτες
+tab's "click inside a room" tool runs this same segmentation on demand and
+lets you name/colour a room without SSH.
 """
 import argparse
 import os
-import shutil
 import sys
 
 import numpy as np
 import yaml
 from PIL import Image
-from scipy import ndimage
+
+sys.path.insert(0, os.path.expanduser('~/robot_ws/src/home_robot'))
+from home_robot.room_segment import PALETTE, colourise, segment  # noqa: E402
+from home_robot import room_files  # noqa: E402
 
 PKG = os.path.expanduser('~/robot_ws/src/home_robot')
-
-# Reused for room 1, 2, 3... Distinct hues rather than a gradient, because
-# these are labels and not a scale. Kept clear of the greys the map is drawn
-# in so a room is never confused with a wall.
-PALETTE = [
-    (204, 68, 255), (255, 204, 0), (68, 136, 255), (68, 204, 102),
-    (255, 68, 68), (0, 214, 214), (255, 136, 0), (170, 102, 255),
-    (102, 204, 170), (255, 102, 170), (140, 180, 60), (90, 150, 255),
-]
 
 
 def load_map(name):
@@ -72,61 +72,6 @@ def load_map(name):
     if img.ndim == 3:
         img = img[:, :, 0]
     return img, float(meta['resolution'])
-
-
-def segment(img, res, door_m, min_area_m2, close_px=2):
-    """Label the rooms. Returns (labels, count); 0 means 'not a room'."""
-    free = img >= 250
-
-    # Speckle inside a room would punch holes in the distance transform and
-    # split one room into several. A binary close is enough; the walls are
-    # thick relative to a couple of pixels.
-    if close_px:
-        free = ndimage.binary_closing(free, np.ones((close_px, close_px), bool))
-
-    # Distance (in metres) from each free cell to the nearest wall.
-    dist = ndimage.distance_transform_edt(free) * res
-
-    # A doorway is at most `door_m` wide, so its centre line sits at most
-    # door_m/2 from a wall. Anything deeper than that is room interior.
-    cores = dist > (door_m / 2.0)
-    lab, n = ndimage.label(cores)
-    if n == 0:
-        return np.zeros_like(img, np.int32), 0
-
-    # Grow the seeds back over all free space: every free cell takes the label
-    # of the nearest seed. This is the watershed, done with one EDT rather than
-    # an explicit flood, and it puts the boundary in the doorway — the far side
-    # of a door is nearer the room beyond it than the room behind.
-    _, (iy, ix) = ndimage.distance_transform_edt(lab == 0, return_indices=True)
-    grown = lab[iy, ix]
-    grown[~free] = 0
-
-    # Only NOW drop the small ones. Filtering the seeds instead measured the
-    # cores — which are much smaller than the rooms they become — so a bigger
-    # --min-area produced FEWER, larger rooms in a way that made no sense from
-    # the outside: 3.0 m² merged the whole flat into one, while 1.5 m² found
-    # two. Measure the thing the user is actually thinking about.
-    cell_area = res * res
-    out = np.zeros_like(grown)
-    next_id = 1
-    for i in range(1, n + 1):
-        m = grown == i
-        if m.sum() * cell_area >= min_area_m2:
-            out[m] = next_id
-            next_id += 1
-    return out, next_id - 1
-
-
-def colourise(labels, count):
-    """RGBA image: room colour where labelled, fully transparent elsewhere."""
-    h, w = labels.shape
-    out = np.zeros((h, w, 4), np.uint8)
-    for i in range(1, count + 1):
-        r, g, b = PALETTE[(i - 1) % len(PALETTE)]
-        m = labels == i
-        out[m] = (r, g, b, 255)
-    return out
 
 
 def preview(img, rgba):
@@ -151,7 +96,7 @@ def main():
     ap.add_argument('--min-area', type=float, default=2.0,
                     help='smallest thing that counts as a room, m^2')
     ap.add_argument('--apply', action='store_true',
-                    help='install as maps/room_mask.png (keeps a .bak)')
+                    help='install as maps/<map>_room_mask.png (keeps a .bak)')
     args = ap.parse_args()
 
     img, res = load_map(args.map)
@@ -184,15 +129,17 @@ def main():
     print(f'      {ypath}  (rename room1/room2/... to the real names)')
 
     if args.apply:
-        mask = f'{PKG}/maps/room_mask.png'
+        mask, colours_path = room_files.paths_for(args.map)
         if os.path.exists(mask):
-            shutil.copy2(mask, mask + '.bak')
-            print(f'backed up {mask} -> room_mask.png.bak')
-        shutil.copy2(out, mask)
-        shutil.copy2(ypath, f'{PKG}/maps/room_colors.yaml')
-        print('installed as maps/room_mask.png + maps/room_colors.yaml')
-        print('‼️  the names are room1, room2, … — edit maps/room_colors.yaml '
-              'before the robot has to say them out loud')
+            os.replace(mask, mask + '.bak')
+            print(f'backed up {mask} -> {os.path.basename(mask)}.bak')
+        Image.fromarray(rgba).save(mask)
+        with open(colours_path, 'w') as f:
+            yaml.safe_dump(colours, f, allow_unicode=True)
+        print(f'installed as {mask}\n           + {colours_path}')
+        print(f'‼️  the names are room1, room2, … — edit {colours_path} '
+              'before the robot has to say them out loud (or rename/recolour '
+              'them from the dashboard\'s Χάρτες tab instead)')
 
 
 if __name__ == '__main__':

@@ -97,23 +97,31 @@ def test_active_map_files_exist():
 
 def test_room_mask_matches_active_map():
     from PIL import Image
-    _, _, img = _load_map()
-    mask = Image.open(f'{PKG}/maps/room_mask.png')
+    name, _, img = _load_map()
+    mask_path = f'{PKG}/maps/{name}_room_mask.png'
+    if not os.path.exists(mask_path):
+        pytest.skip(f'no room mask for {name} yet — placed from the dashboard, '
+                    'not required to exist')
+    mask = Image.open(mask_path)
     assert mask.size == img.size, (
-        f'room_mask.png {mask.size} != active map {img.size} — regenerate with '
-        'scripts/make_room_mask.py (situational_awareness falls back meanwhile)')
+        f'{name}_room_mask.png {mask.size} != active map {img.size} — regenerate '
+        'with scripts/auto_rooms.py (situational_awareness falls back meanwhile)')
 
 
 def test_locations_on_free_space_and_in_own_room():
     import numpy as np
     from PIL import Image
-    _, meta, img = _load_map()
+    name, meta, img = _load_map()
     grid = np.array(img)
     ox, oy = meta['origin'][:2]
     res = meta['resolution']
     h, w = grid.shape
-    mask = np.array(Image.open(f'{PKG}/maps/room_mask.png').convert('RGBA'))
-    colors = yaml.safe_load(open(f'{PKG}/maps/room_colors.yaml'))
+    mask_path = f'{PKG}/maps/{name}_room_mask.png'
+    colours_path = f'{PKG}/maps/{name}_room_colors.yaml'
+    if not os.path.exists(mask_path) or not os.path.exists(colours_path):
+        pytest.skip(f'no room mask/colours for {name} yet')
+    mask = np.array(Image.open(mask_path).convert('RGBA'))
+    colors = yaml.safe_load(open(colours_path))
     locs = yaml.safe_load(open(f'{PKG}/config/locations.yaml'))
     for name, p in locs.items():
         col = int((p['x'] - ox) / res)

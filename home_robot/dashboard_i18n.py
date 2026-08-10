@@ -315,6 +315,13 @@ TRANSLATIONS = {
          '🖱️ Klick auf die Karte wählt einen Raum (statt den Roboter dorthin zu schicken)'),
     'Δεν βρέθηκε δωμάτιο εκεί.':
         ('No room found there.', 'Dort wurde kein Raum gefunden.'),
+    '➕ Κλικ στον χάρτη ΠΡΟΣΘΕΤΕΙ δωμάτιο εδώ, με το όνομα/χρώμα από κάτω':
+        ('➕ Click on the map ADDS a room here, with the name/colour below',
+         '➕ Klick auf die Karte FÜGT hier einen Raum hinzu, mit Name/Farbe unten'),
+    'π.χ. κρεβατοκάμαρα': ('e.g. bedroom', 'z.B. Schlafzimmer'),
+    'Δώσε πρώτα όνομα δωματίου.':
+        ('Give the room a name first.', 'Gib dem Raum zuerst einen Namen.'),
+    'Τοποθέτηση…':        ('Placing…', 'Platziere…'),
 
     # ── 3D arm view ───────────────────────────────────────────────────────
     'Σύρε για περιστροφή · ροδέλα για ζουμ · κινείται με τις αρθρώσεις από κάτω':
@@ -323,6 +330,13 @@ TRANSLATIONS = {
     'φόρτωση…':          ('loading…', 'lädt…'),
     'τρίγωνα':           ('triangles', 'Dreiecke'),
     'δεν φορτώθηκε':     ('failed to load', 'nicht geladen'),
+
+    # ── 3D floorplan (walls extruded from the 2D map) ──────────────────────
+    'Τοίχοι 3D':         ('Walls 3D', '3D-Wände'),
+    'τοίχοι':            ('walls', 'Wände'),
+    'Σύρε για περιστροφή · ροδέλα για ζουμ · από τον καθαρό (τετραγωνισμένο) 2D χάρτη':
+        ('Drag to rotate · wheel to zoom · from the clean (squared) 2D map',
+         'Ziehen zum Drehen · Rad zum Zoomen · aus der bereinigten (quadrierten) 2D-Karte'),
 
     # ── who is speaking ───────────────────────────────────────────────────
     'Ποιος μιλάει':      ('Who is speaking', 'Wer spricht'),
@@ -460,6 +474,7 @@ TRANSLATIONS = {
 
     # ── settings: maps ────────────────────────────────────────────────────
     'Χάρτες':            ('Maps', 'Karten'),
+    'Φόρτωση…':          ('Loading…', 'Lade…'),
     '🆕 Νέος χάρτης (SLAM)': ('🆕 New map (SLAM)', '🆕 Neue Karte (SLAM)'),
     '💾 Αποθήκευση':     ('💾 Save', '💾 Speichern'),
     'όνομα χάρτη':       ('map name', 'Kartenname'),
@@ -475,23 +490,63 @@ TRANSLATIONS = {
     'Επανεκκίνηση… η σελίδα θα ξανασυνδεθεί μόνη της.':
         ('Restarting… the page will reconnect on its own.',
          'Neustart… die Seite verbindet sich von selbst wieder.'),
-    'Ξεκινά ΝΕΑ χαρτογράφηση (SLAM). Ο τρέχων χάρτης δεν χάνεται, αλλά η '
-    'πλοήγηση σταματά μέχρι να αποθηκεύσεις τον καινούργιο. Να συνεχίσω;':
+    'Ξεκινά ΝΕΑ χαρτογράφηση (SLAM). Ο τρέχων χάρτης δεν χάνεται, αλλά ΟΛΑ '
+    'ξαναξεκινούν (~90 δευτερόλεπτα) και η πλοήγηση σταματά μέχρι να '
+    'αποθηκεύσεις τον καινούργιο. Να συνεχίσω;':
         ('A NEW mapping run (SLAM) will start. The current map is not lost, '
-         'but navigation stops until you save the new one. Continue?',
+         'but EVERYTHING restarts (~90 seconds) and navigation stops until '
+         'you save the new one. Continue?',
          'Eine NEUE Kartierung (SLAM) beginnt. Die aktuelle Karte geht nicht '
-         'verloren, aber die Navigation stoppt, bis du die neue speicherst. '
-         'Fortfahren?'),
-    'Ξεκινά χαρτογράφηση… οδήγησε το ρομπότ σε όλο τον χώρο και μετά αποθήκευσε.':
-        ('Mapping started… drive the robot around the whole space, then save.',
-         'Kartierung gestartet… fahre den Roboter durch den ganzen Raum und '
-         'speichere dann.'),
+         'verloren, aber ALLES startet neu (~90 Sekunden) und die Navigation '
+         'stoppt, bis du die neue speicherst. Fortfahren?'),
+    'Επανεκκίνηση σε χαρτογράφηση… η σελίδα θα ξανασυνδεθεί μόνη της. '
+    'Μετά οδήγησε το ρομπότ σε όλο τον χώρο και αποθήκευσε.':
+        ('Restarting into mapping… the page will reconnect on its own. '
+         'Then drive the robot around the whole space and save.',
+         'Neustart in die Kartierung… die Seite verbindet sich von selbst '
+         'wieder. Fahre dann den Roboter durch den ganzen Raum und '
+         'speichere.'),
     'Δώσε όνομα με λατινικά γράμματα, αριθμούς, - ή _':
         ('Use a name with Latin letters, digits, - or _',
          'Verwende einen Namen aus lateinischen Buchstaben, Ziffern, - oder _'),
     'Αποθήκευση…':       ('Saving…', 'Speichere…'),
     'Αποθηκεύτηκε':      ('Saved', 'Gespeichert'),
     'Απέτυχε':           ('Failed', 'Fehlgeschlagen'),
+    '🧹 Καθαρή εκδοχή — ισιώνει τα σκαλοπάτια των τοίχων.':
+        ('🧹 Clean version — straightens the wall staircasing.',
+         '🧹 Saubere Version — begradigt die Treppenstufen der Wände.'),
+    'Μόνο εμφάνιση':     ('Display only', 'Nur Anzeige'),
+    'μέχρι να διαλέξεις: μπορεί να μετατοπίσει τοίχους λίγα εκατοστά ή να '
+    'αφαιρέσει ένα πραγματικό εμπόδιο που έμοιαζε με θόρυβο σάρωσης — σύγκρινε '
+    'οπτικά πριν διαλέξεις.':
+        ('until you choose: it can shift walls by a few centimetres or remove '
+         'a real obstacle that looked like scan noise — compare visually '
+         'before choosing.',
+         'bis du dich entscheidest: sie kann Wände um ein paar Zentimeter '
+         'verschieben oder ein echtes Hindernis entfernen, das wie '
+         'Scan-Rauschen aussah — vergleiche visuell, bevor du dich '
+         'entscheidest.'),
+    'Καθαρή εκδοχή':     ('Clean version', 'Saubere Version'),
+    'Πρωτότυπο':         ('Original', 'Original'),
+    'Ισιωμένο':          ('Straightened', 'Begradigt'),
+    'Κράτησε το πρωτότυπο': ('Keep the original', 'Original behalten'),
+    'Χρήση ισιωμένης εκδοχής':
+        ('Use the straightened version', 'Begradigte Version verwenden'),
+    'Θα αντικαταστήσει τον χάρτη':
+        ('This will replace the map', 'Das ersetzt die Karte'),
+    'με την ισιωμένη εκδοχή (κρατά αντίγραφο ασφαλείας). Αν αυτός ο '
+    'χάρτης είναι ήδη ενεργός, θέλει "Ενεργοποίηση" για να φανεί η '
+    'αλλαγή. Να συνεχίσω;':
+        ('with the straightened version (a backup copy is kept). If this map '
+         'is already active, it needs "Activate" for the change to show. '
+         'Continue?',
+         'durch die begradigte Version (eine Sicherungskopie wird behalten). '
+         'Wenn diese Karte bereits aktiv ist, braucht es "Aktivieren", damit '
+         'die Änderung sichtbar wird. Fortfahren?'),
+    'Εφαρμογή ισιωμένης εκδοχής…':
+        ('Applying the straightened version…', 'Wende begradigte Version an…'),
+    'Έγινε':             ('Done', 'Erledigt'),
+    'αντίγραφο ασφαλείας': ('backup', 'Sicherungskopie'),
 
     # ── GUI session tabs (RViz / MoveIt / Gazebo) ─────────────────────────
     'Η ίδια συνεδρία :2 που ανοίγει το <code>robot max</code> — και αυτή που '

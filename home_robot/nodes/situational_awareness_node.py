@@ -21,7 +21,6 @@ import math
 import os
 import time
 
-import numpy as np
 import psutil
 import yaml
 import rclpy
@@ -33,6 +32,8 @@ from sensor_msgs.msg import BatteryState
 from std_msgs.msg import Float32, String
 from ament_index_python.packages import get_package_share_directory
 
+from home_robot import room_files
+
 
 def _load_locations() -> dict:
     try:
@@ -43,21 +44,6 @@ def _load_locations() -> dict:
             return yaml.safe_load(f) or {}
     except Exception:
         return {}
-
-
-def _load_room_mask():
-    """Load room_mask.png + room_colors.yaml. Returns (mask_arr, color_map) or (None, None)."""
-    pkg = get_package_share_directory('home_robot')
-    mask_path   = os.path.join(pkg, 'maps', 'room_mask.png')
-    colors_path = os.path.join(pkg, 'maps', 'room_colors.yaml')
-    try:
-        from PIL import Image
-        arr = np.array(Image.open(mask_path).convert('RGBA'))
-        with open(colors_path) as f:
-            color_map = yaml.safe_load(f)  # {room_name: [R, G, B]}
-        return arr, color_map
-    except Exception:
-        return None, None
 
 
 def _nearest_room(x: float, y: float, locations: dict,
@@ -127,7 +113,11 @@ class SituationalAwarenessNode(Node):
         self._face_frame_w = self.get_parameter('face_frame_width').value
 
         self._locations  = _load_locations()
-        self._mask_arr, self._color_map = _load_room_mask()
+        # Loaded lazily in _on_map, once map_server's active map name is known
+        # (room files are per-map — see home_robot/room_files.py) rather than
+        # here, where map_server may not even be up yet.
+        self._mask_arr, self._color_map = None, None
+        self._mask_map_name = None
         self._map_info   = None   # (origin_x, origin_y, resolution) of the live map
         self._odom_x     = 0.
         self._odom_y     = 0.
@@ -172,14 +162,28 @@ class SituationalAwarenessNode(Node):
         info = msg.info
         self._map_info = (info.origin.position.x, info.origin.position.y,
                           info.resolution)
+        # /map is TRANSIENT_LOCAL, so this fires rarely (once at startup, or on
+        # a remap/map-switch) — cheap enough to shell out to `ros2 param get`
+        # here even though it costs ~1-2s; nothing else waits on this callback.
+        name = room_files.active_map_name()
+        if name and name != self._mask_map_name:
+            arr, colours = room_files.load_raw(name)
+            self._mask_map_name = name
+            if arr is not None and colours:
+                self._mask_arr, self._color_map = arr, colours
+            else:
+                self._mask_arr, self._color_map = None, None
+                self.get_logger().warning(
+                    f'no room mask for map "{name}" — falling back to '
+                    'nearest-location lookup. Draw one from the dashboard\'s '
+                    'Χάρτες tab or scripts/auto_rooms.py.')
         if self._mask_arr is not None:
             h, w = self._mask_arr.shape[:2]
             if (w, h) != (info.width, info.height):
                 self.get_logger().warning(
-                    f'room_mask.png is {w}x{h} but the active map is '
-                    f'{info.width}x{info.height} — the mask was painted on an '
-                    'older map. Falling back to nearest-location lookup; '
-                    'redraw maps/room_mask.png over the current map.')
+                    f'{name}_room_mask.png is {w}x{h} but the active map is '
+                    f'{info.width}x{info.height} — falling back to '
+                    'nearest-location lookup.')
                 self._mask_arr = None
 
     def _on_odom(self, msg: Odometry):

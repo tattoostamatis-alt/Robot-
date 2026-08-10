@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Auto-generate maps/room_mask.png for a map via multi-seed BFS
+"""Auto-generate maps/<map>_room_mask.png for a map via multi-seed BFS
 (watershed-by-distance) from the taught locations in config/locations.yaml.
 
     scripts/make_room_mask.py [map_name]   # default: kela3
 
 Re-teach the locations on the new map first (record_location.py --click),
 then run this and review the *_preview.display.png overlay before renaming
-the output to maps/room_mask.png.
+the output to maps/<map>_room_mask.png (see home_robot/room_files.py — room
+files are scoped per map, not shared across every saved map).
 """
 import heapq
 import os
@@ -16,6 +17,9 @@ import numpy as np
 import yaml
 from PIL import Image
 from scipy import ndimage
+
+sys.path.insert(0, os.path.expanduser('~/robot_ws/src/home_robot'))
+from home_robot import room_files  # noqa: E402
 
 PKG = os.path.expanduser('~/robot_ws/src/home_robot')
 MAP = sys.argv[1] if len(sys.argv) > 1 else 'kela3'
@@ -28,11 +32,13 @@ h, w = img.shape
 free = img >= 250  # occupied ~0, unknown ~205, free 254
 
 locs = yaml.safe_load(open(f'{PKG}/config/locations.yaml'))
-colors = yaml.safe_load(open(f'{PKG}/maps/room_colors.yaml'))
+_, colours_path = room_files.paths_for(MAP)
+with open(colours_path) as f:
+    colors = yaml.safe_load(f)
 
-# room_colors.yaml is what defines a "room". locations.yaml also holds poses
-# that are not rooms — `dock` is a charger pose against a wall — and seeding
-# BFS from those would carve a bogus region out of the room that contains them.
+# <map>_room_colors.yaml is what defines a "room". locations.yaml also holds
+# poses that are not rooms — `dock` is a charger pose against a wall — and
+# seeding BFS from those would carve a bogus region out of the room containing them.
 names = [n for n in sorted(locs) if n in colors]
 _skipped = [n for n in sorted(locs) if n not in colors]
 if _skipped:

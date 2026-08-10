@@ -6,19 +6,19 @@ Topics published:
   /current_room   (String)       — the room the robot is IN, latched; from
                                    map->base_link (polled) or /amcl_pose
 
-‼️ The room comes from maps/room_mask.png, not from the nearest waypoint.
-Waypoints are goals, not room centres, and several sit inside another room:
-`dock` and `dock_staging` are both painted saloni. Nearest-waypoint therefore
-reported "dock" for a robot standing correctly in the living room, which reads
-as a localization failure and sent a long 2026-08-02 debugging session chasing
-one that was not there. situational_awareness_node already did this properly;
-this node did not.
+‼️ The room comes from maps/<active-map>_room_mask.png (see
+home_robot/room_files.py — room files are scoped per map), not from the
+nearest waypoint. Waypoints are goals, not room centres, and several sit
+inside another room: `dock` and `dock_staging` are both painted saloni.
+Nearest-waypoint therefore reported "dock" for a robot standing correctly in
+the living room, which reads as a localization failure and sent a long
+2026-08-02 debugging session chasing one that was not there.
+situational_awareness_node already did this properly; this node did not.
 """
 
 import math
 import os
 
-import numpy as np
 import yaml
 import rclpy
 import tf2_ros
@@ -30,18 +30,7 @@ from nav_msgs.msg import OccupancyGrid
 from std_msgs.msg import String
 from visualization_msgs.msg import Marker, MarkerArray
 
-
-def _load_room_mask():
-    """maps/room_mask.png + room_colors.yaml, or (None, None) if unavailable."""
-    try:
-        from PIL import Image
-        pkg = get_package_share_directory('home_robot')
-        arr = np.array(Image.open(
-            os.path.join(pkg, 'maps', 'room_mask.png')).convert('RGBA'))
-        with open(os.path.join(pkg, 'maps', 'room_colors.yaml')) as f:
-            return arr, yaml.safe_load(f)
-    except Exception:
-        return None, None
+from home_robot import room_files
 
 
 def _room_from_mask(x, y, mask, colours, map_info):
@@ -100,14 +89,13 @@ class RoomMarkersNode(Node):
 
         # Painted rooms. The map's origin/resolution are needed to turn a world
         # position into a mask pixel, so take them from /map rather than
-        # hardcoding the active map's values.
-        self._mask, self._colours = _load_room_mask()
+        # hardcoding the active map's values — and since room files are now
+        # per-map (home_robot/room_files.py), so is which mask to even load;
+        # both are resolved together in _on_map once map_server is known.
+        self._mask, self._colours = None, None
+        self._mask_map_name = None
         self._map_info = None
         self.create_subscription(OccupancyGrid, '/map', self._on_map, latch)
-        if self._mask is None:
-            self.get_logger().warning(
-                'maps/room_mask.png unavailable — falling back to nearest '
-                'waypoint, which names goals (dock…) rather than rooms')
 
         # TRANSIENT_LOCAL, matching AMCL's own publisher QoS (verified with
         # `ros2 topic info /amcl_pose --verbose`). AMCL publishes a pose only
@@ -158,13 +146,28 @@ class RoomMarkersNode(Node):
     def _on_map(self, msg: OccupancyGrid):
         i = msg.info
         self._map_info = (i.origin.position.x, i.origin.position.y, i.resolution)
+        # Latched topic, fires rarely (startup, remap, map switch) — a blocking
+        # `ros2 param get` here costs this node ~1-2s at most a few times a
+        # session, not per-frame.
+        name = room_files.active_map_name()
+        if name and name != self._mask_map_name:
+            arr, colours = room_files.load_raw(name)
+            self._mask_map_name = name
+            if arr is not None and colours:
+                self._mask, self._colours = arr, colours
+            else:
+                self._mask, self._colours = None, None
+                self.get_logger().warning(
+                    f'no room mask for map "{name}" — falling back to nearest '
+                    'waypoint, which names goals (dock…) rather than rooms. '
+                    'Draw one from the dashboard\'s Χάρτες tab or '
+                    'scripts/auto_rooms.py.')
         if self._mask is not None:
             h, w = self._mask.shape[:2]
             if (w, h) != (i.width, i.height):
                 self.get_logger().warning(
-                    f'room_mask.png is {w}x{h} but the map is {i.width}x{i.height} '
-                    '— it was painted on an older map; falling back to waypoints. '
-                    'Regenerate it with scripts/make_room_mask.py')
+                    f'{name}_room_mask.png is {w}x{h} but the map is '
+                    f'{i.width}x{i.height} — falling back to waypoints.')
                 self._mask = None
 
     def _update_room(self, rx: float, ry: float):
