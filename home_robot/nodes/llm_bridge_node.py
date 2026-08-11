@@ -1131,6 +1131,7 @@ class LLMBridgeNode(Node):
                 finally:
                     self._motion_confirmed = False
                 self.get_logger().info(f'{tool} → {result}')
+                self._speak_dispatch_result(tool, result)
 
             threading.Thread(target=_run, daemon=True).start()
             return True
@@ -1145,6 +1146,37 @@ class LLMBridgeNode(Node):
         self.get_logger().info(
             f'No yes/no for {tool} — dropping it and treating this as new speech')
         return False
+
+    def _speak_dispatch_result(self, tool, result):
+        """Voice the outcome of a motion tool confirmed by "ναι".
+
+        ‼️ _run() (above) calls _dispatch_tool() directly, bypassing the model
+        entirely — same reliability reason the confirmation itself is a
+        keyword gate, not a model call. That means nothing else turns this
+        result dict into words: found live 2026-08-11 as total silence after
+        "Να ψάξω μαύρη παντόφλα;" → "ναι" — the search ran (8s, no hits) and
+        nobody ever heard the answer.
+        """
+        status = result.get('status')
+        if tool == 'find':
+            if status == 'error':
+                reply = f"Δεν μπόρεσα να ψάξω: {result.get('reason', 'άγνωστο πρόβλημα')}"
+            else:
+                greek = result.get('greek')
+                acc = greek_accusative(greek) if greek else 'το αντικείμενο'
+                if result.get('found'):
+                    reply = f"Βρήκα {acc}."
+                else:
+                    reply = f"Δεν βλέπω {acc}."
+        elif status == 'error':
+            reply = f"Δεν μπόρεσα: {result.get('reason', 'άγνωστο πρόβλημα')}"
+        elif status == 'cancelled':
+            reply = 'Ακυρώθηκε.'
+        elif status == 'started':
+            reply = 'Ξεκίνησα.'
+        else:
+            reply = 'Έγινε.'
+        self._publish_reply(reply)
 
     def _on_arm_state(self, msg: JointState):
         for name, pos in zip(msg.name, msg.position):

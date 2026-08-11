@@ -102,6 +102,12 @@ class ObjectMemoryNode(Node):
         self.store_pub  = self.create_publisher(String, 'memory/store', 10)
 
         self.create_subscription(String, 'detected_objects', self._on_detected, 10)
+        # open_vocab_detector publishes the SAME schema (label/x/y/z/conf in the
+        # camera optical frame) — see pick_place_node.py, fixed there 2026-08-06
+        # for grasping. Without this, object memory (and therefore fetch's
+        # room-by-room search) only ever knows the 80 COCO classes, so a
+        # non-COCO object like a slipper is never findable outside grasp range.
+        self.create_subscription(String, 'open_vocab_detections', self._on_detected, 10)
         self.create_subscription(String, 'object_memory/query', self._on_query, 10)
 
         self.create_timer(self.get_parameter('publish_period').value, self._publish)
@@ -126,7 +132,10 @@ class ObjectMemoryNode(Node):
                 if not label or label in self.ignore:
                     continue
                 z = obj.get('z', 0.0)
-                if z <= 0.1 or z > self.max_range:
+                # open_vocab_detector reports z as None (not 0.0) when depth was
+                # unavailable for that box — object_detector never does, so this
+                # only bites once open-vocab is feeding this callback too.
+                if z is None or z <= 0.1 or z > self.max_range:
                     continue
                 pt = self._to_map(obj.get('x', 0.0), obj.get('y', 0.0), z)
                 if pt is None:

@@ -59,6 +59,8 @@ from home_robot.fetch_planner import (approach_pose, memory_target,
                                       nearest_detection, homing_twist,
                                       is_stale_repeat)
 from home_robot.status_query import ROOM_NAMES_EL, rooms_from_locations
+from home_robot.vocabulary import (greek_accusative, greek_for,
+                                   needs_open_vocab, to_prompt)
 
 
 class State(Enum):
@@ -160,6 +162,7 @@ class MissionExecutorNode(Node):
         self._cancel_flag = threading.Event()
         self._lock       = threading.Lock()
         self._latest_objects: list = []
+        self._latest_open_vocab: list = []
         self._object_memory: list = []      # confirmed set, for sorting
         self._sort_rules = _load_sort_rules()
         self._tracked_rx = 0.0    # last tracked_objects arrival (see _on_detected)
@@ -186,6 +189,11 @@ class MissionExecutorNode(Node):
         self.create_subscription(String, 'speech_text',       self._on_speech_text,     10)
         self.create_subscription(String, 'tracked_objects',   self._on_tracked,         10)
         self.create_subscription(String, 'detected_objects',  self._on_detected,        10)
+        # Fetch's own live "is it here" check (COCO covers 80 classes; a slipper
+        # is not one of them — see vocabulary.py's HOUSEHOLD_EL). Kept separate
+        # from object_memory's copy of the same topic: this one only needs the
+        # current frame, not a persisted map position.
+        self.create_subscription(String, 'open_vocab_detections', self._on_open_vocab, 10)
         self.create_subscription(String, 'object_memory/answer', self._on_mem_answer,   10)
         # Whole confirmed set, for the sort mission (query answers one label).
         self.create_subscription(String, 'object_memory', self._on_object_memory, 10)
@@ -206,6 +214,9 @@ class MissionExecutorNode(Node):
         self._mem_query_pub = self.create_publisher(String, 'object_memory/query', 10)
         self._vision_query_pub = self.create_publisher(String, 'vision/query', 10)
         self._pick_pub    = self.create_publisher(String, 'pick_command', 10)
+        # Idle by default (GPU cost) — a fetch for a non-COCO object turns this
+        # on for the duration of the mission and clears it when done.
+        self._vocab_pub   = self.create_publisher(String, 'vocab/set', 10)
         self._place_pub   = self.create_publisher(String, 'place_command', 10)
         # For the follow-delivery final approach (Nav2 gets us to the area; this
         # closes the last metre onto the user).
@@ -245,6 +256,12 @@ class MissionExecutorNode(Node):
         if time.monotonic() - self._tracked_rx < self._TRACKED_TTL:
             return            # the tracker is live; ignore the raw duplicate
         self._on_objects(msg)
+
+    def _on_open_vocab(self, msg: String):
+        try:
+            self._latest_open_vocab = json.loads(msg.data) or []
+        except json.JSONDecodeError:
+            pass
 
     def _on_dock_status(self, msg: String):
         self._dock_value = msg.data
@@ -490,18 +507,45 @@ class MissionExecutorNode(Node):
     # ── Mission: fetch ("φέρε μου το X") ─────────────────────────────
 
     def _mission_fetch(self, label: str):
+        """Entry point: normalize the label and arm open-vocab if it's needed.
+
+        object_detector only ever emits the 80 COCO classes, so a slipper —
+        which has no COCO class at all (see vocabulary.py's HOUSEHOLD_EL) —
+        was never findable by fetch no matter how thoroughly it searched: not
+        by the live check below, and not by object_memory (same detector).
+        `to_prompt` turns whatever the LLM said («παντόφλα», «slipper», or a
+        wrong COCO guess like «shoe») into the one label every downstream
+        check, object_memory, and pick_place_node's grasp all agree on.
+        open_vocab_detector is idle by default (a second model on the same
+        GPU) — armed for the duration of this mission only, cleared after.
+        """
+        prompt = to_prompt(label) or label
+        use_open_vocab = needs_open_vocab(prompt)
+        if use_open_vocab:
+            self._vocab_pub.publish(String(data=json.dumps([prompt])))
+        try:
+            self._mission_fetch_inner(prompt)
+        finally:
+            if use_open_vocab:
+                self._vocab_pub.publish(String(data=json.dumps([])))
+
+    def _mission_fetch_inner(self, label: str):
         self.get_logger().info(f'Mission: fetch "{label}"')
+        # `label` is the internal matching key (English prompt) from here on —
+        # everything spoken uses these two declined forms instead.
+        label_el  = greek_for(label)
+        label_acc = greek_accusative(label)
         # Deliver back to where the command was given = the robot's pose now.
         start_pose = self._lookup_base_pose()
 
         self._set_state(State.NAVIGATING)
-        self._speak(f'Πάω να φέρω {label}.')
+        self._speak(f'Πάω να φέρω {label_acc}.')
 
         # 1. RESOLVE — where is it?
         target = self._resolve_location(label)
         if target is None:
             self._finish(State.CANCELLED if self._cancel_flag.is_set() else State.FAILED,
-                         'Ακυρώθηκε.' if self._cancel_flag.is_set() else f'Δεν ξέρω πού είναι {label}.')
+                         'Ακυρώθηκε.' if self._cancel_flag.is_set() else f'Δεν ξέρω πού είναι {label_el}.')
             return
 
         # 2-4. approach → verify → grasp-and-hold, with retries
@@ -538,7 +582,8 @@ class MissionExecutorNode(Node):
 
             self._set_state(State.INSPECTING)
             time.sleep(self._inspect_settle)
-            det = nearest_detection(self._latest_objects, label, self._fetch_grasp_range)
+            det = nearest_detection(self._latest_objects + self._latest_open_vocab,
+                                    label, self._fetch_grasp_range)
             if det is not None:
                 if self._do_pick(label, hold=True):
                     picked = True
@@ -547,7 +592,7 @@ class MissionExecutorNode(Node):
 
             # Not here. Note the dud, then ask memory for something better.
             tried.append((target['x'], target['y']))
-            self._speak(f'Δεν βλέπω {label} εδώ, ξανακοιτάω.')
+            self._speak(f'Δεν βλέπω {label_acc} εδώ, ξανακοιτάω.')
             t2 = self._query_object_memory(label)
             if t2 and not is_stale_repeat(t2, tried):
                 target = t2
@@ -557,7 +602,7 @@ class MissionExecutorNode(Node):
             if searched:
                 break
             searched = True
-            self._speak(f'Ψάχνω στα δωμάτια για {label}.')
+            self._speak(f'Ψάχνω στα δωμάτια για {label_acc}.')
             t3 = self._search_rooms_for(label, tried)
             if t3 is None:
                 break
@@ -575,9 +620,9 @@ class MissionExecutorNode(Node):
             if self._cancel_flag.is_set():
                 msg = 'Ακυρώθηκε.'
             elif not reached:
-                msg = f'Δεν μπόρεσα να φτάσω στο {label}.'
+                msg = f'Δεν μπόρεσα να φτάσω στο {label_el}.'
             else:
-                msg = f'Δεν κατάφερα να πιάσω {label}.'
+                msg = f'Δεν κατάφερα να πιάσω {label_acc}.'
             self._finish(State.CANCELLED if self._cancel_flag.is_set() else State.FAILED,
                          msg)
             return
@@ -586,7 +631,7 @@ class MissionExecutorNode(Node):
         #    release below so the arm isn't left holding the object)
         if not self._cancel_flag.is_set():
             self._set_state(State.NAVIGATING)
-            self._speak(f'Σου φέρνω {label}.')
+            self._speak(f'Σου φέρνω {label_acc}.')
             if start_pose is not None:
                 self._navigate_to_xy(*start_pose)      # Nav2 to the area
             if self._delivery_mode == 'follow':
@@ -596,9 +641,9 @@ class MissionExecutorNode(Node):
         self._do_place()
 
         if self._cancel_flag.is_set():
-            self._finish(State.CANCELLED, f'Ακυρώθηκε — άφησα {label}.')
+            self._finish(State.CANCELLED, f'Ακυρώθηκε — άφησα {label_acc}.')
         else:
-            self._finish(State.DONE, f'Ορίστε {label}.')
+            self._finish(State.DONE, f'Ορίστε {label_acc}.')
 
     def _resolve_location(self, label: str):
         """Return {'x','y','room',...} for `label`, or None. Object memory first,
