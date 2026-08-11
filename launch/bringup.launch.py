@@ -475,6 +475,14 @@ def generate_launch_description():
         condition=IfCondition(use_localization),
     )
 
+    trail_publisher_node = Node(
+        package='home_robot',
+        executable='trail_publisher_node.py',
+        name='trail_publisher_node',
+        output='screen',
+        condition=IfCondition(use_localization),
+    )
+
     # Restores the last saved AMCL pose on startup (polls until AMCL is
     # active, then publishes to /initialpose).  global_localizer auto-runs
     # only when no per-map saved pose file exists.
@@ -1449,6 +1457,7 @@ def generate_launch_description():
         rtabmap_node,
         localization_node,
         room_markers_node,
+        trail_publisher_node,
         pose_saver_node,
         global_localizer_node,
         global_localization_init,

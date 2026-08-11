@@ -68,6 +68,7 @@ install(PROGRAMS
   home_robot/nodes/web_dashboard_node.py
   home_robot/nodes/goal_pose_bridge.py
   home_robot/nodes/odom_tf_broadcaster.py
+  home_robot/nodes/trail_publisher_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
