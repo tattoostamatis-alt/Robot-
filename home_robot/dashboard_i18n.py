@@ -699,6 +699,25 @@ TRANSLATIONS = {
          'sehen ist, höchstens 4-mal pro Stunde, nie zwischen 23:00 und 08:00, '
          'und nie dieselbe Bemerkung zweimal in 2 Stunden.'),
 
+    # ── object memory pane ────────────────────────────────────────────────
+    'Αντικείμενα':       ('Objects', 'Objekte'),
+    'Πού είναι τα πράγματα': ('Where things are', 'Wo die Dinge sind'),
+    'Τίποτα γνωστό ακόμη.': ('Nothing known yet.', 'Noch nichts bekannt.'),
+    'αντικείμενα':       ('objects', 'Objekte'),
+    'άγνωστο δωμάτιο':   ('unknown room', 'unbekannter Raum'),
+    'Το ρομπότ θυμάται πού είδε τελευταία κάθε αντικείμενο, από την κάμερα — '
+    'η ίδια μνήμη που χρησιμοποιεί το «φέρε μου το Χ». Ένα αντικείμενο '
+    'μπαίνει εδώ μόνο αφού επιβεβαιωθεί σε αρκετές ξεχωριστές παρατηρήσεις, '
+    'όχι από μία ματιά.':
+        ('The robot remembers where it last saw each object, from the camera '
+         '— the same memory "bring me the X" uses. An object only appears '
+         'here once confirmed across several separate observations, not from '
+         'a single glance.',
+         'Der Roboter merkt sich, wo er jedes Objekt zuletzt gesehen hat, '
+         'über die Kamera — dasselbe Gedächtnis, das „bring mir das X" nutzt. '
+         'Ein Objekt erscheint hier erst, nachdem es in mehreren getrennten '
+         'Beobachtungen bestätigt wurde, nicht nach einem einzigen Blick.'),
+
     # ── timeline pane ─────────────────────────────────────────────────────
     'Χρονολόγιο':        ('Timeline', 'Zeitleiste'),
     'Χρονικό':           ('Timeline', 'Verlauf'),

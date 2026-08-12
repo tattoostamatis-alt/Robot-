@@ -70,6 +70,7 @@ from home_robot.system_settings import (
     bt_args, parse_bt_devices, parse_devices, parse_volume, parse_wifi_list,
     volume_args, wifi_connect_args)
 from home_robot.dashboard_i18n import LANGUAGES, as_js_table
+from home_robot.status_query import room_el
 
 import uvicorn
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -655,6 +656,7 @@ class DashboardNode(Node):
         self.create_subscription(Int16MultiArray, '/mic/audio', self._cb_mic, 30)
         self.create_subscription(String, '/gesture_status', self._cb_gesture, 10)
         self.create_subscription(String, '/observations', self._cb_observations, 10)
+        self.create_subscription(String, '/object_memory', self._cb_object_memory, 5)
         self.create_subscription(String, '/vocab/state', self._cb_vocab, latch)
         self.create_subscription(String, '/hand_gesture', self._cb_hand, latch)
         self.create_subscription(String, '/people', self._cb_people, latch)
@@ -2439,6 +2441,20 @@ class DashboardNode(Node):
         except json.JSONDecodeError:
             return
         self._state.broadcast({'type': 'timeline', **data})
+
+    def _cb_object_memory(self, msg: String):
+        """/object_memory carries only CONFIRMED instances already, sorted
+        newest-first (object_memory_node.py) — nothing to filter or sort here.
+        The room key ('saloni') is translated to a bare Greek noun the same way
+        the acoustic map does, so the pane never has to show a raw map key."""
+        try:
+            items = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        for it in items:
+            room = it.get('room')
+            it['room_el'] = room_el(room) if room else None
+        self._state.broadcast({'type': 'object_memory', 'items': items})
 
     def _cb_quota(self, msg: String):
         """How many Gemini requests are left today. Latched by llm_bridge, so a
@@ -4975,6 +4991,25 @@ button{font:inherit;color:inherit}
       </div>
     </section>
 
+    <!-- ── Object memory ───────────────────────────────────────── -->
+    <section class="pane" id="p-objmem">
+      <div class="card" style="margin-bottom:9px">
+        <h3>Πού είναι τα πράγματα <span class="badge" id="om-badge">—</span></h3>
+        <div id="om-list" style="font-size:12.5px;line-height:1.75">
+          <span style="color:#71717a">Τίποτα γνωστό ακόμη.</span>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Πώς δουλεύει</h3>
+        <p style="font-size:11.5px;color:#71717a;line-height:1.6">
+          Το ρομπότ θυμάται πού είδε τελευταία κάθε αντικείμενο, από την κάμερα —
+          η ίδια μνήμη που χρησιμοποιεί το «φέρε μου το Χ». Ένα αντικείμενο
+          μπαίνει εδώ μόνο αφού επιβεβαιωθεί σε αρκετές ξεχωριστές παρατηρήσεις,
+          όχι από μία ματιά.
+        </p>
+      </div>
+    </section>
+
     <!-- ── Episodic timeline ───────────────────────────────────── -->
     <section class="pane" id="p-time">
       <div class="card" style="margin-bottom:9px">
@@ -5641,6 +5676,7 @@ const TABS = [
   ['vocab',  '🔎', 'Ψάξε'],
   ['sound',  '👂', 'Ήχοι'],
   ['obs',    '💡', 'Πρόσεξα'],
+  ['objmem', '📦', 'Αντικείμενα'],
   ['time',   '🕐', 'Χρονικό'],
   ['people', '🧑', 'Άτομα'],
   ['llm',    '💬', 'Φωνή'],
@@ -6183,6 +6219,7 @@ const HANDLERS = {
   token(m){ renderToken(m); },
   touch(m){ renderTouch(m); },
   observations(m){ renderObservations(m); },
+  object_memory(m){ renderObjectMemory(m); },
   timeline(m){ renderTimeline(m); },
   recall_answer(m){ $('tl-answer').textContent = m.text || ''; },
   arm(m){
@@ -7208,6 +7245,31 @@ function renderObservations(m){
     return `<div style="padding:7px 0;border-bottom:1px solid #232329">
       <span style="color:#52525b;font-variant-numeric:tabular-nums">${t}</span>
       &nbsp;${esc(o.text||'')}</div>`;
+  }).join('');
+}
+
+// ── object memory ────────────────────────────────────────────────────────
+function renderObjectMemory(m){
+  const items = m.items || [];
+  $('om-badge').textContent = items.length
+    ? items.length + ' ' + t('αντικείμενα') : '—';
+  const el = $('om-list');
+  if(!items.length){
+    el.innerHTML = '<span style="color:#71717a">'
+      + esc(t('Τίποτα γνωστό ακόμη.')) + '</span>';
+    return;
+  }
+  el.innerHTML = items.map(o=>{
+    const when = o.last_seen ? new Date(o.last_seen*1000)
+      .toLocaleTimeString('el-GR', {hour:'2-digit', minute:'2-digit'}) : '';
+    const room = o.room_el ? `<span style="color:#4ade80">${esc(o.room_el)}</span>`
+      : `<span style="color:#71717a">${esc(t('άγνωστο δωμάτιο'))}</span>`;
+    return `<div style="padding:7px 0;border-bottom:1px solid #232329;
+      display:flex;justify-content:space-between;gap:10px">
+      <span><span style="font-weight:600">${esc(o.label||'')}</span>
+        &nbsp;${room}</span>
+      <span style="color:#52525b;font-variant-numeric:tabular-nums">${when}</span>
+      </div>`;
   }).join('');
 }
 
