@@ -175,7 +175,7 @@ def _launch_setup(context, *args, **kwargs):
             # and then silently ignored — bringup fell back to its 'lemonade'
             # default and the robot kept thinking on the NPU. Nothing errored;
             # the only symptom was the 4.7 GB that never got freed.
-            'llm_backend':         LaunchConfiguration('llm_backend', default='gemini'),
+            'llm_backend':         LaunchConfiguration('llm_backend', default='lemonade'),
             # Fourth instance of the same omission (use_situational, use_planner,
             # llm_backend, now this): `use_doa` was never forwarded, and bringup
             # declares it default false, so doa_node NEVER started under
@@ -330,7 +330,7 @@ def _launch_setup(context, *args, **kwargs):
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
-            'map', default_value='malou2',
+            'map', default_value='malou3',
             description='Saved map name (in maps/) or a full path to a .yaml'),
         DeclareLaunchArgument(
             'use_slam', default_value='false',
@@ -400,12 +400,13 @@ def generate_launch_description():
                         'memory during navigation. Starts the full camera (replaces '
                         'the lean depth-only stream); costs iGPU/CPU.'),
         DeclareLaunchArgument(
-            'llm_backend', default_value='gemini',
-            description="Which LLM answers: 'gemini' is the cloud (the default — "
-                        "same tool-call rate as the NPU model at 0.45 s instead of "
-                        "6.7 s, and it frees 4.7 GB; needs ~/.home_robot/gemini_api_key "
-                        "and a network), 'lemonade' is FastFlowLM on the NPU "
-                        "(offline, holds that 4.7 GB), 'ollama' a local GGUF server."),
+            'llm_backend', default_value='lemonade',
+            description="Which LLM answers: 'lemonade' is FastFlowLM on the NPU "
+                        "(the default since the 2026-08-12 RAM upgrade to 32 GB — "
+                        "offline, holds 4.7 GB, plenty of headroom now), 'gemini' "
+                        "is the cloud (same tool-call rate at 0.45 s instead of "
+                        "6.7 s, frees 4.7 GB; needs ~/.home_robot/gemini_api_key "
+                        "and a network), 'ollama' a local GGUF server."),
         DeclareLaunchArgument(
             'use_doa', default_value='true',
             description='Direction of Arrival from the reSpeaker XVF3800: the '

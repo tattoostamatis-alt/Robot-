@@ -107,9 +107,17 @@ def test_a_cancelled_recovery_does_not_reissue():
 
 def test_a_fresh_stuck_clears_the_flag():
     """Otherwise one cancel disables recovery for the rest of the session —
-    the same trap the FAILED status had."""
-    body = _fn(_RECOV, '_check_stuck')
-    assert '_cancelled = False' in body
+    the same trap the FAILED status had.
+
+    2026-08-11: both stuck-detection paths (_check_stuck, cmd_vel active but
+    no displacement; _on_nav_feedback, planner never even produces a cmd_vel)
+    now share one trigger, _declare_stuck — check the flag gets cleared THERE
+    and that both entry points actually call it, rather than duplicating the
+    reset in each.
+    """
+    assert '_cancelled = False' in _fn(_RECOV, '_declare_stuck')
+    assert '_declare_stuck(' in _fn(_RECOV, '_check_stuck')
+    assert '_declare_stuck(' in _fn(_RECOV, '_on_nav_feedback')
 
 
 # ── the running commentary is off by default ─────────────────────────────────

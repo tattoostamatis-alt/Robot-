@@ -42,6 +42,7 @@ import time
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
+from rcl_interfaces.msg import SetParametersResult
 from std_msgs.msg import Bool, Float32, String
 from geometry_msgs.msg import Twist
 import usb.core
@@ -169,6 +170,18 @@ class DoaNode(Node):
         self.declare_parameter('min_angle_deg',     20.0)
         self.declare_parameter('led_enabled',       True)
         self.declare_parameter('led_brightness',    150)
+        # Per-state colours, 0xRRGGBB — pulled out of _apply_led_state's body
+        # (they used to be hardcoded there) so the dashboard's mic-settings
+        # card can retune them live, same mechanism as led_brightness below.
+        self.declare_parameter('led_color_idle_base',    0x111111)
+        self.declare_parameter('led_color_idle_pointer', 0x0000FF)
+        self.declare_parameter('led_color_listening',    COLOR_BLUE)
+        self.declare_parameter('led_color_processing',   COLOR_ORANGE)
+        # Privacy mute (wake_word_node's 'muted' param, relayed over
+        # mic/muted): takes over the ring from whatever state the voice
+        # pipeline is in, so the ring never shows "idle/listening" while the
+        # mic is actually off.
+        self.declare_parameter('led_color_muted',        0xFF0000)
         self.declare_parameter('listen_timeout',    12.0)  # max STT window seconds
         # ‼️ Do not turn the base toward a voice while something else is driving
         # it. The only guard used to be "not already rotating", so saying the
@@ -193,6 +206,11 @@ class DoaNode(Node):
         self._min_angle_deg   = self.get_parameter('min_angle_deg').value
         self._led_enabled     = self.get_parameter('led_enabled').value
         self._led_brightness  = self.get_parameter('led_brightness').value
+        self._led_color_idle_base    = self.get_parameter('led_color_idle_base').value
+        self._led_color_idle_pointer = self.get_parameter('led_color_idle_pointer').value
+        self._led_color_listening    = self.get_parameter('led_color_listening').value
+        self._led_color_processing   = self.get_parameter('led_color_processing').value
+        self._led_color_muted        = self.get_parameter('led_color_muted').value
         self._listen_timeout  = self.get_parameter('listen_timeout').value
         self._rotate_block_s  = self.get_parameter('rotate_block_s').value
         self._rotate_cooldown = self.get_parameter('rotate_cooldown_s').value
@@ -258,6 +276,10 @@ class DoaNode(Node):
         # recovery_manager watches. Non-zero here means a navigator (or teleop
         # via the smoother) owns the base right now.
         self.create_subscription(Twist, 'cmd_vel_smoothed', self._on_drive_cmd, 10)
+        # wake_word_node's privacy mute, relayed here so the ring can show it —
+        # same QoS it publishes with (see that node's muted_pub comment).
+        self.create_subscription(
+            Bool, 'mic/muted', self._on_mic_muted, _latched)
 
         self._dev        = None
         self._last_angle = 0.0
@@ -266,11 +288,13 @@ class DoaNode(Node):
         self._last_drive = 0.0        # monotonic time of the last non-zero drive cmd
         self._last_rotate = 0.0       # monotonic time of the last turn we started
         self._estop      = False
+        self._muted       = False
         self._led_state  = self._STATE_IDLE
         self._listen_timer = None
         self._lock       = threading.Lock()
 
         self._rotate_state_pub.publish(Bool(data=bool(self._rotate_on_wake)))
+        self.add_on_set_parameters_callback(self._on_param_change)
 
         threading.Thread(target=self._poll_loop, args=(poll_hz,), daemon=True).start()
         self.get_logger().info(
@@ -306,6 +330,35 @@ class DoaNode(Node):
 
     def _on_estop(self, msg: Bool):
         self._estop = bool(msg.data)
+
+    def _on_mic_muted(self, msg: Bool):
+        self._muted = bool(msg.data)
+        self._apply_led_state()
+
+    def _on_param_change(self, params):
+        """Live retuning from the dashboard's mic-settings card — brightness
+        and the per-state colours used to be read once in __init__ and never
+        again. Re-applies immediately rather than waiting for the next state
+        transition, so a colour picker feels connected to the hardware."""
+        for p in params:
+            if p.name == 'led_enabled':
+                self._led_enabled = p.value
+            elif p.name == 'led_brightness':
+                self._led_brightness = max(0, min(255, int(p.value)))
+            elif p.name == 'led_color_idle_base':
+                self._led_color_idle_base = p.value
+            elif p.name == 'led_color_idle_pointer':
+                self._led_color_idle_pointer = p.value
+            elif p.name == 'led_color_listening':
+                self._led_color_listening = p.value
+            elif p.name == 'led_color_processing':
+                self._led_color_processing = p.value
+            elif p.name == 'led_color_muted':
+                self._led_color_muted = p.value
+            else:
+                continue
+            self._apply_led_state()
+        return SetParametersResult(successful=True)
 
     # ── USB polling ────────────────────────────────────────────────
     def _poll_loop(self, hz):
@@ -343,15 +396,22 @@ class DoaNode(Node):
             return
         try:
             self._dev.set_led_brightness(self._led_brightness)
-            if self._led_state == self._STATE_IDLE:
-                self._dev.set_led_doa_colors(0x111111, 0x0000FF)
+            # Mute overrides whichever of idle/listening/processing the voice
+            # pipeline thinks it's in — the ring must never look like it's
+            # still listening while the mic is actually off.
+            if self._muted:
+                self._dev.set_led_color(self._led_color_muted)
+                self._dev.set_led_effect(LED_SINGLE)
+            elif self._led_state == self._STATE_IDLE:
+                self._dev.set_led_doa_colors(self._led_color_idle_base,
+                                             self._led_color_idle_pointer)
                 self._dev.set_led_effect(LED_DOA)
             elif self._led_state == self._STATE_LISTENING:
-                self._dev.set_led_color(COLOR_BLUE)
+                self._dev.set_led_color(self._led_color_listening)
                 self._dev.set_led_speed(10)
                 self._dev.set_led_effect(LED_BREATH)
             elif self._led_state == self._STATE_PROCESSING:
-                self._dev.set_led_color(COLOR_ORANGE)
+                self._dev.set_led_color(self._led_color_processing)
                 self._dev.set_led_speed(8)
                 self._dev.set_led_effect(LED_BREATH)
         except Exception as e:

@@ -77,6 +77,8 @@ import numpy as np
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
+from rcl_interfaces.msg import SetParametersResult
 from std_msgs.msg import Bool, String, Int16MultiArray
 import sounddevice as sd
 from scipy.signal import butter, lfilter, lfilter_zi
@@ -185,6 +187,11 @@ class WakeWordNode(Node):
         # 2nd-order high-pass at 250 Hz removes the noise (0 false triggers in
         # 20 s) without touching the wake word. Set to 0 to disable.
         self.declare_parameter('highpass_hz', 250.0)
+        # Privacy mute: while True, _audio_callback returns before touching the
+        # mic data at all — no wake detection, no mic/audio, no mic/audio_raw.
+        # The ALSA stream itself stays open (unlike the USB power-cycle button),
+        # so un-muting is instant instead of a multi-second re-enumeration.
+        self.declare_parameter('muted', False)
 
         device_index = self.get_parameter('device_index').value
         device_name = self.get_parameter('device_name').value
@@ -204,6 +211,7 @@ class WakeWordNode(Node):
         self.suppress_on_tts = self.get_parameter('suppress_on_tts').value
         self.allow_barge_in = self.get_parameter('allow_barge_in').value
         self.barge_in_threshold = self.get_parameter('barge_in_threshold').value
+        self.muted = self.get_parameter('muted').value
         self._gate = SpeakingGate(
             release_tail=self.get_parameter('tts_release_tail').value)
         # True while the reply being spoken contains the wake word itself.
@@ -211,37 +219,29 @@ class WakeWordNode(Node):
         self._risky_utterance = False
 
         # Stateful high-pass filter for the mic channel (see highpass_hz above).
-        # lfilter_zi seeds the filter state so the very first chunks aren't a
-        # transient; the state is carried across callbacks for a continuous IIR.
-        highpass_hz = self.get_parameter('highpass_hz').value
-        if highpass_hz and highpass_hz > 0:
-            self._hp_b, self._hp_a = butter(2, highpass_hz / (SAMPLE_RATE / 2),
-                                            btype='high')
-            # Keep the unit-step steady state as a template; scale it by the very
-            # first sample so the filter starts already settled to the incoming
-            # DC/noise level. Without this the IIR warm-up transient itself
-            # false-triggers the model for the first ~1 s (2 spurious wakes seen).
-            self._hp_zi_template = lfilter_zi(self._hp_b, self._hp_a)
-            self._hp_zi = None
-            self.get_logger().info(f'High-pass filter @ {highpass_hz:.0f} Hz on mic')
-        else:
-            self._hp_b = None
+        self._set_highpass(self.get_parameter('highpass_hz').value)
 
-        if model_path:
-            model_paths = [model_path]
-        elif model_name == 'hey_robot':
-            model_paths = [os.path.join(get_package_share_directory('home_robot'),
-                                         'config', 'models', 'hey_robot.onnx')]
-        else:
-            model_paths = [p for p in openwakeword.get_pretrained_model_paths()
-                           if model_name in os.path.basename(p)]
-            if not model_paths:
-                raise ValueError(f'No bundled openWakeWord model matches "{model_name}"')
+        # Live retuning from the dashboard's mic-settings card (mic_settings.py):
+        # without this, `ros2 param set /wake_word_node threshold 0.6` — or the
+        # same write from a slider — would silently do nothing until the node
+        # restarts, because every one of these was only ever read once, above.
+        self.add_on_set_parameters_callback(self._on_param_change)
 
+        model_paths = self._resolve_model_paths(model_name, model_path)
         self._model = Model(wakeword_model_paths=model_paths, vad_threshold=0.5)
+        self._model_name = model_name
 
         self.wake_pub = self.create_publisher(String, 'wake_word', 10)
         self.stop_pub = self.create_publisher(Bool, STOP_TOPIC, 10)
+        # Latched — doa_node and the dashboard both start after this node as
+        # often as before it, and a volatile publisher would leave the mute
+        # LED/badge showing "not muted" until someone happens to toggle it.
+        self.muted_pub = self.create_publisher(
+            Bool, 'mic/muted',
+            QoSProfile(depth=1,
+                       durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+                       reliability=QoSReliabilityPolicy.RELIABLE))
+        self.muted_pub.publish(Bool(data=bool(self.muted)))
         self.audio_pub = self.create_publisher(Int16MultiArray, 'mic/audio', 200)
         # ‼️ The RAW beam as well, when asked for. mic/audio carries the
         # PROCESSED channel, where the XVF3800's echo canceller has removed the
@@ -295,6 +295,102 @@ class WakeWordNode(Node):
             f'Wake word node started — models: {list(self._model.models.keys())}, '
             f'threshold={self.threshold}')
 
+    def _resolve_model_paths(self, model_name, model_path):
+        if model_path:
+            return [model_path]
+        if model_name == 'hey_robot':
+            return [os.path.join(get_package_share_directory('home_robot'),
+                                 'config', 'models', 'hey_robot.onnx')]
+        paths = [p for p in openwakeword.get_pretrained_model_paths()
+                 if model_name in os.path.basename(p)]
+        if not paths:
+            raise ValueError(f'No bundled openWakeWord model matches "{model_name}"')
+        return paths
+
+    def _set_model(self, model_name, model_path=''):
+        """Swap the wake model live — for the dashboard's wake-word picker.
+
+        The bundled openWakeWord models (alexa, hey_jarvis, hey_mycroft,
+        hey_marvin, ...) are pretrained English wake WORDS, not names one can
+        just type in: waking to anything else needs a newly TRAINED .onnx
+        (see training/wake_word_hey_robot/README), which is why the dashboard
+        only offers a fixed picker rather than a free-text field. Building the
+        new Model() before touching self._model means a bad/missing name
+        leaves the working one running instead of a detector with nothing
+        loaded.
+        """
+        try:
+            paths = self._resolve_model_paths(model_name, model_path)
+            new_model = Model(wakeword_model_paths=paths, vad_threshold=0.5)
+        except Exception as e:                                # noqa: BLE001
+            self.get_logger().error(
+                f'Could not switch the wake model to "{model_name}": {e} — '
+                'keeping the one already running')
+            return False
+        self._model = new_model
+        self._model_name = model_name
+        self.get_logger().info(
+            f'Wake model switched to "{model_name}" ({list(new_model.models.keys())})')
+        return True
+
+    def _set_highpass(self, highpass_hz):
+        """(Re)build the high-pass filter — see highpass_hz's declare_parameter
+        comment. Its own method so the dashboard's mic-settings slider can call
+        it live, not just __init__.
+
+        lfilter_zi seeds the filter state so the very first chunks after a
+        change aren't a transient; _hp_zi is reset to None so _audio_callback
+        reseeds it from the next real sample rather than carrying over state
+        computed for the OLD cutoff.
+        """
+        if highpass_hz and highpass_hz > 0:
+            self._hp_b, self._hp_a = butter(2, highpass_hz / (SAMPLE_RATE / 2),
+                                            btype='high')
+            self._hp_zi_template = lfilter_zi(self._hp_b, self._hp_a)
+            self._hp_zi = None
+            self.get_logger().info(f'High-pass filter @ {highpass_hz:.0f} Hz on mic')
+        else:
+            self._hp_b = None
+            self.get_logger().info('High-pass filter disabled')
+
+    def _on_param_change(self, params):
+        """Apply the dashboard's mic-settings card live — see mic_settings.py.
+
+        Every one of these used to be read once in __init__ and never again,
+        so a `ros2 param set` (or the same write from a slider) silently did
+        nothing until the node was restarted.
+        """
+        ok, reason = True, ''
+        for p in params:
+            if p.name == 'threshold':
+                self.threshold = p.value
+            elif p.name == 'allow_barge_in':
+                self.allow_barge_in = p.value
+                if p.value:
+                    # _disarm_barge_in() no-ops once _barge_in_disarmed is set
+                    # (see its own docstring) — turning barge-in back ON from
+                    # here needs a clean slate, or the NEXT three self-triggers
+                    # would go unguarded instead of disarming again.
+                    self._barge_in_disarmed = False
+                    self._barge_ins_without_speech = 0
+            elif p.name == 'barge_in_threshold':
+                self.barge_in_threshold = p.value
+            elif p.name == 'highpass_hz':
+                self._set_highpass(p.value)
+            elif p.name == 'muted':
+                self.muted = p.value
+                self.muted_pub.publish(Bool(data=bool(self.muted)))
+                self.get_logger().info(
+                    f'Microphone {"MUTED" if self.muted else "unmuted"} from the dashboard')
+            elif p.name == 'model_name':
+                # Rejected (not just logged) on failure, so the parameter
+                # itself stays at the old, working name — the dashboard reads
+                # that back and shows "asked X, live Y" instead of a picker
+                # that silently didn't take.
+                if not self._set_model(p.value, self.get_parameter('model_path').value):
+                    ok, reason = False, f'no such wake model "{p.value}"'
+        return SetParametersResult(successful=ok, reason=reason)
+
     def _listen_loop(self, device_index):
         """Own the mic, and KEEP owning it.
 
@@ -327,6 +423,8 @@ class WakeWordNode(Node):
                 backoff = min(backoff * 2, 30.0)
 
     def _audio_callback(self, indata, frames, time_info, status):
+        if self.muted:
+            return
         chunk = indata[:, self.mic_channel].copy()
         # Wake detection and STT read DIFFERENT channels on purpose — they want
         # opposite things from the array. Measured 2026-07-26 over 8 s of real

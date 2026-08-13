@@ -210,6 +210,9 @@ class STTNode(Node):
             if p.name == 'energy_thresh':
                 self.energy_thresh = p.value
                 self.get_logger().info(f'energy_thresh updated to {p.value:.4f}')
+            elif p.name == 'use_hw_vad':
+                self.use_hw_vad = p.value
+                self.get_logger().info(f'use_hw_vad updated to {p.value}')
         return SetParametersResult(successful=True)
 
     def _load_whisper(self, model_size, cpu_threads):

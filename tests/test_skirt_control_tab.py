@@ -15,7 +15,9 @@ from pathlib import Path
 
 import pytest
 
+from home_robot import arm_settings as arms
 from home_robot import collision_skirt as cs
+from home_robot import mic_settings as ms
 from home_robot import safety_settings as ss
 from home_robot.dashboard_i18n import LANGUAGES, as_js_table
 
@@ -39,6 +41,7 @@ _SUBS = {
                         .replace("'", '"').replace(',\n}', '\n}'),
     '__ARM_JOINTS__': re.search(r'ARM_JOINTS = (\[.*?\])', _SRC, re.S).group(1)
                         .replace("'", '"'),
+    '__ARM_MECH_LIMITS__': json.dumps({j: list(v) for j, v in arms.MECH_LIMITS.items()}),
     '__HAS_NOVNC__': 'false',
     '__USB_DEVICES__': json.dumps(_usb_devices(), ensure_ascii=False),
     '__SAFETY_SPECS__': json.dumps(
@@ -46,6 +49,12 @@ _SUBS = {
                  'step': s.step, 'warn_above': s.warn_above,
                  'warn_below': s.warn_below} for s in ss.SPECS}),
     '__SAFETY_INFO__': json.dumps(ss.INFO_ONLY),
+    '__MIC_SPECS__': json.dumps(
+        {s.key: {'kind': s.kind, 'def': s.default, 'lo': s.lo, 'hi': s.hi,
+                 'step': s.step, 'warn_above': s.warn_above,
+                 'warn_below': s.warn_below} for s in ms.SPECS}),
+    '__MIC_INFO__': json.dumps(ms.INFO_ONLY),
+    '__WAKE_MODEL_CHOICES__': json.dumps(ms.WAKE_MODEL_CHOICES),
     '__SKIRT_MARGINS__': json.dumps(cs.ALLOWED_MARGINS_MM),
     '__SKIRT_DEFAULT_MM__': json.dumps(cs.MARGIN_DEFAULT_MM),
     '__I18N__': json.dumps(as_js_table(), ensure_ascii=False),

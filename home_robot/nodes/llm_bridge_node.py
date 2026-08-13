@@ -260,7 +260,14 @@ TOOLS = [
     }},
     {'type': 'function', 'function': {
         'name': 'pick',
-        'description': 'Πιάσε ένα ορατό αντικείμενο με τον βραχίονα και άφησέ το στο σημείο εναπόθεσης',
+        # ‼️ 2026-08-11: a user said «πήγαινε πιάστην» (go grab it) and the
+        # model called pick on an object 1.83m away — pick never drives, so
+        # it correctly refused (max_reach 0.45m) instead of fetching. The old
+        # description didn't say pick stays put, so "πήγαινε"/"φέρε" phrasing
+        # had nothing to steer it toward fetch. Now explicit both ways.
+        'description': ('Πιάσε αντικείμενο που είναι ΗΔΗ σε εμβέλεια βραχίονα (~0.45m) — '
+                         'ΔΕΝ οδηγεί. Αν ο χρήστης λέει "πήγαινε"/"φέρε" ή το αντικείμενο '
+                         'μπορεί να είναι μακριά, χρησιμοποίησε fetch αντί γι\' αυτό.'),
         'parameters': {'type': 'object', 'properties': {
             # ‼️ NOT "COCO label" any more. That instruction made the model
             # answer «παντόφλα» with the nearest COCO-ish word it could think of
@@ -273,9 +280,14 @@ TOOLS = [
     }},
     {'type': 'function', 'function': {
         'name': 'fetch',
-        'description': 'Βρες, πιάσε και φέρε μου ένα αντικείμενο ("φέρε μου το X")',
+        'description': ('Οδήγησε ως το αντικείμενο, πιάσε το και φέρε το πίσω '
+                         '("φέρε μου/πήγαινε πιάσε το X"). Χρησιμοποίησέ το ΠΑΝΤΑ '
+                         'όταν χρειάζεται μετακίνηση για να το φτάσεις.'),
         'parameters': {'type': 'object', 'properties': {
-            'object': {'type': 'string', 'description': 'αγγλικό COCO label, π.χ. cup, bottle, book'},
+            # As of commit 0c334cc (2026-08-11) fetch also routes non-COCO
+            # names through the open-vocab detector, same as pick — no longer
+            # COCO-only.
+            'object': {'type': 'string', 'description': 'αγγλικά, π.χ. cup, book, slipper'},
         }, 'required': ['object']},
     }},
     {'type': 'function', 'function': {
@@ -307,8 +319,8 @@ TOOLS = [
         'parameters': {'type': 'object', 'properties': {}},
     }},
     {'type': 'function', 'function': {
-        # Open vocabulary: unlike pick/fetch, which are limited to the COCO-80
-        # object_detector, this one takes ANY noun.
+        # Open vocabulary lookup only — doesn't grab or drive, unlike
+        # pick/fetch (both of which also take non-COCO nouns as of 0c334cc).
         'name': 'find',
         'description': ('Ψάξε με τα μάτια για ΟΠΟΙΟΔΗΠΟΤΕ αντικείμενο, ακόμη κι '
                         'άγνωστο ("βρες τα κλειδιά", "ψάξε το πορτοφόλι")'),
@@ -394,8 +406,10 @@ class LLMBridgeNode(Node):
         self.declare_parameter('history_turns', 4)
         self.declare_parameter('nav_timeout', 60.0)
         # Ask before driving. ‼️ Most of what reaches speech_text was never
-        # addressed to the robot — see home_robot/motion_confirm.py.
-        self.declare_parameter('confirm_motion', True)
+        # addressed to the robot — see home_robot/motion_confirm.py. Off by
+        # user request 2026-08-11: motion tools now execute immediately, no
+        # "Να πάω;" — knowingly reopens that overheard-speech risk.
+        self.declare_parameter('confirm_motion', False)
         self.declare_parameter('memory_enabled', False)
         self.declare_parameter('memory_timeout', 5.0)
         self.declare_parameter('jpeg_quality', 70)

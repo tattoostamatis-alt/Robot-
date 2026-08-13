@@ -177,7 +177,7 @@ def _setup(context, *args, **kwargs):
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
-            'anchor_frame', default_value='map',
+            'anchor_frame', default_value='odom',
             description="Which frame RTAB-Map treats as its odometry source. "
                         "'map' (default) anchors the 3D map to the existing 2D "
                         "map so they share coordinates; 'odom' is the smooth "

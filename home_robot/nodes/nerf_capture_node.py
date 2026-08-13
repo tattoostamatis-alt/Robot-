@@ -25,6 +25,7 @@ import json
 import math
 import os
 import threading
+import time
 
 import cv2
 import numpy as np
@@ -71,6 +72,7 @@ class NerfCaptureNode(Node):
         self._active = False
         self._frames = []          # accumulated transforms.json entries
         self._last_pose = None     # (t, R) of the last kept frame
+        self._last_xy = None       # (x, y) of the last kept frame, for the live map
         self._K = None
         self._info = None
 
@@ -88,10 +90,32 @@ class NerfCaptureNode(Node):
         self.get_logger().info(f'NeRF capture ready → {self.out_dir}')
 
     # ── control ──────────────────────────────────────────────────────────
+    def _archive_existing(self):
+        """Move a previously-saved capture out of the way before starting a new
+        one. Without this, the new session's image indices restart at 00000 and
+        collide with the old files, and _write_transforms() overwrites the old
+        transforms.json with the new (shorter) frame list — silently discarding
+        the poses for every old photo the new session doesn't reach again.
+
+        This is exactly what happened on 2026-08-04: an 11s accidental restart
+        after a full 599-frame salon capture wiped that capture's pose data,
+        leaving 599 orphaned .jpg files with no transforms.json entry.
+        """
+        marker = os.path.join(self.out_dir, 'transforms.json')
+        if not os.path.exists(marker):
+            return
+        backup = f'{self.out_dir}.bak-{time.strftime("%Y%m%d_%H%M%S")}'
+        try:
+            os.rename(self.out_dir, backup)
+            self.get_logger().info(f'archived previous capture → {backup}')
+        except OSError as e:
+            self.get_logger().error(f'could not archive previous capture: {e}')
+
     def _cb_capture(self, msg: Bool):
         with self._lock:
             if msg.data and not self._active:
-                self._frames, self._last_pose = [], None
+                self._archive_existing()
+                self._frames, self._last_pose, self._last_xy = [], None, None
                 os.makedirs(os.path.join(self.out_dir, 'images'), exist_ok=True)
                 self._active = True
                 self.get_logger().info('capture STARTED')
@@ -157,6 +181,7 @@ class NerfCaptureNode(Node):
                 'transform_matrix': c2w.tolist(),
             })
             self._last_pose = (t, R)
+            self._last_xy = (float(t[0]), float(t[1]))
             if len(self._frames) >= self.max_frames:
                 self._active = False
                 self._write_transforms()
@@ -195,6 +220,7 @@ class NerfCaptureNode(Node):
                 'frames': len(self._frames),
                 'max_frames': self.max_frames,
                 'dir': self.out_dir,
+                'last_xy': list(self._last_xy) if self._last_xy else None,
             })))
 
 

@@ -6,10 +6,18 @@
 #   map_session.sh new    [extra launch args...]
 #   map_session.sh save   <name>
 #
-# ‼️ `switch` and `new` TEAR THE WHOLE STACK DOWN and bring it back up — the map
-# is baked into map_server at launch and there is no runtime way to swap it. The
-# dashboard therefore asks for confirmation before calling either, and the
-# browser reconnects on its own once the new dashboard is listening (~90 s).
+# `switch` and `new` hot-swap via switch_map_mode.sh — only the
+# localization/SLAM nodes (map_server, amcl, slam_toolbox, pose_saver,
+# global_localizer, room_markers, the AprilTag relocalizer) are killed and
+# replaced; voice, camera, arm, dashboard, VNC and Foxglove stay up the whole
+# time, so the browser never disconnects. Before 2026-08-10 both did
+# `robot stop` + a full relaunch (~90s, dashboard/voice dropped and
+# reconnected on their own) — see project_robot_new_map_half_stack memory for
+# why that existed in the first place and project_robot_map_hotswap for why it
+# no longer needs to be that heavy. `[extra launch args...]` (use_perception,
+# llm_backend) is accepted here for backward compatibility but ignored: those
+# nodes are no longer touched by a hot swap, so there is nothing left to carry
+# forward.
 #
 # ‼️ This script MUST live under robot_ws/src, not the install tree: `robot stop`
 # enumerates victims by matching `/opt/ros/jazzy` or `robot_ws/install` in the
@@ -22,7 +30,7 @@ set -o pipefail
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MAPS="$SRC_DIR/maps"
-ROBOT="$HOME/bin/robot"
+SWITCH_MODE_SH="$SRC_DIR/scripts/switch_map_mode.sh"
 LOG=/tmp/map_session.log
 
 log() { echo "[$(date +%H:%M:%S)] $*" >> "$LOG"; }
@@ -37,33 +45,14 @@ case "${1:-}" in
     NAME="${2:-}"
     [ -z "$NAME" ] && { echo "usage: map_session.sh switch <name>"; exit 2; }
     [ -f "$MAPS/$NAME.yaml" ] || { echo "no such map: $NAME"; exit 2; }
-    shift 2
-    log "switching to $NAME ($*)"
-    "$ROBOT" stop >> "$LOG" 2>&1
-    # setsid: this script is about to be replaced by the launch, and the launch
-    # must not die with the HTTP request that started it.
-    setsid nohup "$ROBOT" max "map:=$NAME" "$@" >> "$LOG" 2>&1 < /dev/null &
+    log "switching to $NAME (hot swap)"
+    bash "$SWITCH_MODE_SH" localize "$NAME" >> "$LOG" 2>&1
     echo "switching to $NAME"
     ;;
 
   new)
-    shift
-    log "starting a new mapping run ($*)"
-    "$ROBOT" stop >> "$LOG" 2>&1
-    # ‼️ `robot map`, NOT a bare `ros2 launch bringup.launch.py use_slam:=true`.
-    # That is what this branch used to do, and it is why pressing «Νέος χάρτης»
-    # looked like the whole stack terminating: `robot stop` above tears down
-    # EVERYTHING, and a bare bringup brings back only part of it. bringup
-    # defaults use_wake_word/use_stt/use_tts/use_llm to false, so the robot came
-    # back deaf and mute; use_doa was never passed either. The LiDAR service,
-    # Foxglove, VNC :2 (the phone's RViz, and what the dashboard's RViz tab
-    # streams) and the FastFlowLM decision are all `robot`'s job, not a launch
-    # file's, so none of them returned. Measured live 2026-08-06: 42 processes
-    # came back, zero of them voice, VNC :2 gone, foxglove inactive.
-    # `robot map` runs the identical preamble to `robot max` and only swaps
-    # AMCL for slam_toolbox. Nothing here needs spelling out any more — the
-    # dashboard, the arm and the by-name PS5 pad all come with it.
-    setsid nohup "$ROBOT" map "$@" >> "$LOG" 2>&1 < /dev/null &
+    log "starting a new mapping run (hot swap)"
+    bash "$SWITCH_MODE_SH" slam >> "$LOG" 2>&1
     echo "mapping started"
     ;;
 

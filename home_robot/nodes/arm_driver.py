@@ -95,7 +95,12 @@ class ArmDriver(Node):
         baud = self.get_parameter('baud').value
         self.joint_names = list(self.get_parameter('joint_names').value)
         self.speed = self.get_parameter('speed').value
-        self.accel = self.get_parameter('accel').value
+        # NOT cached like speed above: the dashboard's arm speed slider
+        # retunes this live (`ros2 param set /arm_driver accel N`) the same
+        # way limits() re-reads limit_* on every command, and a value cached
+        # once at startup would silently ignore that until a restart.
+
+        self.declare_parameter('feedback_timeout', 3.0)
 
         self._port, self._baud = port, baud
         self.ser = serial.Serial(port, baud, timeout=0.1)
@@ -103,6 +108,14 @@ class ArmDriver(Node):
         # Backoff for _reopen(); see _read_serial for why this exists at all.
         self._reopen_at = 0.0
         self._reopen_delay = 1.0
+        # Watchdog for a firmware-side hang: 2026-08-10 found the ESP32 can
+        # stop answering T:105 after a burst of commands while the USB link
+        # stays electrically alive (no OSError/SerialException ever fires —
+        # ser.in_waiting just reads 0 forever). Only a physical power-cycle
+        # of the arm board recovered it, confirmed via a real USB
+        # disconnect/reconnect in `journalctl -k`. Track last-good feedback
+        # so we can force the same reopen path in software instead.
+        self._last_feedback_at = time.monotonic()
         self.get_logger().info(f'Arm connected on {port} @ {baud}')
 
         # Last known joint positions (radians), populated from T:105
@@ -129,6 +142,7 @@ class ArmDriver(Node):
 
         self.create_timer(0.1, self._request_feedback)  # T:105, 10 Hz
         self.create_timer(0.05, self._read_serial)      # drain replies, 20 Hz
+        self.create_timer(1.0, self._check_feedback_watchdog)
 
     # ------------------------------------------------------------------
     # Commands → arm
@@ -156,7 +170,7 @@ class ArmDriver(Node):
             target[name] = self._clamp(name, pos)
 
         cmd = {'T': 102, **{name: target[name] for name in self.joint_names},
-               'spd': self.speed, 'acc': self.accel}
+               'spd': self.speed, 'acc': self.get_parameter('accel').value}
         self._send_json(cmd)
 
     def limits(self, name):
@@ -188,7 +202,8 @@ class ArmDriver(Node):
 
     def _gripper_cb(self, msg: Float32):
         pos = self._clamp('hand', msg.data)
-        self._send_json({'T': 106, 'cmd': pos, 'spd': self.speed, 'acc': self.accel})
+        self._send_json({'T': 106, 'cmd': pos, 'spd': self.speed,
+                         'acc': self.get_parameter('accel').value})
         if self._current_joints is not None:
             self._current_joints['hand'] = pos
 
@@ -223,6 +238,7 @@ class ArmDriver(Node):
             self.ser = serial.Serial(self._port, self._baud, timeout=0.1)
             self._reopen_delay = 1.0
             self._current_joints = None      # pose is unknown again after a drop
+            self._last_feedback_at = time.monotonic()  # grace period for the watchdog
             self.get_logger().info(f'Arm reconnected on {self._port}')
         except (OSError, serial.SerialException) as e:
             self._reopen_at = time.monotonic() + self._reopen_delay
@@ -267,6 +283,26 @@ class ArmDriver(Node):
 
             self._parse_feedback(data)
 
+    def _check_feedback_watchdog(self):
+        """Force a reopen if the port is open but the ESP32 has gone quiet.
+
+        This is the software equivalent of the physical board reset: a real
+        USB power-cycle (confirmed 2026-08-10 via journalctl) is what
+        actually recovered the arm, because it forced a fresh
+        serial.Serial() open. Reopening the port here doesn't power-cycle
+        the ESP32 itself, but it re-syncs the driver's read/write state and
+        has been enough in similar imu_node hangs — worth trying before
+        asking for a physical reset.
+        """
+        if self.ser is None:
+            return
+        timeout = self.get_parameter('feedback_timeout').value
+        if time.monotonic() - self._last_feedback_at > timeout:
+            self.get_logger().warn(
+                f'Arm: no feedback for >{timeout:.0f}s, port open but ESP32 silent — '
+                f'forcing reopen', throttle_duration_sec=timeout)
+            self._mark_disconnected()
+
     def _parse_feedback(self, data: dict):
         # Feedback keys are abbreviated (see FEEDBACK_JOINT_KEYS); fall back to
         # the full name so a custom joint_names param still works.
@@ -283,6 +319,7 @@ class ArmDriver(Node):
             return
 
         self._current_joints = {name: float(data[fb_key(name)]) for name in self.joint_names}
+        self._last_feedback_at = time.monotonic()
 
         msg = JointState()
         msg.header.stamp = self.get_clock().now().to_msg()

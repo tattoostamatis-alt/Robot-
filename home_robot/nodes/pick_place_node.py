@@ -44,6 +44,23 @@ systematic base_link->arm_base calibration bias (the camera can't see the
 gripper) — calibrate tf_base_arm for that. If detections stop mid-servo the
 loop keeps the last good estimate and proceeds (graceful open-loop fallback).
 
+Hand-eye correction (param `gripper_tag_enabled`):
+The visual servoing above refines out per-frame detection jitter, but cannot
+see (and so cannot correct) a systematic base_link->arm_base calibration
+bias, because the body-mounted D435 never has the gripper in frame — see
+module docstring above. A wrist-mounted AprilTag (id 1, frame `gripper_tag`,
+config/apriltag.yaml) fixes that blind spot: once the arm reaches its hover
+point, we look up where the tag says the gripper *actually* is (transformed
+into arm_base the same tf2 way as any other target) and compare it against
+where it was commanded to be. Any gap is exactly the calibration bias the
+servoing loop can't touch, and gets cancelled with a few proportional
+corrections (home_robot/servo_filter.py's hand_eye_correction) before the
+object-detection servo runs. `gripper_tag_offset_xyz` is the tag's own
+local-frame lever arm to the fingertip centre — measured 2026-08-10 as
+150 mm along the tag's +Z (out of the printed face, which faces the same way
+the gripper reaches). Off by default: NOT yet HW-verified, enable only after
+checking it drives toward the target and not away from it.
+
 Grasp orientation (param `grasp_orient_enabled`):
 When object_detector.py runs the -seg model it attaches a grasp axis to each
 clutter detection as two 3D fingertip contacts (grasp_contact_a/b, in the
@@ -73,12 +90,15 @@ from rclpy.node import Node
 from std_msgs.msg import Float32, String
 from tf2_geometry_msgs import do_transform_point
 
-from home_robot.servo_filter import median_point, spread, converged
+from home_robot.servo_filter import median_point, spread, converged, hand_eye_correction
 from home_robot.stop_command import is_stop_command
 
 
 CAMERA_FRAME = 'camera_color_optical_frame'
 ARM_FRAME = 'arm_base'
+# Wrist-mounted AprilTag (id 1, config/apriltag.yaml) — see module docstring,
+# "Hand-eye correction".
+GRIPPER_TAG_FRAME = 'gripper_tag'
 # Where sightings are pinned. `odom` and not `map`: it is continuous and always
 # available, and a grasp only cares about the last few metres of driving, which
 # is exactly the span odom is trusted over.
@@ -118,6 +138,20 @@ class PickPlaceNode(Node):
         self.declare_parameter('grasp_orient_enabled', False)
         self.declare_parameter('grasp_roll_sign', 1.0)     # flip if roll turns the wrong way
         self.declare_parameter('grasp_roll_offset', 0.0)   # rad — gripper zero-roll correction
+        # Hand-eye correction against the wrist AprilTag (see module docstring).
+        # Off by default: NOT yet HW-verified.
+        self.declare_parameter('gripper_tag_enabled', False)
+        self.declare_parameter('gripper_tag_tolerance', 0.01)   # m — good enough, stop correcting
+        self.declare_parameter('gripper_tag_max_iters', 3)      # correction moves before giving up
+        self.declare_parameter('gripper_tag_settle_time', 0.8)  # s — a nudge, not a full move
+        # Tag-local-frame lever arm to the fingertip centre — the tag sits at
+        # the wrist, not at the grasp point. Measured 2026-08-10: 150 mm along
+        # the tag's own +Z (out of the printed face), which faces the same way
+        # the gripper reaches — x/y stay 0 (tag centred on the wrist, no
+        # measured side-to-side or up/down offset).
+        self.declare_parameter('gripper_tag_offset_x', 0.0)
+        self.declare_parameter('gripper_tag_offset_y', 0.0)
+        self.declare_parameter('gripper_tag_offset_z', 0.15)
 
         self.approach_height = self.get_parameter('approach_height').value
         self.grasp_z_offset = self.get_parameter('grasp_z_offset').value
@@ -142,6 +176,13 @@ class PickPlaceNode(Node):
         self.grasp_orient_enabled = self.get_parameter('grasp_orient_enabled').value
         self.grasp_roll_sign = self.get_parameter('grasp_roll_sign').value
         self.grasp_roll_offset = self.get_parameter('grasp_roll_offset').value
+        self.gripper_tag_enabled = self.get_parameter('gripper_tag_enabled').value
+        self.gripper_tag_tolerance = self.get_parameter('gripper_tag_tolerance').value
+        self.gripper_tag_max_iters = self.get_parameter('gripper_tag_max_iters').value
+        self.gripper_tag_settle_time = self.get_parameter('gripper_tag_settle_time').value
+        self.gripper_tag_offset = (self.get_parameter('gripper_tag_offset_x').value,
+                                   self.get_parameter('gripper_tag_offset_y').value,
+                                   self.get_parameter('gripper_tag_offset_z').value)
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -373,12 +414,25 @@ class PickPlaceNode(Node):
         self._abort_point()
         self._gripper(self.gripper_open)
         self._abort_point()
-        self._cartesian(ax, ay, hover_z)
+
+        # Hand-eye correction against the wrist tag runs FIRST: it targets a
+        # systematic bias (see module docstring), and the object-detection
+        # servo below should refine around the corrected point, not the
+        # raw open-loop one.
+        if self.gripper_tag_enabled:
+            self._abort_point()
+            ax, ay = self._hand_eye_correct(ax, ay, hover_z)
+        else:
+            self._cartesian(ax, ay, hover_z)
 
         # Closed-loop XY refinement while hovering (see module docstring).
+        # servo_confident stays None (never downgrade the report) when servo
+        # is disabled outright — only a run that actually lost the target or
+        # never converged should make the final report less than "ok".
+        servo_confident = None
         if self.servo_enabled:
             self._abort_point()
-            ax, ay, az = self._servo(target['label'], ax, ay, az, hover_z)
+            ax, ay, az, servo_confident = self._servo(target['label'], ax, ay, az, hover_z)
 
         # Align the wrist to the object's short axis (grasp geometry from -seg).
         roll = self._grasp_roll(target)
@@ -395,17 +449,34 @@ class PickPlaceNode(Node):
         self._gripper(self.gripper_closed)
         self._cartesian(ax, ay, hover_z, roll=r)   # lift, object grasped
 
+        # servo_confident is False when the loop lost sight of the target or
+        # never converged — the grasp point was a stale open-loop estimate,
+        # so the gripper may well have closed on nothing. Say so instead of
+        # claiming success we never actually saw (2026-08-11 slipper: reported
+        # «Τακτοποίησα» after "lost sight of target, using best estimate").
+        uncertain = servo_confident is False
+
         if hold:
             # Keep it in the gripper for transport (fetch). A later place_command
             # releases it. Stay at hover so nothing drags on the way up.
-            self._say(f'Το κρατάω: {target["label"]}.')
-            self._publish_result('ok', target['label'])
+            if uncertain:
+                self._say(f'Ίσως δεν κράτησα σωστά το {target["label"]} — '
+                          f'το έχασα από τα μάτια μου καθώς πλησίαζα.')
+                self._publish_result('uncertain', target['label'])
+            else:
+                self._say(f'Το κρατάω: {target["label"]}.')
+                self._publish_result('ok', target['label'])
             return
 
         # Legacy pick-and-drop: deposit at the drop pose and return to init.
         self._release_sequence(self.drop_pose)
-        self._say(f'Τακτοποίησα: {target["label"]}.')
-        self._publish_result('ok', target['label'])
+        if uncertain:
+            self._say(f'Ίσως δεν έπιασα σωστά το {target["label"]} — '
+                      f'το έχασα από τα μάτια μου καθώς πλησίαζα.')
+            self._publish_result('uncertain', target['label'])
+        else:
+            self._say(f'Τακτοποίησα: {target["label"]}.')
+            self._publish_result('ok', target['label'])
 
     def _release_sequence(self, pose):
         """Move to `pose`, open the gripper to release, return to the init pose."""
@@ -423,9 +494,17 @@ class PickPlaceNode(Node):
         especially a bad RealSense depth — can't decide the grasp point. The
         hover XY tracks the running median between reads; the loop stops once the
         recent frames agree to within servo_tolerance. Keeps the best estimate so
-        far if detections or TF drop out mid-loop (graceful open-loop fallback)."""
+        far if detections or TF drop out mid-loop (graceful open-loop fallback).
+
+        Returns (x, y, z, confident). `confident` is only True when the loop
+        actually converged on live detections — a lost-sight or exhausted-iters
+        fallback still returns a usable point (the caller still tries the grasp)
+        but the caller must not report success as confidently as a real lock,
+        since the point can be a stale, systematically offset estimate (see
+        module docstring)."""
         samples: list[tuple] = []          # raw arm-frame relock points (no z offset)
         ref_x, ref_y = ax, ay
+        confident = False
         for i in range(self.servo_max_iters):
             locked = self._relock(label, ref_x, ref_y)
             if locked is None:
@@ -436,6 +515,7 @@ class PickPlaceNode(Node):
             if converged(samples, self.servo_tolerance):
                 self.get_logger().info(
                     f'Servo converged (spread={spread(samples)*1000:.0f}mm) after {i+1} frames')
+                confident = True
                 break
             self.get_logger().info(
                 f'Servo frame {i+1}: est=({ref_x:.3f}, {ref_y:.3f}) '
@@ -443,8 +523,43 @@ class PickPlaceNode(Node):
             self._cartesian(ref_x, ref_y, hover_z, settle=self.servo_settle_time)
         est = median_point(samples)
         if est is None:
-            return ax, ay, az              # never got a lock — keep the original
-        return est[0], est[1], est[2] + self.grasp_z_offset
+            return ax, ay, az, False       # never got a lock — keep the original
+        return est[0], est[1], est[2] + self.grasp_z_offset, confident
+
+    def _gripper_actual_point(self):
+        """Arm-frame position of the true grasp point, from the wrist
+        AprilTag — None if it isn't visible right now (out of the camera's
+        frame, motion blur, occluded by the object being approached).
+        `gripper_tag_offset` is applied in the TAG's own frame, so it rotates
+        with the wrist the same way the tag's translation does."""
+        ox, oy, oz = self.gripper_tag_offset
+        return self._transform(ox, oy, oz, GRIPPER_TAG_FRAME, ARM_FRAME)
+
+    def _hand_eye_correct(self, target_x, target_y, hover_z):
+        """Drive the wrist tag's OBSERVED position onto (target_x, target_y),
+        instead of trusting that commanding the arm there puts it there (see
+        module docstring, "Hand-eye correction"). Falls back to the open-loop
+        command untouched if the tag never comes into view — the same
+        graceful degradation as _servo."""
+        cmd_x, cmd_y = target_x, target_y
+        for i in range(self.gripper_tag_max_iters):
+            self._abort_point()
+            self._cartesian(cmd_x, cmd_y, hover_z, settle=self.gripper_tag_settle_time)
+            actual = self._gripper_actual_point()
+            if actual is None:
+                self.get_logger().info(
+                    'Hand-eye: wrist tag not visible, keeping the open-loop estimate')
+                return cmd_x, cmd_y
+            (cmd_x, cmd_y), done = hand_eye_correction(
+                (cmd_x, cmd_y), (target_x, target_y), (actual[0], actual[1]),
+                self.gripper_tag_tolerance)
+            if done:
+                self.get_logger().info(f'Hand-eye converged after {i + 1} move(s)')
+                return cmd_x, cmd_y
+            self.get_logger().info(
+                f'Hand-eye frame {i + 1}: tag at ({actual[0]:.3f}, {actual[1]:.3f}), '
+                f'next command ({cmd_x:.3f}, {cmd_y:.3f})')
+        return cmd_x, cmd_y
 
     def _grasp_roll(self, target):
         """Wrist-roll angle (rad) that aligns the gripper opening across the

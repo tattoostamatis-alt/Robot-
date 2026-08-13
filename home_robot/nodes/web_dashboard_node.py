@@ -30,10 +30,13 @@ import math
 import os
 import secrets
 import socket
+import sqlite3
 import struct
 import subprocess
+import sys
 import threading
 import time
+from datetime import datetime
 from typing import Optional, Set
 from urllib.parse import quote
 
@@ -63,9 +66,9 @@ from action_msgs.srv import CancelGoal
 from std_srvs.srv import Empty
 
 from home_robot.compass import offset_from_known_bearing
-from home_robot import (collision_skirt, keepout_files, keepout_toggle,
-                        map_straighten, map_walls3d, room_files,
-                        room_segment, safety_settings)
+from home_robot import (arm_settings, collision_skirt, keepout_files,
+                        keepout_toggle, map_straighten, map_walls3d,
+                        mic_settings, room_files, room_segment, safety_settings)
 from home_robot.system_settings import (
     bt_args, parse_bt_devices, parse_devices, parse_volume, parse_wifi_list,
     volume_args, wifi_connect_args)
@@ -103,6 +106,14 @@ SRC_MAPS_DIR = (os.path.join(SRC_HOME, 'maps')
                 else os.path.join(SHARE, 'maps'))
 NOVNC_DIR = '/usr/share/novnc'
 
+# RTAB-Map keeps ONE live database (house.db) that grows for as long as the
+# 3D map session runs — there is no per-map "save" the way the 2D map/AMCL
+# side has (malou2.yaml, malou3.yaml, ...). save_snapshot below is what gives
+# it an equivalent: a point-in-time copy under RTAB_SAVED_DIR, named by
+# timestamp, that mapping can keep growing past without touching.
+RTAB_HOUSE_DB  = os.path.expanduser('~/.home_robot/rtabmap/house.db')
+RTAB_SAVED_DIR = os.path.expanduser('~/.home_robot/rtabmap/saved')
+
 # Sensors whose USB port can be power-cycled from the System tab, and the label
 # each one gets. The list is fixed HERE, on the server: the browser sends a
 # name, and a name that is not in this dict never reaches a command line that
@@ -121,7 +132,8 @@ USB_DEVICES = {
 USB_HELPER = '/usr/local/sbin/robot-usb-power'
 
 # Must match the display map in scripts/gui_session.sh.
-VNC_PORTS = {'rviz': 5902, 'gazebo': 5903, 'moveit': 5904, 'rtabmap': 5905}
+VNC_PORTS = {'rviz': 5902, 'gazebo': 5903, 'moveit': 5904, 'rtabmap': 5905,
+             'rtabview': 5907}
 # TigerVNC sessions authenticate from ~/.vnc/passwd, which we cannot read back
 # (it is DES-obfuscated).  The browser side needs the cleartext to answer the
 # RFB challenge, so it is configured here rather than typed into every tab.
@@ -624,6 +636,7 @@ class DashboardNode(Node):
         self._rtab_seen  = 0.0    # monotonic stamp of the last /rtabmap/info
         self._rtab_nodes = 0      # keyframes in the graph
         self._rtab_loops = 0      # loop closures accepted so far
+        self._rtab_save_state = 'idle'   # idle|saving|done|error, see _rtab_save_snapshot
         try:
             from rtabmap_msgs.msg import Info as RtabInfo, MapGraph as RtabGraph
             self.create_subscription(RtabInfo, '/rtabmap/info', self._cb_rtab_info, 5)
@@ -699,6 +712,9 @@ class DashboardNode(Node):
         self._dock_pub = self.create_publisher(Bool, '/dock', 10)
         self._follow_pub = self.create_publisher(Bool, '/follow_command', 10)
         self._nerf_pub = self.create_publisher(Bool, '/nerf/capture', 10)
+        self._nerf_train_proc: Optional[subprocess.Popen] = None
+        self._nerf_train_lock = threading.Lock()
+        self._nerf_train_stop_requested = False
         # ── "✕ Ακύρωση στόχου" ────────────────────────────────────────────────
         # ‼️ This button used to publish ONE empty Twist and nothing else, so it
         # never cancelled anything: bt_navigator still owned the goal and put a
@@ -771,6 +787,13 @@ class DashboardNode(Node):
             Bool, '/doa/rotate_enable', _doa_qos)
         self.create_subscription(
             Bool, '/doa/rotate_state', self._cb_doa_rotate, _doa_qos)
+        # Hardware VAD, straight off the XVF3800 — see doa_node's own comment on
+        # its voice_activity publisher for why this is latched rather than
+        # plain volatile QoS (a subscription with the wrong durability just
+        # never matches DDS's incompatible-QoS check, and looks identically
+        # dead to "nobody is publishing").
+        self.create_subscription(
+            Bool, '/voice_activity', self._cb_vad, _doa_qos)
 
         self._loc_client = self.create_client(Empty, '/localize_globally')
         # Created on first use: the services only exist while a mapping session
@@ -794,6 +817,29 @@ class DashboardNode(Node):
         self._skirt_margin_mm = collision_skirt.MARGIN_DEFAULT_MM
         self._skirt_margin_at = None
         self.create_timer(3.0, self._safety_tick)
+
+        # ── arm envelope + speed ──────────────────────────────────────────────
+        # Same reasoning as the safety timer above: arm_driver/arm_joy can come
+        # up after the dashboard, or restart on their own (USB glitch), and
+        # each time they do they boot with only bringup.launch.py's/
+        # arm_joy_ps5.yaml's baked-in values until this pushes what the user
+        # actually asked for.
+        self._arm_settings = arm_settings.load()
+        self._arm_set: dict = {}
+        self._arm_get: dict = {}
+        self._arm_applied: set = set()
+        self._arm_live: dict = {}        # (node, param) -> value, as reported
+        self.create_timer(3.0, self._arm_tick)
+
+        # ── microphone settings ────────────────────────────────────────────────
+        # Same tick/apply/payload shape as safety_settings above — one Spec
+        # table, values scalar, one or two ROS nodes per knob.
+        self._mic = mic_settings.load()
+        self._mic_set: dict = {}
+        self._mic_get: dict = {}
+        self._mic_applied: set = set()
+        self._mic_live: dict = {}
+        self.create_timer(3.0, self._mic_tick)
 
         self.create_timer(2.0, self._publish_system)
 
@@ -922,6 +968,125 @@ class DashboardNode(Node):
         for key, value in safety_settings.defaults().items():
             self._safety_apply(key, value)
 
+    # ── microphone settings ──────────────────────────────────────────────────
+    # Identical shape to the safety block above (one Spec table, scalar
+    # values, live SetParameters) — see mic_settings.py for why THAT module's
+    # clamp()/targets() aren't reused directly even though the pattern is.
+
+    def _mic_tick(self):
+        for node, params in mic_settings.targets(self._mic).items():
+            cli = self._safety_client(self._mic_set, SetParameters,
+                                      node, 'set_parameters')
+            if not cli.service_is_ready():
+                self._mic_applied.discard(node)
+                continue
+            if node not in self._mic_applied:
+                self._mic_applied.add(node)
+                cli.call_async(self._mic_request(params))
+        self._mic_read()
+        self._state.broadcast({'type': 'mic', 'v': self._mic_payload()})
+
+    @staticmethod
+    def _mic_request(params: dict) -> SetParameters.Request:
+        """Unlike _safety_request: also carries integer and string values —
+        doa_node declares led_brightness and every led_color_* as plain
+        Python ints, and wake_word_node's model_name is a str, so those have
+        to go over the wire as PARAMETER_INTEGER/PARAMETER_STRING, not
+        PARAMETER_DOUBLE, or the SetParameters call fails on a type mismatch."""
+        req = SetParameters.Request()
+        for name, value in params.items():
+            if isinstance(value, bool):
+                pv = ParameterValue(type=ParameterType.PARAMETER_BOOL,
+                                    bool_value=value)
+            elif isinstance(value, str):
+                pv = ParameterValue(type=ParameterType.PARAMETER_STRING,
+                                    string_value=value)
+            elif isinstance(value, int):
+                pv = ParameterValue(type=ParameterType.PARAMETER_INTEGER,
+                                    integer_value=value)
+            else:
+                pv = ParameterValue(type=ParameterType.PARAMETER_DOUBLE,
+                                    double_value=float(value))
+            req.parameters.append(Parameter(name=name, value=pv))
+        return req
+
+    def _mic_read(self):
+        by_node: dict = {}
+        for spec in mic_settings.SPECS:
+            for node, param in spec.targets:
+                by_node.setdefault(node, []).append(param)
+        wm_node, wm_param = mic_settings.WAKE_MODEL_TARGET
+        by_node.setdefault(wm_node, []).append(wm_param)
+        for node, names in by_node.items():
+            cli = self._safety_client(self._mic_get, GetParameters,
+                                      node, 'get_parameters')
+            if not cli.service_is_ready():
+                for name in names:
+                    self._mic_live.pop((node, name), None)
+                continue
+            req = GetParameters.Request()
+            req.names = names
+            fut = cli.call_async(req)
+            fut.add_done_callback(
+                lambda f, n=node, ns=list(names): self._mic_got(n, ns, f))
+
+    def _mic_got(self, node, names, fut):
+        try:
+            values = fut.result().values
+        except Exception:                                     # noqa: BLE001
+            return
+        for name, val in zip(names, values):
+            if val.type == ParameterType.PARAMETER_DOUBLE:
+                self._mic_live[(node, name)] = val.double_value
+            elif val.type == ParameterType.PARAMETER_BOOL:
+                self._mic_live[(node, name)] = val.bool_value
+            elif val.type == ParameterType.PARAMETER_INTEGER:
+                self._mic_live[(node, name)] = val.integer_value
+            elif val.type == ParameterType.PARAMETER_STRING:
+                self._mic_live[(node, name)] = val.string_value
+
+    def _mic_payload(self) -> dict:
+        out = {}
+        for spec in mic_settings.SPECS:
+            live = [self._mic_live.get(t) for t in spec.targets]
+            answered = [v for v in live if v is not None]
+            out[spec.key] = {
+                'set': self._mic.get(spec.key, spec.default),
+                'live': (min(answered) if len(answered) == len(live) else None),
+                'nodes': len(answered),
+                'total': len(spec.targets),
+            }
+        wm_target = mic_settings.WAKE_MODEL_TARGET
+        wm_live = self._mic_live.get(wm_target)
+        out['wake_model'] = {
+            'set': self._mic.get('wake_model', mic_settings.WAKE_MODEL_DEFAULT),
+            'live': wm_live,
+            'nodes': 1 if wm_live is not None else 0,
+            'total': 1,
+        }
+        return out
+
+    def _mic_apply(self, key, value):
+        clamped = mic_settings.clamp(key, value)
+        if clamped is None:
+            return
+        self._mic[key] = clamped
+        try:
+            mic_settings.save(self._mic)
+        except OSError as exc:
+            self.get_logger().warn(f'could not save mic settings: {exc}')
+        for node, params in mic_settings.key_targets(key, clamped).items():
+            cli = self._safety_client(self._mic_set, SetParameters,
+                                      node, 'set_parameters')
+            if cli.service_is_ready():
+                cli.call_async(self._mic_request(params))
+        self.get_logger().info(f'mic: {key} = {clamped}')
+        self._state.broadcast({'type': 'mic', 'v': self._mic_payload()})
+
+    def _mic_reset(self):
+        for key, value in mic_settings.defaults().items():
+            self._mic_apply(key, value)
+
     def _current_skirt_margin_mm(self):
         """collision_monitor's live moving-ring margin, mtime-cached like
         _load_room_mask() — so a restart triggered by /safety/skirt/{mm}
@@ -943,6 +1108,127 @@ class DashboardNode(Node):
             self._skirt_margin_mm = mm
         self._skirt_margin_at = stamp
         return self._skirt_margin_mm
+
+    # ── arm envelope + speed ──────────────────────────────────────────────────
+
+    def _arm_tick(self):
+        for node, params in arm_settings.all_targets(self._arm_settings).items():
+            cli = self._safety_client(self._arm_set, SetParameters,
+                                      node, 'set_parameters')
+            if not cli.service_is_ready():
+                self._arm_applied.discard(node)
+                continue
+            if node not in self._arm_applied:
+                self._arm_applied.add(node)
+                cli.call_async(self._arm_request(params))
+        self._arm_read()
+        self._state.broadcast({'type': 'arm_settings', 'v': self._arm_payload()})
+
+    @staticmethod
+    def _arm_request(params: dict) -> SetParameters.Request:
+        """Unlike _safety_request: also carries integer (accel) and
+        double-array (limit_<joint>, a [lo, hi] pair) parameter types."""
+        req = SetParameters.Request()
+        for name, value in params.items():
+            if isinstance(value, (list, tuple)):
+                pv = ParameterValue(type=ParameterType.PARAMETER_DOUBLE_ARRAY,
+                                    double_array_value=[float(v) for v in value])
+            elif isinstance(value, int) and not isinstance(value, bool):
+                pv = ParameterValue(type=ParameterType.PARAMETER_INTEGER,
+                                    integer_value=value)
+            else:
+                pv = ParameterValue(type=ParameterType.PARAMETER_DOUBLE,
+                                    double_value=float(value))
+            req.parameters.append(Parameter(name=name, value=pv))
+        return req
+
+    def _arm_read(self):
+        """Read back arm_driver's limit_* + accel. arm_driver, not arm_joy, is
+        authoritative for what is actually in force: it is the node that
+        refuses an out-of-range command; arm_joy only stops its own jog
+        integrator winding up to one (see arm_driver.limits()' docstring)."""
+        names = [f'limit_{j}' for j in arm_settings.MECH_LIMITS] + ['accel']
+        cli = self._safety_client(self._arm_get, GetParameters,
+                                  '/arm_driver', 'get_parameters')
+        if not cli.service_is_ready():
+            for name in names:
+                self._arm_live.pop(('/arm_driver', name), None)
+            return
+        req = GetParameters.Request()
+        req.names = names
+        fut = cli.call_async(req)
+        fut.add_done_callback(lambda f, ns=names: self._arm_got(ns, f))
+
+    def _arm_got(self, names, fut):
+        try:
+            values = fut.result().values
+        except Exception:                                     # noqa: BLE001
+            return
+        for name, val in zip(names, values):
+            if val.type == ParameterType.PARAMETER_DOUBLE_ARRAY:
+                self._arm_live[('/arm_driver', name)] = list(val.double_array_value)
+            elif val.type == ParameterType.PARAMETER_INTEGER:
+                self._arm_live[('/arm_driver', name)] = val.integer_value
+            elif val.type == ParameterType.PARAMETER_DOUBLE:
+                self._arm_live[('/arm_driver', name)] = val.double_value
+
+    def _arm_payload(self) -> dict:
+        live_accel = self._arm_live.get(('/arm_driver', 'accel'))
+        limits = {}
+        for j in arm_settings.MECH_LIMITS:
+            key = f'limit_{j}'
+            limits[j] = {
+                'set': self._arm_settings.get(key, list(arm_settings.DEFAULT_LIMITS[j])),
+                'live': self._arm_live.get(('/arm_driver', key)),
+                'mech': list(arm_settings.MECH_LIMITS[j]),
+            }
+        return {
+            'limits': limits,
+            'speed': self._arm_settings.get('speed', arm_settings.SPEED_DEFAULT),
+            'speed_live': arm_settings.speed_from_accel(live_accel),
+            'nodes': 1 if live_accel is not None else 0,
+        }
+
+    def _arm_apply_speed(self, pct):
+        clamped = arm_settings.clamp_speed(pct)
+        if clamped is None:
+            return
+        self._arm_settings['speed'] = clamped
+        try:
+            arm_settings.save(self._arm_settings)
+        except OSError as exc:
+            self.get_logger().warn(f'could not save arm settings: {exc}')
+        for node, params in arm_settings.speed_targets(clamped).items():
+            cli = self._safety_client(self._arm_set, SetParameters,
+                                      node, 'set_parameters')
+            if cli.service_is_ready():
+                cli.call_async(self._arm_request(params))
+        self.get_logger().info(f'arm speed = {clamped}')
+        self._state.broadcast({'type': 'arm_settings', 'v': self._arm_payload()})
+
+    def _arm_apply_limit(self, joint, lo, hi):
+        clamped = arm_settings.clamp_limit(joint, lo, hi)
+        if clamped is None:
+            return
+        self._arm_settings[f'limit_{joint}'] = list(clamped)
+        try:
+            arm_settings.save(self._arm_settings)
+        except OSError as exc:
+            self.get_logger().warn(f'could not save arm settings: {exc}')
+        for node, params in arm_settings.limit_targets(joint, *clamped).items():
+            cli = self._safety_client(self._arm_set, SetParameters,
+                                      node, 'set_parameters')
+            if cli.service_is_ready():
+                cli.call_async(self._arm_request(params))
+        self.get_logger().info(f'arm limit_{joint} = {list(clamped)}')
+        self._state.broadcast({'type': 'arm_settings', 'v': self._arm_payload()})
+
+    def _arm_reset(self):
+        for key, value in arm_settings.defaults().items():
+            if key == 'speed':
+                self._arm_apply_speed(value)
+            else:
+                self._arm_apply_limit(key[len('limit_'):], value[0], value[1])
 
     # ── ROS callbacks ────────────────────────────────────────────────────────
 
@@ -2310,6 +2596,85 @@ class DashboardNode(Node):
         except (ValueError, TypeError):
             pass
 
+    # ── NeRF training, launched from the web tab instead of a terminal ─────
+    def _nerf_stop_perception(self):
+        """Kill just the GPU-holding perception nodes — see NERF_GPU_PROCS.
+        Nothing else in the stack (nav2, drivers, this dashboard) is touched,
+        so the robot keeps driving/e-stopping normally; it just goes blind
+        until the next `robot max`, same trade a live 'robot stop' makes but
+        without losing localisation/dashboard/voice too.
+        """
+        for name in NERF_GPU_PROCS:
+            subprocess.run(['pkill', '-f', name])
+        self._state.broadcast({'type': 'nerf_train', **self._state.latest.get(
+            'nerf_train', {'running': False, 'done': False, 'error': None}),
+            'perception_stopped': True}, remember=False)
+
+    def _nerf_train_start(self):
+        with self._nerf_train_lock:
+            if self._nerf_train_proc is not None and self._nerf_train_proc.poll() is None:
+                return   # already running — the client already has progress via `latest`
+            try:
+                proc = subprocess.Popen(
+                    [sys.executable, '-u', NERF_TRAIN_SCRIPT,
+                     '--data', NERF_DATA_DIR, '--steps', '8000'],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            except OSError as e:
+                self._state.broadcast({'type': 'nerf_train', 'running': False,
+                                       'done': False, 'error': repr(e)})
+                return
+            self._nerf_train_proc = proc
+            self._nerf_train_stop_requested = False
+        self._state.broadcast({'type': 'nerf_train', 'running': True, 'step': 0,
+                               'steps': 8000, 'loss': None, 'psnr': None,
+                               'elapsed_min': None, 'eta_min': None,
+                               'done': False, 'error': None})
+        tail = []
+        for line in proc.stdout:
+            line = line.rstrip('\n')
+            if not line:
+                continue
+            tail.append(line)
+            del tail[:-20]
+            m = NERF_STEP_RE.search(line)
+            if m:
+                self._state.broadcast({
+                    'type': 'nerf_train', 'running': True,
+                    'step': int(m.group(1)), 'steps': int(m.group(2)),
+                    'loss': float(m.group(3)), 'psnr': float(m.group(4)),
+                    'elapsed_min': float(m.group(5)), 'eta_min': int(m.group(6)),
+                    'done': False, 'error': None})
+        proc.wait()
+        with self._nerf_train_lock:
+            self._nerf_train_proc = None
+            stop_requested = self._nerf_train_stop_requested
+        if proc.returncode == 0:
+            self._state.broadcast({'type': 'nerf_train', 'running': False,
+                                   'done': True, 'error': None})
+        elif stop_requested:
+            # SIGTERM makes this a nonzero exit too — without this check a
+            # deliberate "Σταμάτα" click would read as a crash. A checkpoint
+            # was already saved at the last 200-step mark, so nothing is lost.
+            self._state.broadcast({'type': 'nerf_train', 'running': False,
+                                   'done': False, 'error': None})
+        else:
+            # gpu_is_busy's refusal and every other failure land in plain
+            # stdout (stderr is merged in above) — the last few lines are the
+            # whole story: which PIDs are on the GPU, or a stack trace tail.
+            # Exit code 2 is specifically that refusal (see train_nerf.py),
+            # distinct from a real crash — worth its own flag so the client
+            # can offer "stop perception" only when that would actually help.
+            self._state.broadcast({'type': 'nerf_train', 'running': False,
+                                   'done': False, 'gpu_busy': proc.returncode == 2,
+                                   'error': '\n'.join(tail[-6:]) or f'exit {proc.returncode}'})
+
+    def _nerf_train_stop(self):
+        with self._nerf_train_lock:
+            proc = self._nerf_train_proc
+            self._nerf_train_stop_requested = True
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+
     def _cb_speaker(self, msg: String):
         try:
             snap = json.loads(msg.data)
@@ -2332,6 +2697,12 @@ class DashboardNode(Node):
     def _cb_doa_rotate(self, msg: Bool):
         # remembered, so the switch paints correctly on a tab opened later
         self._state.broadcast({'type': 'doa_rotate', 'on': bool(msg.data)})
+
+    def _cb_vad(self, msg: Bool):
+        # remembered too — a tab opened mid-utterance should show "speaking"
+        # immediately, not wait for the NEXT transition (this topic only
+        # publishes on change, see doa_node's own comment on voice_activity).
+        self._state.broadcast({'type': 'vad', 'on': bool(msg.data)})
 
     def _cb_fall_event(self, msg: String):
         try:
@@ -2879,6 +3250,36 @@ class DashboardNode(Node):
         except Exception as e:
             self._backend_msg('err', f'Σφάλμα: {e}')
 
+    def _rtab_save_snapshot(self):
+        """Copy house.db to a timestamped file under RTAB_SAVED_DIR so this
+        point in the map survives whatever mapping does next (including
+        'trigger_new_map', which reuses the same live database). Runs on its
+        own thread (called from dispatch()) — sqlite3's backup() streams
+        page-by-page through SQLite's own Online Backup API, which is safe
+        against the mapper writing to house.db concurrently; a plain file
+        copy is not guaranteed to be.
+        """
+        self._rtab_save_state = 'saving'
+        if not os.path.exists(RTAB_HOUSE_DB):
+            self.get_logger().warn('rtabmap save_snapshot: no house.db yet')
+            self._rtab_save_state = 'error'
+            return
+        os.makedirs(RTAB_SAVED_DIR, exist_ok=True)
+        name = 'house_' + datetime.now().strftime('%Y%m%d_%H%M%S') + '.db'
+        dst = os.path.join(RTAB_SAVED_DIR, name)
+        try:
+            src_conn = sqlite3.connect(f'file:{RTAB_HOUSE_DB}?mode=ro', uri=True)
+            dst_conn = sqlite3.connect(dst)
+            with dst_conn:
+                src_conn.backup(dst_conn)
+            dst_conn.close()
+            src_conn.close()
+            self.get_logger().info(f'rtabmap snapshot saved: {name}')
+            self._rtab_save_state = 'done'
+        except Exception as e:
+            self.get_logger().error(f'rtabmap save_snapshot failed: {e}')
+            self._rtab_save_state = 'error'
+
     def active_map(self):
         if self.is_mapping():
             return None
@@ -3058,6 +3459,12 @@ class DashboardNode(Node):
                              daemon=True).start()
         elif t == 'nerf_capture':
             self._nerf_pub.publish(Bool(data=bool(msg.get('on'))))
+        elif t == 'nerf_train_start':
+            threading.Thread(target=self._nerf_train_start, daemon=True).start()
+        elif t == 'nerf_train_stop':
+            self._nerf_train_stop()
+        elif t == 'nerf_stop_perception':
+            threading.Thread(target=self._nerf_stop_perception, daemon=True).start()
         elif t == 'gesture_go':
             # gesture_node holds the point; it re-checks that one exists, so an
             # eager click before any gesture is a logged warning, not a goal.
@@ -3169,6 +3576,18 @@ class DashboardNode(Node):
             self._safety_apply(str(msg.get('key', '')), msg.get('value'))
         elif t == 'safety_reset':
             self._safety_reset()
+        elif t == 'arm_limit_set':
+            joint = str(msg.get('joint', ''))
+            if joint in arm_settings.MECH_LIMITS:
+                self._arm_apply_limit(joint, msg.get('lo'), msg.get('hi'))
+        elif t == 'arm_speed_set':
+            self._arm_apply_speed(msg.get('value'))
+        elif t == 'arm_reset':
+            self._arm_reset()
+        elif t == 'mic_set':
+            self._mic_apply(str(msg.get('key', '')), msg.get('value'))
+        elif t == 'mic_reset':
+            self._mic_reset()
         elif t == 'doa_rotate':
             # doa_node echoes the new value back on /doa/rotate_state, which is
             # what actually moves the checkbox — so a node that is not running
@@ -3225,6 +3644,9 @@ class DashboardNode(Node):
                     self.get_logger().warn(
                         f'/rtabmap/rtabmap/{cmd} not available — '
                         'is the 3D map session up?')
+            elif cmd == 'save_snapshot' and self._rtab_save_state != 'saving':
+                threading.Thread(target=self._rtab_save_snapshot,
+                                  daemon=True).start()
         elif t == 'dock':
             self._dock_pub.publish(Bool(data=bool(msg.get('on', True))))
         elif t == 'arm_joint':
@@ -3412,14 +3834,16 @@ async def camera(request: Request, t: str = ''):
 
 # ── GUI sessions (RViz / MoveIt / Gazebo) ─────────────────────────────────────
 
-def _gui_session(action: str, app_name: str) -> str:
+def _gui_session(action: str, app_name: str, extra_arg: str = '') -> str:
     if not os.path.exists(GUI_SESSION_SH):
         return f'missing {GUI_SESSION_SH}'
     try:
+        argv = ['bash', GUI_SESSION_SH, action, app_name]
+        if extra_arg:
+            argv.append(extra_arg)
         # Gazebo takes ~75 s to come up on this machine (software rendering),
         # so the timeout is generous; the UI polls status rather than blocking.
-        r = subprocess.run(['bash', GUI_SESSION_SH, action, app_name],
-                           capture_output=True, text=True, timeout=120)
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=120)
         return (r.stdout or r.stderr).strip() or 'ok'
     except subprocess.TimeoutExpired:
         return 'timeout'
@@ -3428,12 +3852,22 @@ def _gui_session(action: str, app_name: str) -> str:
 
 
 @app.get('/gui/{app_name}/{action}')
-async def gui(request: Request, app_name: str, action: str, t: str = ''):
+async def gui(request: Request, app_name: str, action: str, t: str = '',
+              file: str = ''):
     if not _authorised(t, request.cookies):
         return JSONResponse({'error': 'unauthorized'}, status_code=401)
     if app_name not in VNC_PORTS or action not in ('start', 'stop', 'status'):
         return JSONResponse({'error': 'bad request'}, status_code=400)
-    out = await asyncio.to_thread(_gui_session, action, app_name)
+    # rtabview is the one app that takes an argument: which saved snapshot
+    # (see _rtab_save_snapshot) to open. Whitelisted here too, on top of
+    # gui_session.sh's own check, since this string reaches a subprocess argv.
+    extra_arg = ''
+    if app_name == 'rtabview' and action == 'start':
+        if not re.fullmatch(r'[A-Za-z0-9_.-]+\.db', file):
+            return JSONResponse({'error': 'bad snapshot filename'},
+                                 status_code=400)
+        extra_arg = file
+    out = await asyncio.to_thread(_gui_session, action, app_name, extra_arg)
     return {'app': app_name, 'action': action, 'result': out,
             'running': out.startswith('running')}
 
@@ -3669,6 +4103,20 @@ async def vnc_view(request: Request, app_name: str, t: str = ''):
 MAP_SESSION_SH = os.path.normpath(
     os.path.join(SRC_MAPS_DIR, os.pardir, 'scripts', 'map_session.sh'))
 
+NERF_TRAIN_SCRIPT = os.path.normpath(
+    os.path.join(SRC_MAPS_DIR, os.pardir, 'scripts', 'train_nerf.py'))
+NERF_DATA_DIR = os.path.expanduser('~/.home_robot/nerf/house')
+# Matches train_nerf.py's progress line exactly:
+#   step    200/8000  loss 0.01234  psnr 20.1 dB  1.2 min  eta 45 min
+NERF_STEP_RE = re.compile(
+    r'step\s+(\d+)/(\d+)\s+loss\s+([\d.]+)\s+psnr\s+([\d.-]+)\s+dB\s+'
+    r'([\d.]+)\s+min\s+eta\s+(\d+)\s+min')
+# The three Nodes that actually touch the iGPU (see train_nerf.py's
+# gpu_is_busy header) — killing just these frees /dev/kfd for training
+# without tearing down nav2/drivers/this dashboard. None of the three are
+# respawn=True in bringup.launch.py, so this does not cascade.
+NERF_GPU_PROCS = ('object_detector.py', 'pose_node.py', 'open_vocab_detector.py')
+
 
 def _list_maps() -> list:
     """Saved maps, newest first. A map is a .yaml with its .pgm next to it."""
@@ -3822,6 +4270,33 @@ async def maps_walls3d(request: Request, t: str = '', map: str = ''):
     if result is None:
         return JSONResponse({'error': f'could not read {name}.pgm'}, status_code=500)
     return result
+
+
+@app.get('/rtabmap/saved')
+async def rtabmap_saved(request: Request, t: str = ''):
+    """Snapshots taken by the 'save_snapshot' rtabmap_cmd — see
+    _rtab_save_snapshot. Separate from the live house.db that keeps growing.
+    """
+    if not _authorised(t, request.cookies):
+        return JSONResponse({'error': 'unauthorized'}, status_code=401)
+
+    def list_snapshots():
+        if not os.path.isdir(RTAB_SAVED_DIR):
+            return []
+        out = []
+        for fn in os.listdir(RTAB_SAVED_DIR):
+            if not fn.endswith('.db'):
+                continue
+            st = os.stat(os.path.join(RTAB_SAVED_DIR, fn))
+            out.append({'name': fn, 'mb': round(st.st_size / 1e6, 1),
+                        'mtime': st.st_mtime})
+        out.sort(key=lambda m: -m['mtime'])
+        return out
+
+    snaps = await asyncio.to_thread(list_snapshots)
+    state = ros_node._rtab_save_state if ros_node else 'idle'
+    return {'saving': state == 'saving', 'error': state == 'error',
+            'snapshots': snaps}
 
 
 @app.get('/maps/{action}/{name}')
@@ -4063,6 +4538,11 @@ def _make_html(rooms: list, token: str = '') -> str:
             .replace('__TOKEN_QS__', json.dumps(token_qs))
             .replace('__ARM_LIMITS__', json.dumps(ARM_LIMITS))
             .replace('__ARM_JOINTS__', json.dumps(ARM_JOINTS))
+            # The servo's mechanical ceiling, not the tuned envelope above —
+            # the limit sliders must be draggable all the way out to this,
+            # not just back within whatever the envelope already is.
+            .replace('__ARM_MECH_LIMITS__', json.dumps(
+                {j: list(v) for j, v in arm_settings.MECH_LIMITS.items()}))
             .replace('__HAS_NOVNC__', json.dumps(os.path.isdir(NOVNC_DIR)))
             # Sent from the server so the allowed names exist in exactly one
             # place — the browser cannot invent a seventh.
@@ -4074,6 +4554,13 @@ def _make_html(rooms: list, token: str = '') -> str:
                          'warn_above': s.warn_above, 'warn_below': s.warn_below}
                  for s in safety_settings.SPECS}))
             .replace('__SAFETY_INFO__', json.dumps(safety_settings.INFO_ONLY))
+            .replace('__MIC_SPECS__', json.dumps(
+                {s.key: {'kind': s.kind, 'def': s.default, 'lo': s.lo,
+                         'hi': s.hi, 'step': s.step,
+                         'warn_above': s.warn_above, 'warn_below': s.warn_below}
+                 for s in mic_settings.SPECS}))
+            .replace('__MIC_INFO__', json.dumps(mic_settings.INFO_ONLY))
+            .replace('__WAKE_MODEL_CHOICES__', json.dumps(mic_settings.WAKE_MODEL_CHOICES))
             .replace('__SKIRT_MARGINS__', json.dumps(collision_skirt.ALLOWED_MARGINS_MM))
             .replace('__SKIRT_DEFAULT_MM__', json.dumps(collision_skirt.MARGIN_DEFAULT_MM))
             .replace('__I18N__', json.dumps(as_js_table(), ensure_ascii=False))
@@ -4214,6 +4701,8 @@ button{font:inherit;color:inherit}
   cursor:pointer;border:2px solid #18181b}
 .sfrow input[type=range]::-moz-range-thumb{width:20px;height:20px;
   border-radius:50%;background:#3b82f6;cursor:pointer;border:2px solid #18181b}
+.sfrow input[type=color]{width:52px;height:30px;margin:8px 0 0;padding:0;
+  border:1px solid #3f3f46;border-radius:6px;background:none;cursor:pointer}
 .sfhelp{font-size:11.5px;color:#71717a;line-height:1.6;margin-top:6px}
 .sfwarn{font-size:11.5px;color:#fbbf24;line-height:1.6;margin-top:6px;display:none}
 .sfrow.warned .sfwarn{display:block}
@@ -4337,6 +4826,7 @@ button{font:inherit;color:inherit}
 .joint label{font-size:13px;color:#a1a1aa}
 .joint input[type=range]{width:100%;accent-color:#3b82f6}
 .joint .val{font-family:ui-monospace,Menlo,monospace;font-size:12px;text-align:right;color:#d4d4d8}
+.joint.off{opacity:.45}
 /* ── Chat ── */
 #chat{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:8px;min-height:150px}
 .msg{max-width:78%;padding:8px 12px;border-radius:13px;font-size:13.5px;line-height:1.45;
@@ -4434,6 +4924,42 @@ button{font:inherit;color:inherit}
           display:block"></canvas>
         <div style="color:#71717a;font-size:11.5px;margin-top:6px">
           Σύρε για περιστροφή · ροδέλα για ζουμ · από τον καθαρό (τετραγωνισμένο) 2D χάρτη
+        </div>
+      </div>
+      <div class="card grow">
+        <h3>Χάρτες <span class="badge" id="map-active">—</span></h3>
+        <div id="map-list" style="margin:8px 0"></div>
+        <div class="row" style="margin-top:10px">
+          <button class="btn pri" id="b-map-new">🆕 Νέος χάρτης (SLAM)</button>
+          <input id="map-save-name" placeholder="όνομα χάρτη"
+                 style="flex:1;min-width:120px;background:#18181b;border:1px solid #27272a;
+                        color:#e4e4e7;border-radius:8px;padding:8px 10px">
+          <button class="btn" id="b-map-save">💾 Αποθήκευση</button>
+        </div>
+        <div id="map-msg" style="color:#71717a;font-size:11.5px;margin-top:8px"></div>
+        <div id="map-straighten" style="display:none;margin-top:12px;padding-top:12px;
+                                        border-top:1px solid #27272a">
+          <div style="font-size:12.5px;color:#a1a1aa;margin-bottom:8px">
+            🧹 Καθαρή εκδοχή — ισιώνει τα σκαλοπάτια των τοίχων. <b>Μόνο εμφάνιση</b> μέχρι
+            να διαλέξεις: μπορεί να μετατοπίσει τοίχους λίγα εκατοστά ή να αφαιρέσει ένα
+            πραγματικό εμπόδιο που έμοιαζε με θόρυβο σάρωσης — σύγκρινε οπτικά πριν διαλέξεις.
+          </div>
+          <div class="row" style="gap:12px">
+            <div style="flex:1;text-align:center;min-width:0">
+              <div style="font-size:11px;color:#71717a;margin-bottom:4px">Πρωτότυπο</div>
+              <img id="map-straighten-orig" style="max-width:100%;border-radius:6px;
+                                                    border:1px solid #27272a">
+            </div>
+            <div style="flex:1;text-align:center;min-width:0">
+              <div style="font-size:11px;color:#71717a;margin-bottom:4px">Ισιωμένο</div>
+              <img id="map-straighten-clean" style="max-width:100%;border-radius:6px;
+                                                     border:1px solid #27272a">
+            </div>
+          </div>
+          <div class="row" style="margin-top:10px">
+            <button class="btn" id="b-map-straighten-keep">Κράτησε το πρωτότυπο</button>
+            <button class="btn pri" id="b-map-straighten-use">Χρήση ισιωμένης εκδοχής</button>
+          </div>
         </div>
       </div>
       <div class="card">
@@ -4617,6 +5143,24 @@ button{font:inherit;color:inherit}
         <div id="joints"></div>
       </div>
       <div class="card">
+        <h3>Όρια &amp; ταχύτητα <span class="badge" id="armlim-badge">—</span></h3>
+        <div id="armlim"></div>
+        <div class="joint" style="margin-top:6px">
+          <label>ταχύτητα</label>
+          <input type="range" id="armspeed" min="0.5" max="1.5" step="0.05" value="1.0">
+          <span class="val" id="armspeed-v">100%</span>
+        </div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          Η ταχύτητα ρυθμίζει ΚΑΙ το χειριστήριο (jog) ΚΑΙ πόσο απότομα ξεκινούν
+          οι κινήσεις από εδώ — όχι το ανώτατο όριο του σερβοκινητήρα, που δεν
+          έχει μετρηθεί ασφαλές να ανέβει. Τα όρια των αρθρώσεων δεν μπορούν
+          ποτέ να ξεπεράσουν το μηχανικό όριο του σερβοκινητήρα.
+        </p>
+        <div class="row" style="margin-top:10px">
+          <button class="btn warn" id="b-armlim-reset">↺ Επαναφορά προεπιλογών</button>
+        </div>
+      </div>
+      <div class="card">
         <h3>Δαγκάνα</h3>
         <div class="joint">
           <label>άνοιγμα</label>
@@ -4735,13 +5279,29 @@ button{font:inherit;color:inherit}
         </p>
       </div>
       <div class="card">
-        <h3>Εκπαίδευση</h3>
-        <p style="font-size:12px;color:#a1a1aa;line-height:1.7">
-          Η εκπαίδευση τρέχει ΞΕΧΩΡΙΣΤΑ, από τερματικό:<br>
-          <code>scripts/train_nerf.py --data ~/.home_robot/nerf/house --steps 8000</code>
-        </p>
+        <h3>Χάρτης κάλυψης</h3>
+        <canvas id="nf-map" width="280" height="280" style="width:100%;max-width:280px;border-radius:8px;background:#18181b"></canvas>
         <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
-          ‼️ ΔΕΝ μπορεί να μοιραστεί το iGPU με το perception. Με το object_detector και το pose_node ενεργά, η εκπαίδευση ΡΙΧΝΕΙ την ουρά του ROCm (memory aperture violation) — δεν είναι έλλειψη μνήμης, μετρήθηκαν 5.9GB ελεύθερα. Σταμάτα πρώτα το perception· το script αρνείται να ξεκινήσει και μόνο του. Μετρημένη ταχύτητα: ~310ms/βήμα, άρα ένα δωμάτιο θέλει 45 λεπτά έως 2 ώρες.
+          Κάθε πράσινη κουκκίδα είναι μια θέση απ' όπου κρατήθηκε καρέ (πάνοψη, x/y). Η πορτοκαλί είναι η πιο πρόσφατη. Βοηθά να δεις ΕΝ ΚΙΝΗΣΕΙ αν καλύπτεις όλο το δωμάτιο πριν πατήσεις «Σταμάτα». Καθαρίζει αυτόματα όταν ξεκινά νέα καταγραφή.
+        </p>
+      </div>
+      <div class="card">
+        <h3>Εκπαίδευση <span class="badge" id="nt-state">—</span></h3>
+        <div class="grid2">
+          <span class="k">Βήμα</span><span class="v" id="nt-step">—</span>
+          <span class="k">Loss / PSNR</span><span class="v" id="nt-loss">—</span>
+          <span class="k">Χρόνος / ETA</span><span class="v" id="nt-eta">—</span>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button class="btn pri" id="b-nerf-train-go">▶ Ξεκίνα εκπαίδευση</button>
+          <button class="btn warn" id="b-nerf-train-stop">■ Σταμάτα</button>
+        </div>
+        <p id="nt-error" style="display:none;font-size:11.5px;color:#f87171;margin-top:10px;
+           line-height:1.6;white-space:pre-wrap"></p>
+        <button class="btn" id="b-nerf-stop-perception"
+                style="display:none;margin-top:8px">Σταμάτα αντίληψη και ξαναδοκίμασε</button>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          ‼️ ΔΕΝ μπορεί να μοιραστεί το iGPU με το perception. Με το object_detector και το pose_node ενεργά, η εκπαίδευση ΡΙΧΝΕΙ την ουρά του ROCm (memory aperture violation) — δεν είναι έλλειψη μνήμης, μετρήθηκαν 5.9GB ελεύθερα. Το «Σταμάτα αντίληψη» σβήνει ΜΟΝΟ τα 3 nodes που χρησιμοποιούν το iGPU (object_detector, pose_node, open_vocab_detector) — το ρομπότ συνεχίζει να οδηγεί/εντοπίζεται κανονικά, απλά τυφλώνεται μέχρι το επόμενο «robot max». Μετρημένη ταχύτητα: ~310ms/βήμα, άρα ένα δωμάτιο θέλει 45 λεπτά έως 2 ώρες. Αποθηκεύει checkpoint κάθε 200 βήματα — «Σταμάτα» και ξανά «Ξεκίνα» συνεχίζει από εκεί, δεν ξαναρχίζει από την αρχή.
         </p>
       </div>
     </section>
@@ -4882,6 +5442,93 @@ button{font:inherit;color:inherit}
 
     <!-- ── Sound events ────────────────────────────────────────── -->
     <section class="pane" id="p-sound">
+      <!-- Static markup, same reasoning as the safety tab's .sfrow rows: the
+           i18n extractor has to see every label as ordinary text, not text
+           built in JS from a table. -->
+      <div class="card" style="margin-bottom:9px">
+        <h3>Ρυθμίσεις μικροφώνου <span class="badge" id="mic-badge">—</span></h3>
+        <div style="margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid #27272e">
+          <div class="sflab" style="margin-bottom:2px">Λέξη-αφύπνιση
+            <span class="badge" id="wm-badge">—</span></div>
+          <select id="wake-model" class="btn"
+            style="margin-top:6px;padding:6px 9px;width:100%"></select>
+          <div class="sfhelp" style="margin-top:8px">Οι επιλογές εκτός από «Έι
+            ρομπότ» είναι έτοιμα αγγλικά μοντέλα του openWakeWord — δουλεύουν
+            αμέσως, χωρίς εκπαίδευση, αλλά είναι ονόματα ΑΛΛΩΝ βοηθών (Alexa,
+            Jarvis, ...), όχι δικά του. Για ένα εντελώς νέο όνομα/φράση
+            χρειάζεται να εκπαιδευτεί καινούργιο μοντέλο
+            (<code>training/wake_word_hey_robot/</code>) — δεν αλλάζει από
+            εδώ.</div>
+        </div>
+        <div class="sfrow" data-key="wake_threshold">
+          <div class="sflab">Ευαισθησία λέξης-αφύπνισης «Έι ρομπότ»</div>
+          <div class="sfhelp">Πιο ψηλά = πιο δύσκολο να «ξυπνήσει» κατά λάθος·
+            πιο χαμηλά = πιο εύκολο να μην το προσέξει.</div>
+        </div>
+        <div class="sfrow" data-key="highpass_hz">
+          <div class="sflab">Φιλτράρισμα χαμηλού θορύβου (ανεμιστήρας/ρεύμα)</div>
+          <div class="sfhelp">0 = απενεργοποιημένο. Μεγαλύτερη τιμή κόβει πιο
+            χαμηλές συχνότητες πριν την ανίχνευση της λέξης-αφύπνισης —
+            λιγότερα ψεύτικα ξυπνήματα από θόρυβο.</div>
+        </div>
+        <div class="sfrow" data-key="barge_in_enabled">
+          <div class="sflab"><label class="sftog"><span data-box></span><span
+            >Να διακόπτεται λέγοντας «Έι ρομπότ» ενώ μιλάει</span></label></div>
+          <div class="sfhelp">‼️ Μετρήθηκε ότι 46 στις 81 «διακοπές» ήταν το
+            ΙΔΙΟ το ηχείο του ρομπότ, όχι άνθρωπος. Το ρομπότ το απενεργοποιεί
+            ξανά μόνο του μετά από 3 άδειες διακοπές στη σειρά.</div>
+        </div>
+        <div class="sfrow" data-key="barge_in_threshold">
+          <div class="sflab">Πόσο σίγουρο πρέπει να είναι για να δεχτεί τη διακοπή</div>
+        </div>
+        <div class="sfrow" data-key="energy_thresh">
+          <div class="sflab">Ευαισθησία έναρξης εγγραφής ομιλίας</div>
+          <div class="sfhelp">‼️ Ξαναμετριέται αυτόματα από τον θόρυβο του
+            δωματίου σε κάθε επανεκκίνηση — μια τιμή που αλλάζεις εδώ χάνεται
+            στο επόμενο <code>robot max</code>.</div>
+        </div>
+        <div class="sfrow" data-key="use_hw_vad">
+          <div class="sflab"><label class="sftog"><span data-box></span><span
+            >Χρήση του VAD του υλικού (XVF3800)</span></label></div>
+        </div>
+        <div class="sfrow" data-key="mic_muted">
+          <div class="sflab"><label class="sftog"><span data-box></span><span
+            >🔇 Σίγαση μικροφώνου (privacy mode)</span></label></div>
+          <div class="sfhelp">Κόβει την ανίχνευση λέξης-αφύπνισης ΚΑΙ την
+            εγγραφή στην πηγή — το ρομπότ δεν ακούει τίποτα όσο είναι
+            ενεργό. Το δαχτυλίδι LED γίνεται κόκκινο.</div>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <button class="btn warn" id="b-mic-reset">↺ Επαναφορά προεπιλογών</button>
+          <button class="btn" id="b-mic-power">🔌 Power-cycle μικροφώνου</button>
+        </div>
+        <div id="mic-msg" style="font-size:11.5px;color:#71717a;margin-top:9px"></div>
+      </div>
+      <div class="card" style="margin-bottom:9px">
+        <h3>Δαχτυλίδι LED <span class="badge" id="led-badge">—</span></h3>
+        <div class="sfrow" data-key="led_enabled">
+          <div class="sflab"><label class="sftog"><span data-box></span><span
+            >Ενεργό δαχτυλίδι LED</span></label></div>
+        </div>
+        <div class="sfrow" data-key="led_brightness">
+          <div class="sflab">Φωτεινότητα</div>
+        </div>
+        <div class="sfrow" data-key="led_color_idle_pointer">
+          <div class="sflab">Χρώμα δείκτη κατεύθυνσης (σε αναμονή)</div>
+        </div>
+        <div class="sfrow" data-key="led_color_idle_base">
+          <div class="sflab">Χρώμα φόντου (σε αναμονή)</div>
+        </div>
+        <div class="sfrow" data-key="led_color_listening">
+          <div class="sflab">Χρώμα όσο ακούει την εντολή</div>
+        </div>
+        <div class="sfrow" data-key="led_color_processing">
+          <div class="sflab">Χρώμα όσο επεξεργάζεται (STT)</div>
+        </div>
+        <div class="sfrow" data-key="led_color_muted">
+          <div class="sflab">Χρώμα όσο είναι σε σίγαση</div>
+        </div>
+      </div>
       <div class="card" style="margin-bottom:9px">
         <h3>Τι ακούω <span class="badge" id="sd-badge">—</span></h3>
         <div class="row" style="align-items:center;gap:16px">
@@ -4892,6 +5539,7 @@ button{font:inherit;color:inherit}
             <span class="k">Γωνία</span><span class="v" id="sd-angle">—</span>
             <span class="k">Ομιλία</span><span class="v" id="sd-speech">—</span>
             <span class="k">Παράθυρα</span><span class="v" id="sd-windows">—</span>
+            <span class="k">Ανίχνευση ομιλίας (υλικό)</span><span class="v" id="sd-vad">—</span>
           </div>
         </div>
         <div id="sd-cands" style="font-size:11.5px;color:#a1a1aa;margin-top:10px;
@@ -4905,6 +5553,27 @@ button{font:inherit;color:inherit}
           ΖΩΝΤΑΝΟΣ ήχος από το δωμάτιο όπου βρίσκεται το ρομπότ — ακούς ό,τι
           ακούει. Ίδιο κανάλι με το «Έι ρομπότ», καθαρισμένο από τον XVF3800.
           Ξεκινά μόνο όταν το πατήσεις και κόβεται μόλις κλείσεις το tab.
+        </p>
+      </div>
+      <div class="card" style="margin-bottom:9px">
+        <h3>Αυτόνομη κίνηση <span class="badge" id="dr-badge">—</span></h3>
+        <label style="display:flex;align-items:center;gap:9px;font-size:12.5px;
+          cursor:pointer;user-select:none;padding:9px 11px;border-radius:10px;
+          background:#232329;border:1px solid #33333d">
+          <input type="checkbox" id="dr-rotate">
+          <span>Να στρίβει προς όποιον μιλάει (μετά το «Έι ρομπότ»)</span>
+        </label>
+        <div id="dr-msg" style="color:#71717a;font-size:11.5px;margin-top:8px"></div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          ‼️ Κλειστό από προεπιλογή. Ανοιχτό, το ρομπότ γυρίζει τη βάση του μόλις
+          ακούσει το wake word — ΠΡΙΝ πει κανείς εντολή και χωρίς να ρωτήσει.
+          Επειδή το «Έι ρομπότ» πιάνεται και μέσα από κουβέντες που δεν του
+          απευθύνονται, αυτό φαινόταν σαν να «φεύγει» μόνο του.
+        </p>
+        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+          Ο φωτεινός δακτύλιος δείχνει ΠΑΝΤΑ την κατεύθυνση της φωνής, ακόμη κι
+          όταν ο διακόπτης είναι κλειστός. Η ρύθμιση θυμάται μετά από
+          <code>robot max</code>.
         </p>
       </div>
       <div class="card" style="margin-bottom:9px">
@@ -5355,27 +6024,6 @@ button{font:inherit;color:inherit}
 
     <section class="pane" id="p-set">
       <div class="card">
-        <h3>Αυτόνομη κίνηση <span class="badge" id="dr-badge">—</span></h3>
-        <label style="display:flex;align-items:center;gap:9px;font-size:12.5px;
-          cursor:pointer;user-select:none;padding:9px 11px;border-radius:10px;
-          background:#232329;border:1px solid #33333d">
-          <input type="checkbox" id="dr-rotate">
-          <span>Να στρίβει προς όποιον μιλάει (μετά το «Έι ρομπότ»)</span>
-        </label>
-        <div id="dr-msg" style="color:#71717a;font-size:11.5px;margin-top:8px"></div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
-          ‼️ Κλειστό από προεπιλογή. Ανοιχτό, το ρομπότ γυρίζει τη βάση του μόλις
-          ακούσει το wake word — ΠΡΙΝ πει κανείς εντολή και χωρίς να ρωτήσει.
-          Επειδή το «Έι ρομπότ» πιάνεται και μέσα από κουβέντες που δεν του
-          απευθύνονται, αυτό φαινόταν σαν να «φεύγει» μόνο του.
-        </p>
-        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
-          Ο φωτεινός δακτύλιος δείχνει ΠΑΝΤΑ την κατεύθυνση της φωνής, ακόμη κι
-          όταν ο διακόπτης είναι κλειστός. Η ρύθμιση θυμάται μετά από
-          <code>robot max</code>.
-        </p>
-      </div>
-      <div class="card">
         <h3>Γλώσσα</h3>
         <div class="row" id="lang-buttons"></div>
         <div style="color:#71717a;font-size:11.5px;margin-top:8px">
@@ -5383,42 +6031,6 @@ button{font:inherit;color:inherit}
         </div>
       </div>
 
-      <div class="card grow">
-        <h3>Χάρτες <span class="badge" id="map-active">—</span></h3>
-        <div id="map-list" style="margin:8px 0"></div>
-        <div class="row" style="margin-top:10px">
-          <button class="btn pri" id="b-map-new">🆕 Νέος χάρτης (SLAM)</button>
-          <input id="map-save-name" placeholder="όνομα χάρτη"
-                 style="flex:1;min-width:120px;background:#18181b;border:1px solid #27272a;
-                        color:#e4e4e7;border-radius:8px;padding:8px 10px">
-          <button class="btn" id="b-map-save">💾 Αποθήκευση</button>
-        </div>
-        <div id="map-msg" style="color:#71717a;font-size:11.5px;margin-top:8px"></div>
-        <div id="map-straighten" style="display:none;margin-top:12px;padding-top:12px;
-                                        border-top:1px solid #27272a">
-          <div style="font-size:12.5px;color:#a1a1aa;margin-bottom:8px">
-            🧹 Καθαρή εκδοχή — ισιώνει τα σκαλοπάτια των τοίχων. <b>Μόνο εμφάνιση</b> μέχρι
-            να διαλέξεις: μπορεί να μετατοπίσει τοίχους λίγα εκατοστά ή να αφαιρέσει ένα
-            πραγματικό εμπόδιο που έμοιαζε με θόρυβο σάρωσης — σύγκρινε οπτικά πριν διαλέξεις.
-          </div>
-          <div class="row" style="gap:12px">
-            <div style="flex:1;text-align:center;min-width:0">
-              <div style="font-size:11px;color:#71717a;margin-bottom:4px">Πρωτότυπο</div>
-              <img id="map-straighten-orig" style="max-width:100%;border-radius:6px;
-                                                    border:1px solid #27272a">
-            </div>
-            <div style="flex:1;text-align:center;min-width:0">
-              <div style="font-size:11px;color:#71717a;margin-bottom:4px">Ισιωμένο</div>
-              <img id="map-straighten-clean" style="max-width:100%;border-radius:6px;
-                                                     border:1px solid #27272a">
-            </div>
-          </div>
-          <div class="row" style="margin-top:10px">
-            <button class="btn" id="b-map-straighten-keep">Κράτησε το πρωτότυπο</button>
-            <button class="btn pri" id="b-map-straighten-use">Χρήση ισιωμένης εκδοχής</button>
-          </div>
-        </div>
-      </div>
       <div class="card" style="margin-bottom:9px">
         <h3>Δίκτυο <span class="badge" id="sn-badge">—</span></h3>
         <div class="grid2" style="margin-bottom:9px">
@@ -5645,6 +6257,8 @@ const LASER_X = 0.00, LASER_YAW_OFFSET = Math.PI;
 let ws=null, mapInfo=null, mapImg=null, pose=null, scan=null, goal=null, plan=null;
 let roomsData={};
 let kzData={};   // keepout zones for the active map, see keepout_files.py
+let nfPoints=[], nfLastFrames=0;   // NeRF capture coverage — kept frame x,y as they arrive
+let robotTrail=[];   // where the robot has driven this session — (x,y) in map metres
 let driveTimer=null, vx=0, wz=0, estop=false, armPos={};
 const $ = id => document.getElementById(id);
 
@@ -5710,13 +6324,13 @@ function showTab(id){
   // setMapView — re-run whichever is current, the same reason `resize()`
   // below exists: a canvas sized while its pane was display:none reads 0
   // for clientWidth/Height, so returning to the tab has to re-measure it.
-  if (id === 'map') setMapView(mapView);
+  if (id === 'map'){ setMapView(mapView); mapsRefresh(); }
+  if (id === 'rtabmap'){ rtabSavedRefresh(); }
   if (VNC_APPS[id]) ensureVnc(id);
   cloudSetActive(id === 'cloud');
   costSetActive(id === 'cost');
   fuseSetActive(id === 'fuse');
   if (id === 'cost'){ buildCostLegend(); costShowSize(); }
-  if (id === 'set') mapsRefresh();
   // 170 kB of geometry, fetched the first time the tab is opened rather than
   // on every page load — most visits never look at the arm.
   if (id === 'arm'){ armLoad(); armDraw(); }
@@ -5726,7 +6340,7 @@ function showTab(id){
 // One pane, two views of the SAME active map — replaces what used to be a
 // separate "Τοίχοι 3D" tab. 3D geometry (/maps/walls3d) is fetched lazily on
 // first switch to 3D (wallsLoad() is idempotent), same as the arm's model.
-let mapView = '2d';
+let mapView = '3d';
 function setMapView(view){
   mapView = view;
   $('map-view-2d').classList.toggle('pri', view === '2d');
@@ -5801,6 +6415,12 @@ function renderVnc(app, mode, detail){
     f.src = '/vncview/' + app + TOKEN_QS;
     host.appendChild(f);
     st.frame = f;
+    // RViz specifically: always open big rather than making the user hit
+    // "Πλήρης οθόνη" every time — see the .vnc-host.fs comment for why a
+    // real RViz pane is otherwise mostly letterboxing on a phone. Harmless
+    // to call before the VNC connection lands; it's pure CSS layout and
+    // requestFullscreen's rejection (no user gesture) is already caught.
+    if (app === 'rviz') enterVncFs(app);
   } else {
     const box = document.createElement('div');
     box.className = 'vnc-msg';
@@ -5840,7 +6460,10 @@ function renderVnc(app, mode, detail){
   card.appendChild(row);
   pane.appendChild(card);
 
-  if (app === 'rtabmap') pane.appendChild(rtabControls());
+  if (app === 'rtabmap'){
+    pane.appendChild(rtabControls());
+    rtabSavedRefresh();   // now that #rt-saved-list is actually in the DOM
+  }
 }
 
 // ── Fullscreen for a VNC pane ──────────────────────────────────────────────
@@ -5949,11 +6572,41 @@ function rtabControls(){
   mk(t('⏸ Παύση'), '', 'pause');
   mk(t('▶ Συνέχεια'), '', 'resume');
   mk(t('🆕 Νέος χάρτης'), 'warn', 'trigger_new_map');
+  const saveBtn = document.createElement('button');
+  saveBtn.className = 'btn';
+  saveBtn.textContent = t('💾 Αποθήκευση');
+  saveBtn.onclick = () => {
+    send({type: 'rtabmap_cmd', cmd: 'save_snapshot'});
+    rtabSavePoll();
+  };
+  row.appendChild(saveBtn);
   card.appendChild(row);
+  const saveMsg = document.createElement('p');
+  saveMsg.id = 'rt-save-msg';
+  saveMsg.style.cssText = 'font-size:11.5px;color:#71717a;margin:8px 0 0';
+  card.appendChild(saveMsg);
   const p = document.createElement('p');
   p.style.cssText = 'font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6';
-  p.textContent = t('Ο χάρτης αποθηκεύεται μόνος του στο ~/.home_robot/rtabmap/house.db. Για εξαγωγή σε .ply/.obj χρησιμόποιησε File → Export στο ίδιο το RTAB-Map παραπάνω. ‼️ Το «Νέος χάρτης» ξεκινά καθαρή συνεδρία — ό,τι έχεις χαρτογραφήσει ως τώρα μένει στη βάση αλλά βγαίνει από τον τρέχοντα χάρτη.');
+  p.textContent = t('Ο χάρτης αποθηκεύεται μόνος του στο ~/.home_robot/rtabmap/house.db. Για εξαγωγή σε .ply/.obj χρησιμόποιησε File → Export στο ίδιο το RTAB-Map παραπάνω. ‼️ Το «Νέος χάρτης» ξεκινά καθαρή συνεδρία — ό,τι έχεις χαρτογραφήσει ως τώρα μένει στη βάση αλλά βγαίνει από τον τρέχοντα χάρτη. Το «💾 Αποθήκευση» παίρνει ένα στιγμιότυπο του μέχρι τώρα χάρτη σε ξεχωριστό αρχείο, χωρίς να διακόψει τη χαρτογράφηση.');
   card.appendChild(p);
+
+  const savedH = document.createElement('h3');
+  savedH.style.marginTop = '16px';
+  savedH.textContent = t('Αποθηκευμένοι χάρτες');
+  card.appendChild(savedH);
+  const savedHint = document.createElement('p');
+  savedHint.style.cssText = 'font-size:11.5px;color:#71717a;margin:2px 0 8px';
+  savedHint.textContent = t('«Προβολή» χτίζει αυτόματα το συναρμολογημένο 3D cloud '
+                           + 'σε νέα καρτέλα (~15s) — η πρόοδος φαίνεται live.');
+  card.appendChild(savedHint);
+  const savedList = document.createElement('div');
+  savedList.id = 'rt-saved-list';
+  savedList.textContent = t('Φόρτωση…');
+  card.appendChild(savedList);
+  // NOT rtabSavedRefresh() here — this card is still detached at this point
+  // (the caller appends it right after rtabControls() returns), so $('rt-
+  // saved-list') would find nothing and the guard would silently no-op.
+  // Call it once the card is actually in the document instead.
   return card;
 }
 
@@ -5963,6 +6616,72 @@ function onRtab(m){
   st.textContent = m.live ? t('χαρτογραφεί') : t('ανενεργό');
   $('rt-nodes').textContent = m.live ? m.nodes : '—';
   $('rt-loops').textContent = m.live ? m.loops : '—';
+}
+
+// Saved 3D-map snapshots (see _rtab_save_snapshot / /rtabmap/saved). Polls
+// itself while a save is in flight — the DB is currently ~200+ MB so the
+// sqlite backup takes real seconds, not the instant a click implies.
+async function rtabSavedRefresh(){
+  const box = $('rt-saved-list'); if (!box) return;   // tab not built yet
+  let d;
+  try { d = await (await fetch('/rtabmap/saved' + (TOKEN_QS || ''))).json(); }
+  catch(e){ return; }
+  const msg = $('rt-save-msg');
+  if (msg) msg.textContent = d.saving ? t('Αποθήκευση σε εξέλιξη…')
+                            : (d.error ? t('Η αποθήκευση απέτυχε — δες τα logs.') : '');
+  box.innerHTML = '';
+  if (!d.snapshots.length){
+    box.textContent = t('Δεν υπάρχουν ακόμα αποθηκευμένοι χάρτες.');
+  } else {
+    for (const s of d.snapshots){
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:6px 0;'
+                        + 'border-bottom:1px solid #27272a';
+      const when = new Date(s.mtime * 1000).toLocaleString('el-GR');
+      const label = document.createElement('span');
+      label.style.flex = '1';
+      label.innerHTML = `<b>${s.name}</b>`
+        + `<span style="color:#71717a;font-size:11.5px"> · ${when} · ${s.mb} MB</span>`;
+      row.appendChild(label);
+      const viewBtn = document.createElement('button');
+      viewBtn.className = 'btn';
+      viewBtn.textContent = t('👁 Προβολή');
+      viewBtn.onclick = () => rtabViewOpen(s.name, viewBtn);
+      row.appendChild(viewBtn);
+      box.appendChild(row);
+    }
+  }
+  if (d.saving) setTimeout(rtabSavedRefresh, 3000);
+}
+function rtabSavePoll(){
+  const msg = $('rt-save-msg');
+  if (msg) msg.textContent = t('Αποθήκευση σε εξέλιξη…');
+  setTimeout(rtabSavedRefresh, 1000);
+}
+
+// Opens a SAVED snapshot (read-only, its own process/display — see the
+// rtabview app in gui_session.sh) in a new tab streamed over the same noVNC
+// bridge the live tabs use. Always stop-then-start: rtabview is a single VNC
+// slot, so switching which file it shows needs the old viewer torn down
+// first, or 'start' just reports "already running" against the wrong file.
+async function rtabViewOpen(name, btn){
+  const label = btn ? btn.textContent : '';
+  if (btn){ btn.disabled = true; btn.textContent = t('Άνοιγμα…'); }
+  try {
+    await fetch('/gui/rtabview/stop' + (TOKEN_QS || ''));
+    const qs = 'file=' + encodeURIComponent(name)
+             + (TOKEN_QS ? '&' + TOKEN_QS.slice(1) : '');
+    const r = await (await fetch('/gui/rtabview/start?' + qs)).json();
+    if (!r.running){
+      alert(t('Άνοιγμα απέτυχε: ') + r.result);
+      return;
+    }
+    window.open('/vncview/rtabview' + TOKEN_QS, '_blank');
+  } catch(e){
+    alert(t('Άνοιγμα απέτυχε.'));
+  } finally {
+    if (btn){ btn.disabled = false; btn.textContent = label; }
+  }
 }
 
 async function guiCall(app, action){
@@ -6139,6 +6858,30 @@ function resize(){
 window.addEventListener('resize',resize);
 new ResizeObserver(resize).observe(wrap);
 
+function drawNerfMap(){
+  const c = $('nf-map'); if(!c) return;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#18181b'; ctx.fillRect(0, 0, c.width, c.height);
+  if(!nfPoints.length) return;
+  const xs = nfPoints.map(p=>p[0]), ys = nfPoints.map(p=>p[1]);
+  const minX=Math.min(...xs), maxX=Math.max(...xs);
+  const minY=Math.min(...ys), maxY=Math.max(...ys);
+  const pad = 20;
+  const spanX = Math.max(maxX-minX, 0.5), spanY = Math.max(maxY-minY, 0.5);
+  const scale = Math.min((c.width-2*pad)/spanX, (c.height-2*pad)/spanY);
+  const midX = (minX+maxX)/2, midY = (minY+maxY)/2;
+  const cx = c.width/2, cy = c.height/2;
+  const toPx = ([x,y]) => [cx+(x-midX)*scale, cy-(y-midY)*scale];  // y up on screen
+  ctx.fillStyle = '#22c55e';
+  for(const p of nfPoints){
+    const [px,py] = toPx(p);
+    ctx.beginPath(); ctx.arc(px, py, 2, 0, Math.PI*2); ctx.fill();
+  }
+  const [lx,ly] = toPx(nfPoints[nfPoints.length-1]);
+  ctx.fillStyle = '#f59e0b';
+  ctx.beginPath(); ctx.arc(lx, ly, 4, 0, Math.PI*2); ctx.fill();
+}
+
 // ── websocket ──────────────────────────────────────────────────────────────
 const HANDLERS = {
   map(m){
@@ -6187,8 +6930,17 @@ const HANDLERS = {
     $('ix').textContent   = m.x.toFixed(2)+' m';
     $('iy').textContent   = m.y.toFixed(2)+' m';
     $('iyaw').textContent = (m.yaw*180/Math.PI).toFixed(0)+'°';
+    // Only keep a point once the robot has actually moved 5cm — the pose
+    // feed polls TF at ~2Hz even standing still (see _poll_tf_pose's header),
+    // and stacking thousands of identical dots buys nothing.
+    const last = robotTrail[robotTrail.length - 1];
+    if (!last || Math.hypot(m.x - last[0], m.y - last[1]) > 0.05){
+      robotTrail.push([m.x, m.y]);
+      if (robotTrail.length > 4000) robotTrail.shift();
+    }
     draw();
     drawCompass2();
+    if (mapView === '3d') wallsDraw();
   },
   scan(m){ scan=m; draw(); },
   plan(m){ plan=m.points; draw(); },
@@ -6273,6 +7025,38 @@ const HANDLERS = {
     st.textContent = m.active ? t('καταγράφει') : t('σταματημένο');
     $('nf-frames').textContent = `${m.frames} / ${m.max_frames}`;
     $('nf-dir').textContent = m.dir || '—';
+    // frames resets to 0 at the start of every session (see nerf_capture_node's
+    // _cb_capture) — that is also our signal to clear the old coverage dots.
+    // nfLastFrames must reset too, or a new session whose Nth frame matches the
+    // previous session's last-seen count gets silently skipped below.
+    if(m.frames === 0){ nfPoints.length = 0; nfLastFrames = -1; }
+    if(m.last_xy && m.frames !== nfLastFrames){
+      nfPoints.push(m.last_xy);
+      nfLastFrames = m.frames;
+    }
+    drawNerfMap();
+  },
+  nerf_train(m){
+    const st = $('nt-state'); if(!st) return;
+    st.className = 'pill' + (m.running || m.done ? ' ok' : '');
+    st.textContent = m.running ? t('εκπαιδεύεται')
+                    : m.done    ? t('ολοκληρώθηκε')
+                    : m.error   ? t('σφάλμα')
+                    :             t('σταματημένο');
+    $('nt-step').textContent = (m.step != null && m.steps != null) ? `${m.step} / ${m.steps}` : '—';
+    $('nt-loss').textContent = (m.loss != null) ? `${m.loss.toFixed(4)} / ${m.psnr.toFixed(1)} dB` : '—';
+    $('nt-eta').textContent  = (m.elapsed_min != null) ? `${m.elapsed_min.toFixed(1)}′ / ETA ${m.eta_min}′` : '—';
+    const errEl = $('nt-error');
+    if(m.error){
+      errEl.textContent = m.error;
+      errEl.style.display = 'block';
+      $('b-nerf-stop-perception').style.display = m.gpu_busy ? '' : 'none';
+    } else {
+      errEl.style.display = 'none';
+      $('b-nerf-stop-perception').style.display = 'none';
+    }
+    $('b-nerf-train-go').disabled = !!m.running;
+    $('b-nerf-train-stop').disabled = !m.running;
   },
   vision(m){
     const e = $('vis-count'); if(!e) return;
@@ -6307,6 +7091,9 @@ const HANDLERS = {
   speaker(m){ onSpeaker(m); },
   doa_rotate(m){ onDoaRotate(m); },
   safety(m){ onSafety(m.v); if (m.skirt_margin_mm !== undefined) skirtSetDisplay(m.skirt_margin_mm); },
+  arm_settings(m){ onArmSettings(m.v); },
+  mic(m){ onMic(m.v); },
+  vad(m){ onVad(m.on); },
 };
 
 // ── safety clearances ──────────────────────────────────────────────────────
@@ -6409,6 +7196,158 @@ function onSafety(v){
   $('sf-cam-badge').textContent  = camUp  ? t('ενεργό') : t('δεν τρέχει');
   $('sf-nav-badge').textContent  = navUp  ? t('ενεργό') : t('δεν τρέχει');
   $('sf-base-badge').textContent = baseUp ? t('ενεργό') : t('δεν τρέχει');
+}
+
+// ── microphone settings ──────────────────────────────────────────────────────
+// Same shape and the same reasoning as the safety block above — see
+// mic_settings.py for which knobs made the cut and why the rest didn't.
+const MIC_SPECS = __MIC_SPECS__;
+const MIC_INFO  = __MIC_INFO__;
+
+// '#rrggbb' <-> the plain 0xRRGGBB int doa_node's led_color_* params hold.
+function micHex(v){ return '#' + (v & 0xFFFFFF).toString(16).padStart(6, '0'); }
+
+function micBuild(){
+  document.querySelectorAll('#p-sound .sfrow').forEach(row => {
+    const key = row.dataset.key, spec = MIC_SPECS[key];
+    if (!spec) return;
+    const lab = row.querySelector('.sflab');
+    if (spec.kind === 'bool'){
+      const box = document.createElement('input');
+      box.type = 'checkbox'; box.dataset.input = key;
+      row.querySelector('[data-box]').appendChild(box);
+      const val = document.createElement('span');
+      val.className = 'sfval'; val.dataset.val = key;
+      lab.appendChild(val);
+      box.addEventListener('change', () =>
+        send({type:'mic_set', key, value: box.checked}));
+    } else if (spec.kind === 'color'){
+      const val = document.createElement('span');
+      val.className = 'sfval'; val.dataset.val = key;
+      lab.appendChild(val);
+      const sw = document.createElement('input');
+      sw.type = 'color'; sw.dataset.input = key;
+      sw.value = micHex(spec.def);
+      row.insertBefore(sw, lab.nextSibling);
+      // Colour pickers don't drag-then-release like a range slider — 'input'
+      // already fires only on a committed pick (closing the swatch), so
+      // there's no separate "paint while dragging" step here.
+      sw.addEventListener('input', () => {
+        const v = parseInt(sw.value.slice(1), 16);
+        micPaintRow(key, v, null);
+        send({type:'mic_set', key, value: v});
+      });
+    } else {
+      const val = document.createElement('span');
+      val.className = 'sfval'; val.dataset.val = key;
+      lab.appendChild(val);
+      const sl = document.createElement('input');
+      sl.type = 'range'; sl.dataset.input = key;
+      sl.min = spec.lo; sl.max = spec.hi; sl.step = spec.step;
+      sl.value = spec.def;
+      row.insertBefore(sl, lab.nextSibling);
+      sl.addEventListener('input',  () => micPaintRow(key, +sl.value, null));
+      sl.addEventListener('change', () =>
+        send({type:'mic_set', key, value:+sl.value}));
+    }
+  });
+}
+
+function micFmt(key, v){
+  const spec = MIC_SPECS[key];
+  return v.toFixed(spec.step < 0.05 ? 3 : (spec.step < 1 ? 2 : 0));
+}
+
+function micPaintRow(key, asked, live){
+  const spec = MIC_SPECS[key];
+  const row = document.querySelector('#p-sound .sfrow[data-key="' + key + '"]');
+  if (!row || !spec) return;
+  const val = row.querySelector('[data-val="' + key + '"]');
+  if (spec.kind === 'bool'){
+    if (val) val.textContent = asked ? t('ΕΝΕΡΓΟ') : t('ΚΛΕΙΣΤΟ');
+  } else if (spec.kind === 'color'){
+    const same = live === null || live === undefined || live === asked;
+    if (val) val.textContent = micHex(asked)
+      + (same ? '' : ' → ' + t('ενεργό') + ' ' + micHex(live));
+  } else {
+    const same = live === null || live === undefined
+                 || Math.abs(live - asked) < 1e-6;
+    if (val) val.textContent = micFmt(key, asked)
+      + (same ? '' : ' → ' + t('ενεργό') + ' ' + micFmt(key, live));
+    row.classList.toggle('warned',
+      (spec.warn_above !== null && asked > spec.warn_above) ||
+      (spec.warn_below !== null && asked < spec.warn_below));
+  }
+}
+
+function onMic(v){
+  let micUp = 0, ledUp = 0;
+  Object.keys(MIC_SPECS).forEach(key => {
+    const st = v[key];
+    if (!st) return;
+    const row = document.querySelector('#p-sound .sfrow[data-key="' + key + '"]');
+    const inp = document.querySelector('[data-input="' + key + '"]');
+    if (inp && document.activeElement !== inp){
+      if (MIC_SPECS[key].kind === 'bool') inp.checked = !!st.set;
+      else if (MIC_SPECS[key].kind === 'color') inp.value = micHex(st.set);
+      else inp.value = st.set;
+    }
+    if (inp) inp.disabled = st.nodes === 0;
+    if (row) row.classList.toggle('off', st.nodes === 0);
+    micPaintRow(key, st.set, st.live);
+    if (key.startsWith('led_')) ledUp = Math.max(ledUp, st.nodes);
+    else micUp = Math.max(micUp, st.nodes);
+  });
+  $('mic-badge').textContent = micUp ? t('ενεργό') : t('δεν τρέχει');
+  $('led-badge').textContent = ledUp ? t('ενεργό') : t('δεν τρέχει');
+  if (v.wake_model) onWakeModel(v.wake_model);
+}
+
+// ── wake word model picker ───────────────────────────────────────────────────
+// Not one of MIC_SPECS: it's a closed set of strings (a <select>), not a
+// number/bool/colour — see mic_settings.py's WAKE_MODEL_CHOICES for why.
+const WAKE_MODEL_CHOICES = __WAKE_MODEL_CHOICES__;
+// Labels, not the bare ids — set as plain text (like usbBuild()'s button
+// labels) so the same DOM-walk that translates static markup picks these up
+// too, since wakeModelBuild() runs before the first applyLang().
+const WAKE_MODEL_LABELS = {
+  hey_robot:   'Έι ρομπότ (προεπιλογή, εκπαιδευμένο)',
+  alexa:       'Alexa (αγγλικό, χωρίς εκπαίδευση)',
+  hey_jarvis:  'Hey Jarvis (αγγλικό, χωρίς εκπαίδευση)',
+  hey_mycroft: 'Hey Mycroft (αγγλικό, χωρίς εκπαίδευση)',
+  hey_marvin:  'Hey Marvin (αγγλικό, χωρίς εκπαίδευση)',
+};
+
+function wakeModelBuild(){
+  const sel = $('wake-model');
+  if (!sel || sel.childElementCount) return;
+  WAKE_MODEL_CHOICES.forEach(id => {
+    const o = document.createElement('option');
+    o.value = id;
+    o.textContent = WAKE_MODEL_LABELS[id] || id;
+    sel.appendChild(o);
+  });
+  sel.addEventListener('change', () =>
+    send({type:'mic_set', key:'wake_model', value: sel.value}));
+}
+
+function onWakeModel(st){
+  const sel = $('wake-model');
+  if (!sel) return;
+  if (document.activeElement !== sel) sel.value = st.set;
+  if (!st.nodes){ $('wm-badge').textContent = t('δεν τρέχει'); return; }
+  // A rejected switch (bad/missing model) leaves the NODE's own parameter at
+  // the old value — same "asked X, live Y" disagreement the safety sliders
+  // show, not a silent failure.
+  $('wm-badge').textContent = (st.live && st.live !== st.set)
+    ? t('ενεργό') + ': ' + (WAKE_MODEL_LABELS[st.live] || st.live)
+    : t('ενεργό');
+}
+
+function onVad(on){
+  const el = $('sd-vad');
+  if (!el) return;
+  el.textContent = on ? t('ΝΑΙ') + ' 🔵' : t('όχι');
 }
 
 // ── collision_monitor hard-stop skirt ────────────────────────────────────────
@@ -8162,6 +9101,9 @@ $('b-overlay').addEventListener('click',()=>{
 // control. Same reason the header e-stop is not a toggle-shaped thing.
 $('b-nerf-go').addEventListener('click',()=>send({type:'nerf_capture', on:true}));
 $('b-nerf-stop').addEventListener('click',()=>send({type:'nerf_capture', on:false}));
+$('b-nerf-train-go').addEventListener('click',()=>send({type:'nerf_train_start'}));
+$('b-nerf-train-stop').addEventListener('click',()=>send({type:'nerf_train_stop'}));
+$('b-nerf-stop-perception').addEventListener('click',()=>send({type:'nerf_stop_perception'}));
 $('b-follow').addEventListener('click',()=>send({type:'follow', on:true}));
 $('b-follow-stop').addEventListener('click',()=>send({type:'follow', on:false}));
 
@@ -8169,6 +9111,18 @@ $('b-sf-reset').addEventListener('click', ()=>{
   if(!confirm(t('Επαναφορά όλων των ρυθμίσεων ασφαλείας στις προεπιλογές;'))) return;
   send({type:'safety_reset'});
   $('sf-msg').textContent = t('Επαναφέρθηκαν.');
+});
+
+$('b-mic-reset').addEventListener('click', ()=>{
+  if(!confirm(t('Επαναφορά όλων των ρυθμίσεων μικροφώνου στις προεπιλογές;'))) return;
+  send({type:'mic_reset'});
+  $('mic-msg').textContent = t('Επαναφέρθηκαν.');
+});
+// Same generic USB power-cycle the System tab's «Ξεκόλλα αισθητήρα» card
+// uses (USB_DEVICES/_usb_power_cycle) — a shortcut here, not a second control.
+$('b-mic-power').addEventListener('click', ()=>{
+  send({type:'usb_power', device:'mic'});
+  $('mic-msg').textContent = t('Γίνεται power-cycle…');
 });
 
 let volDragging = false;
@@ -8393,6 +9347,93 @@ $('b-arm-limp').onclick = ()=>{
 };
 $('b-arm-init').onclick = ()=>send({type:'arm_raw',cmd:'{"T":210,"cmd":1}'});
 $('b-arm-moveit').onclick = ()=>showTab('moveit');
+
+// ── arm envelope + speed ─────────────────────────────────────────────────
+// Same pattern as the safety tab (live SetParameters, paint while dragging,
+// commit on release, never fight the user's finger) for a different shape of
+// knob: a [lo,hi] PAIR per joint instead of one number, and one speed %
+// fanned out to arm_joy AND arm_driver together. See
+// home_robot/arm_settings.py for why those are shaped this way.
+const ARM_MECH_LIMITS = __ARM_MECH_LIMITS__;
+const ARM_ALL_JOINTS = [...ARM_JOINTS, 'hand'];   // + gripper, not in ARM_JOINTS
+
+function armLimBuild(){
+  const div = $('armlim');
+  ARM_ALL_JOINTS.forEach(name=>{
+    const [mlo,mhi] = ARM_MECH_LIMITS[name];
+    const [lo0,hi0] = ARM_LIMITS[name];
+    const row=document.createElement('div');
+    row.className='joint';
+    row.dataset.joint=name;
+    row.innerHTML = `<label>${name}</label>`
+      + `<div style="display:flex;gap:6px">`
+      + `<input type="range" class="alo" min="${mlo}" max="${mhi}" step="0.01" value="${lo0}">`
+      + `<input type="range" class="ahi" min="${mlo}" max="${mhi}" step="0.01" value="${hi0}">`
+      + `</div><span class="val"></span>`;
+    div.appendChild(row);
+    const lo=row.querySelector('.alo'), hi=row.querySelector('.ahi');
+    const paint=()=>{
+      row.querySelector('.val').textContent =
+        (lo.value*180/Math.PI).toFixed(0)+'° … '+(hi.value*180/Math.PI).toFixed(0)+'°';
+    };
+    [lo,hi].forEach(inp=>{
+      ['mousedown','touchstart'].forEach(e=>inp.addEventListener(e,()=>inp.dataset.dragging='1'));
+      ['mouseup','touchend','touchcancel'].forEach(e=>inp.addEventListener(e,()=>delete inp.dataset.dragging));
+      inp.addEventListener('input', paint);
+      inp.addEventListener('change', ()=>{
+        // A handle dragged past the other is sorted server-side too; sorting
+        // here as well keeps the two from visibly crossing on screen.
+        let a=parseFloat(lo.value), b=parseFloat(hi.value);
+        if (a>b){ [a,b]=[b,a]; }
+        send({type:'arm_limit_set', joint:name, lo:a, hi:b});
+      });
+    });
+    paint();
+  });
+}
+
+function armLimPaint(joint, set_, live, mech){
+  const row = document.querySelector('#armlim .joint[data-joint="'+joint+'"]');
+  if (!row || !set_) return;
+  const lo=row.querySelector('.alo'), hi=row.querySelector('.ahi');
+  if (document.activeElement !== lo) lo.value = set_[0];
+  if (document.activeElement !== hi) hi.value = set_[1];
+  row.querySelector('.val').textContent =
+    (set_[0]*180/Math.PI).toFixed(0)+'° … '+(set_[1]*180/Math.PI).toFixed(0)+'°'
+    + (live ? '' : ' '+t('(δεν τρέχει)'));
+  row.classList.toggle('off', !live);
+  // The position slider for this joint must never allow an angle the
+  // envelope no longer covers — otherwise dragging it would silently do
+  // nothing once arm_driver clamps the command server-side.
+  const posSlider = joint==='hand' ? $('grip') : $('j-'+joint);
+  if (posSlider && document.activeElement !== posSlider){
+    posSlider.min = set_[0]; posSlider.max = set_[1];
+    posSlider.value = Math.min(Math.max(parseFloat(posSlider.value), set_[0]), set_[1]);
+  }
+}
+
+function onArmSettings(v){
+  ARM_ALL_JOINTS.forEach(name=>{
+    const st = v.limits[name];
+    if (st) armLimPaint(name, st.set, st.live, st.mech);
+  });
+  $('armlim-badge').textContent = v.nodes ? t('ενεργό') : t('δεν τρέχει');
+  const sp = $('armspeed');
+  if (document.activeElement !== sp) sp.value = v.speed;
+  $('armspeed-v').textContent = Math.round((v.speed_live || v.speed)*100)+'%'
+    + (v.nodes ? '' : ' '+t('(δεν τρέχει)'));
+}
+
+$('armspeed').addEventListener('input', ()=>
+  $('armspeed-v').textContent = Math.round($('armspeed').value*100)+'%');
+$('armspeed').addEventListener('change', ()=>
+  send({type:'arm_speed_set', value:+$('armspeed').value}));
+$('b-armlim-reset').onclick = ()=>{
+  if (confirm(t('Επαναφέρει τα όρια των αρθρώσεων ΚΑΙ την ταχύτητα στις '
+      + 'μετρημένες προεπιλογές. Να συνεχίσω;')))
+    send({type:'arm_reset'});
+};
+armLimBuild();
 $('b-log-clear').onclick  = ()=>{ $('log-list').innerHTML=''; logSeen=0; logLast=null;
   $('log-count').textContent='0'; };
 $('b-cloud-reset').onclick = cloudReset;
@@ -8471,7 +9512,7 @@ function applyLang(){
   setupViewers();
   for(const b of document.querySelectorAll('#lang-buttons .btn'))
     b.classList.toggle('pri', b.dataset.lang === LANG);
-  if(document.querySelector('#p-set.active')) mapsRefresh();
+  if(document.querySelector('#p-map.active')) mapsRefresh();
 }
 
 function setLang(code){
@@ -8481,9 +9522,11 @@ function setLang(code){
 }
 
 // ── maps ───────────────────────────────────────────────────────────────────
-// Switching a map restarts the whole stack: map_server takes its map as a
-// launch parameter and there is no runtime swap. Hence the confirm() — losing
-// navigation for ~90 s should never be one stray tap away.
+// Switching a map hot-swaps just the localization/SLAM nodes (map_mode_switch
+// on the Python side) — voice, camera, arm, dashboard, VNC and Foxglove stay
+// up. Only Nav2 localization is briefly down (a few seconds, not the ~90 s
+// full-stack restart this used to be), so the confirm() is lighter than it
+// once was but still there — navigation goes idle for a moment either way.
 async function mapsRefresh(){
   // active_map() shells out to `ros2 param get`, which takes a second or two
   // (see the Python side) — without this the ΧΑΡΤΕΣ card looks empty/broken
@@ -8523,23 +9566,40 @@ async function mapsRefresh(){
 function mapMsg(s){ $('map-msg').textContent = s; }
 
 async function mapSwitch(name){
-  if(!confirm(t('Θα σταματήσει η πλοήγηση και θα ξαναξεκινήσουν όλα με τον χάρτη')
-              + ' "' + name + '".\n' + t('Διαρκεί περίπου 90 δευτερόλεπτα. Να συνεχίσω;'))) return;
-  mapMsg(t('Επανεκκίνηση… η σελίδα θα ξανασυνδεθεί μόνη της.'));
+  if(!confirm(t('Αλλαγή στον χάρτη')
+              + ' "' + name + '". ' + t('Ο εντοπισμός επανεκκινείται (λίγα '
+              + 'δευτερόλεπτα) — η φωνή, η κάμερα και ο βραχίονας ΔΕΝ '
+              + 'διακόπτονται. Να συνεχίσω;'))) return;
+  mapMsg(t('Αλλαγή χάρτη…'));
   try { await fetch('/maps/switch/' + encodeURIComponent(name) + (TOKEN_QS || '')); }
-  catch(e){ /* the server is going down under us; that IS the success case */ }
+  catch(e){ /* fire-and-forget: the swap keeps going server-side either way */ }
+  setTimeout(mapsRefresh, 4000);
+  setTimeout(mapsRefresh, 10000);
+  // Two attempts, same reasoning as mapsRefresh above: the first can race the
+  // hot-swap (map_server briefly down) and land on wallsLoad()'s error path,
+  // which does not retry itself — a second, later attempt catches that.
+  setTimeout(wallsReload, 10000);
+  setTimeout(wallsReload, 16000);
 }
 
-// Same restart as mapSwitch — say so. The old text mentioned only that
-// "navigation stops", so when the whole stack went down and the tab froze for a
-// minute and a half it read as a crash rather than the documented behaviour.
+// The 3D view caches wallsModel forever once loaded (wallsLoad() is a
+// load-once guard, see its comment) — without this it kept showing whichever
+// map was active when the page first opened 3D, even after switching maps.
+function wallsReload(){
+  wallsModel = null;
+  wallsLoading = false;
+  if (mapView === '3d') wallsLoad();
+}
+
 async function mapNew(){
-  if(!confirm(t('Ξεκινά ΝΕΑ χαρτογράφηση (SLAM). Ο τρέχων χάρτης δεν χάνεται, '
-             + 'αλλά ΟΛΑ ξαναξεκινούν (~90 δευτερόλεπτα) και η πλοήγηση σταματά '
-             + 'μέχρι να αποθηκεύσεις τον καινούργιο. Να συνεχίσω;'))) return;
-  mapMsg(t('Επανεκκίνηση σε χαρτογράφηση… η σελίδα θα ξανασυνδεθεί μόνη της. '
-           + 'Μετά οδήγησε το ρομπότ σε όλο τον χώρο και αποθήκευσε.'));
+  if(!confirm(t('Ξεκινά ΝΕΑ χαρτογράφηση (SLAM). Ο τρέχων χάρτης δεν χάνεται. '
+             + 'Μόνο ο εντοπισμός επανεκκινείται (λίγα δευτερόλεπτα) — η φωνή, '
+             + 'η κάμερα και ο βραχίονας ΔΕΝ διακόπτονται. Να συνεχίσω;'))) return;
+  mapMsg(t('Ξεκινά χαρτογράφηση… Οδήγησε το ρομπότ σε όλο τον χώρο και μετά '
+           + 'αποθήκευσε.'));
   try { await fetch('/maps/new/new' + (TOKEN_QS || '')); } catch(e){}
+  setTimeout(mapsRefresh, 4000);
+  setTimeout(mapsRefresh, 10000);
 }
 
 async function mapSave(){
@@ -8705,28 +9765,38 @@ function armLinkTransforms(){
   return out;
 }
 
-// Per-link palette. The gripper stays blue so the business end is obvious;
-// the segments alternate slightly so adjacent links do not merge into one
-// grey mass when they fold over each other.
+// Per-link palette AND material: `spec`/`shin` make the grey links read as
+// brushed aluminium (bright, tight highlight) and the gripper as plastic
+// (dimmer, broader highlight) rather than every link sharing one identical
+// sheen — real materials do not all shine the same way, and matching that is
+// most of what "looks realistic" buys for free on top of correct shading.
+// The gripper also stays blue so the business end is obvious; the segments
+// alternate slightly so adjacent links do not merge into one grey mass when
+// they fold over each other.
+const ARM_MAT_DEFAULT = {rgb: [150, 155, 165], spec: 0.45, shin: 28};
 const ARM_COLORS = {
-  base_link:         [96, 100, 112],
-  link1:             [150, 155, 168],
-  link2:             [132, 138, 152],
-  link3:             [150, 155, 168],
-  link4:             [132, 138, 152],
-  link5:             [150, 155, 168],
-  gripper_link:      [ 70, 140, 232],
-  gripper_left_link: [ 70, 140, 232],
+  base_link:         {rgb: [96, 100, 112],  spec: 0.60, shin: 42},
+  link1:             {rgb: [150, 155, 168], spec: 0.60, shin: 42},
+  link2:             {rgb: [132, 138, 152], spec: 0.60, shin: 42},
+  link3:             {rgb: [150, 155, 168], spec: 0.60, shin: 42},
+  link4:             {rgb: [132, 138, 152], spec: 0.60, shin: 42},
+  link5:             {rgb: [150, 155, 168], spec: 0.60, shin: 42},
+  gripper_link:      {rgb: [ 70, 140, 232], spec: 0.22, shin: 10},
+  gripper_left_link: {rgb: [ 70, 140, 232], spec: 0.22, shin: 10},
 };
 
-// Light fixed in VIEW space — a headlight up and to the left. World-fixed light
-// leaves a permanently dark side that orbiting cannot inspect; this way the arm
-// is always readable whichever way you turn it.
-const ARM_LIGHT = (() => {
-  const v = [-0.42, 0.78, -0.46];
-  const n = Math.hypot(v[0], v[1], v[2]);
-  return [v[0]/n, v[1]/n, v[2]/n];
-})();
+// Two lights fixed in VIEW space, not world space — a world-fixed light leaves
+// a permanently dark side that orbiting cannot inspect, so the arm would not
+// be readable from every angle. KEY is the bright headlight the shading always
+// had; FILL is new: a dim, cool light from roughly the opposite side, which is
+// what actually sells "in a room" instead of "lit from one bare bulb" — a
+// single light leaves every recessed face black, and real ambient bounce
+// never does that.
+function _armNorm(v){ const n = Math.hypot(v[0],v[1],v[2])||1; return [v[0]/n,v[1]/n,v[2]/n]; }
+const ARM_LIGHT      = _armNorm([-0.42, 0.78, -0.46]);
+const ARM_LIGHT_COL  = [1.00, 0.97, 0.90];   // slightly warm — the key light
+const ARM_FILL       = _armNorm([0.55, -0.30, -0.35]);
+const ARM_FILL_COL   = [0.45, 0.55, 0.80];   // cool and dim — bounce, not a second sun
 
 function armDraw(){
   const cv = $('arm3d'); if (!cv) return;
@@ -8773,7 +9843,7 @@ function armDraw(){
   let minX = 1e9, maxX = -1e9, minY = 1e9, maxY = -1e9;
   for (const [link, flat] of Object.entries(armModel.links)){
     const m = tf[link]; if (!m) continue;
-    const col = ARM_COLORS[link] || [150,155,165];
+    const mat = ARM_COLORS[link] || ARM_MAT_DEFAULT;
     for (let i=0;i<flat.length;i+=9){
       const vv = [];
       for (let k=0;k<3;k++){
@@ -8801,7 +9871,7 @@ function armDraw(){
       if (nz > 0) continue;
 
       const p = vv.map(project);
-      faces.push([(vv[0][2]+vv[1][2]+vv[2][2])/3, p, col, [nx,ny,nz]]);
+      faces.push([(vv[0][2]+vv[1][2]+vv[2][2])/3, p, mat, [nx,ny,nz]]);
     }
   }
   faces.sort((a,b) => b[0]-a[0]);          // far (large z) first
@@ -8866,19 +9936,26 @@ function armDraw(){
   }
 
   // ── shade and fill ────────────────────────────────────────────────────────
-  const L = ARM_LIGHT;
-  for (const [, p, col, n] of faces){
-    // Lambert diffuse. Two-sided via abs so a stray inward-wound triangle
-    // shows as lit rather than as a black hole.
-    const diff = Math.abs(n[0]*L[0] + n[1]*L[1] + n[2]*L[2]);
-    // Blinn-Phong specular against the view direction (0,0,-1).
+  const L = ARM_LIGHT, F = ARM_FILL;
+  for (const [, p, mat, n] of faces){
+    const col = mat.rgb;
+    // Key light: Lambert diffuse, two-sided via abs so a stray inward-wound
+    // triangle shows as lit rather than as a black hole (same reasoning the
+    // single-light version had). Fill light is one-sided — it is standing in
+    // for ambient bounce, which does not illuminate a face from behind it.
+    const kd = Math.abs(n[0]*L[0] + n[1]*L[1] + n[2]*L[2]);
+    const fd = Math.max(0, n[0]*F[0] + n[1]*F[1] + n[2]*F[2]);
+    // Blinn-Phong specular against the view direction (0,0,-1), key light
+    // only — a second specular pass for the dim fill light would not be
+    // visible and would just cost another pow() per triangle. Per-material
+    // spec/shin is what makes the grey links look metallic and the gripper
+    // look like plastic instead of every link sharing one identical sheen.
     let hx = L[0], hy = L[1], hz = L[2] - 1;
     const hl = Math.hypot(hx, hy, hz) || 1;
-    const spec = Math.pow(Math.abs((n[0]*hx + n[1]*hy + n[2]*hz)/hl), 24) * 0.45;
-    const f = 0.30 + 0.70*diff;             // ambient + diffuse
-    const r = Math.min(255, col[0]*f + 255*spec)|0;
-    const g2= Math.min(255, col[1]*f + 255*spec)|0;
-    const b = Math.min(255, col[2]*f + 255*spec)|0;
+    const spec = Math.pow(Math.abs((n[0]*hx + n[1]*hy + n[2]*hz)/hl), mat.shin) * mat.spec;
+    const r = Math.min(255, col[0]*(0.16 + kd*0.78*ARM_LIGHT_COL[0] + fd*0.40*ARM_FILL_COL[0]) + 255*spec)|0;
+    const g2= Math.min(255, col[1]*(0.16 + kd*0.78*ARM_LIGHT_COL[1] + fd*0.40*ARM_FILL_COL[1]) + 255*spec)|0;
+    const b = Math.min(255, col[2]*(0.16 + kd*0.78*ARM_LIGHT_COL[2] + fd*0.40*ARM_FILL_COL[2]) + 255*spec)|0;
     ctx.fillStyle = ctx.strokeStyle = `rgb(${r},${g2},${b})`;
     // ‼️ ox/oy are added HERE, not inside project(): the centring pass needs
     // the raw projected box first, and it only exists once every face has been
@@ -9053,7 +10130,13 @@ function wallsDraw(){
       const p1 = project(toView(centre(axis===0 ? [cx0+i*gridStep, cy0+gridN*gridStep, 0]
                                                  : [cx0+gridN*gridStep, cy0+i*gridStep, 0])));
       ctx.strokeStyle = (i===0) ? '#33333d' : '#1e1e24';
-      ctx.beginPath(); ctx.moveTo(p0[0]+ox, p0[1]+oy); ctx.lineTo(p1[0]+ox, p1[1]+oy); ctx.stroke();
+      // project() already bakes ox/oy in (it runs after they're set, unlike
+      // the wall faces below which were projected back when ox/oy were still
+      // 0) — adding them again here doubled the offset and pushed almost the
+      // whole grid off-canvas, leaving only the corner that happened to wrap
+      // back into view. Found while adding the robot trail, which had copied
+      // this same pattern and gone off-screen the same way.
+      ctx.beginPath(); ctx.moveTo(p0[0], p0[1]); ctx.lineTo(p1[0], p1[1]); ctx.stroke();
     }
   }
 
@@ -9075,6 +10158,28 @@ function wallsDraw(){
     ctx.fill();
     ctx.lineWidth = 0.6;
     ctx.stroke();
+  }
+
+  // Robot trail — drawn last (on top), no depth test against the walls: at
+  // floor height inside rooms that already-correct-looking painter's-order
+  // omission is not worth a depth buffer for a 2D line. project() already
+  // bakes ox/oy in at this point in the function (see the grid comment
+  // above) — do NOT add them again here.
+  if (robotTrail.length > 1){
+    ctx.strokeStyle = '#38bdf8';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    robotTrail.forEach(([x, y], i) => {
+      const p = project(toView(centre([x, y, 0.03])));
+      if (i === 0) ctx.moveTo(p[0], p[1]);
+      else ctx.lineTo(p[0], p[1]);
+    });
+    ctx.stroke();
+  }
+  if (pose){
+    const p = project(toView(centre([pose.x, pose.y, 0.05])));
+    ctx.fillStyle = '#f59e0b';
+    ctx.beginPath(); ctx.arc(p[0], p[1], 5, 0, Math.PI * 2); ctx.fill();
   }
 }
 
@@ -9506,6 +10611,13 @@ for(const [code, name] of LANGS){
 }
 safetyBuild();             // rows must exist before applyLang() translates them
 skirtBuild();
+micBuild();                // same reason: rows must exist first
+wakeModelBuild();
+// The map tab is the one active by default at load, unlike 'set' before it —
+// showTab() only refreshes on a CLICK, so the tab that starts already open
+// needs its own call or the card sits on "Φόρτωση…" until the user leaves and
+// comes back.
+mapsRefresh();
 usbBuild();                // same: the buttons carry translatable labels
 powerBuild();
 applyLang();               // also builds the tabs, so it precedes showTab()

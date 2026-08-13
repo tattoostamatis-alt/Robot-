@@ -1,3 +1,5 @@
+Panels:
+  []
 Visualization Manager:
   Class: ""
   Displays:
@@ -7,7 +9,7 @@ Visualization Manager:
       Color: 160; 160; 164
       Enabled: true
       Line Style:
-        Line Width: 0.03
+        Line Width: 0.029999999329447746
         Value: Lines
       Name: Grid
       Normal Cell Count: 0
@@ -19,8 +21,14 @@ Visualization Manager:
       Plane Cell Count: 10
       Reference Frame: <Fixed Frame>
       Value: true
-
-    - Alpha: 0.7
+    - Alpha: 0.699999988079071
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 10
+        Min Value: -10
+        Value: true
+      Axis: Z
+      Channel Name: intensity
       Class: rviz_default_plugins/LaserScan
       Color: 255; 0; 0
       Color Transformer: FlatColor
@@ -33,10 +41,9 @@ Visualization Manager:
       Min Intensity: 0
       Name: LiDAR Scan
       Position Transformer: XYZ
-      Queue Size: 10
       Selectable: true
       Size (Pixels): 3
-      Size (m): 0.01
+      Size (m): 0.009999999776482582
       Style: Points
       Topic:
         Depth: 5
@@ -48,8 +55,9 @@ Visualization Manager:
       Use Fixed Frame: true
       Use rainbow: true
       Value: true
-
-    - Alpha: 0.7
+    - Alpha: 0.699999988079071
+      Binary representation: false
+      Binary threshold: 100
       Class: rviz_default_plugins/Map
       Color Scheme: map
       Draw Behind: false
@@ -65,13 +73,11 @@ Visualization Manager:
       Update Topic:
         Depth: 5
         Durability Policy: Volatile
-        Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /map_updates
       Use Timestamp: false
       Value: true
-
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
       Name: Room Labels
@@ -81,46 +87,38 @@ Visualization Manager:
       Topic:
         Depth: 5
         Durability Policy: Transient Local
-        Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /room_markers
       Value: true
-
     - Class: rviz_default_plugins/Image
-      Enabled: true
+      Enabled: false
       Max Value: 1
       Median window: 5
       Min Value: 0
       Name: Camera RGB
       Normalize Range: true
-      Queue Size: 2
       Topic:
         Depth: 5
         Durability Policy: Volatile
-        Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Best Effort
         Value: /camera/camera/color/image_raw
-      Value: true
-
+      Value: false
     - Class: rviz_default_plugins/Image
-      Enabled: true
+      Enabled: false
       Max Value: 10
       Median window: 5
       Min Value: 0
       Name: Depth Image
       Normalize Range: true
-      Queue Size: 2
       Topic:
         Depth: 5
         Durability Policy: Volatile
-        Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Best Effort
         Value: /camera/camera/depth/image_rect_raw
-      Value: true
-
+      Value: false
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -141,22 +139,19 @@ Visualization Manager:
       Min Intensity: 0
       Name: Point Cloud (RealSense)
       Position Transformer: XYZ
-      Queue Size: 5
       Selectable: true
       Size (Pixels): 1
-      Size (m): 0.01
+      Size (m): 0.009999999776482582
       Style: Points
       Topic:
         Depth: 5
         Durability Policy: Volatile
-        Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Best Effort
         Value: /camera/camera/depth/color/points
       Use Fixed Frame: true
       Use rainbow: false
       Value: true
-
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -177,37 +172,72 @@ Visualization Manager:
       Min Intensity: 0
       Name: 3D Map (RTAB-Map)
       Position Transformer: XYZ
-      Queue Size: 5
       Selectable: true
       Size (Pixels): 2
-      Size (m): 0.02
+      Size (m): 0.019999999552965164
       Style: Points
       Topic:
         Depth: 5
         Durability Policy: Volatile
-        Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /cloud_map
       Use Fixed Frame: true
       Use rainbow: false
       Value: true
-
     - Class: rviz_default_plugins/TF
       Enabled: true
+      Filter (blacklist): ""
+      Filter (whitelist): ""
       Frame Timeout: 15
       Frames:
         All Enabled: true
+        arm_base:
+          Value: true
+        base_link:
+          Value: true
+        camera_color_frame:
+          Value: true
+        camera_color_optical_frame:
+          Value: true
+        camera_depth_frame:
+          Value: true
+        camera_depth_optical_frame:
+          Value: true
+        camera_link:
+          Value: true
+        imu_link:
+          Value: true
+        laser:
+          Value: true
+        map:
+          Value: true
+        odom:
+          Value: true
       Marker Scale: 0.5
       Name: TF
       Show Arrows: true
       Show Axes: true
       Show Names: true
       Tree:
-        {}
+        map:
+          odom:
+            base_link:
+              arm_base:
+                {}
+              camera_link:
+                camera_color_frame:
+                  camera_color_optical_frame:
+                    {}
+                camera_depth_frame:
+                  camera_depth_optical_frame:
+                    {}
+              imu_link:
+                {}
+              laser:
+                {}
       Update Interval: 0
       Value: true
-
     - Alpha: 1
       Class: rviz_default_plugins/RobotModel
       Collision Enabled: false
@@ -216,7 +246,6 @@ Visualization Manager:
       Description Topic:
         Depth: 5
         Durability Policy: Volatile
-        Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /robot_description
@@ -235,15 +264,16 @@ Visualization Manager:
       Update Interval: 0
       Value: true
       Visual Enabled: true
-
-    - Class: rviz_default_plugins/Path
+    - Alpha: 1
+      Buffer Length: 1
+      Class: rviz_default_plugins/Path
       Color: 0; 128; 255
       Enabled: true
-      Head Diameter: 0.3
-      Head Length: 0.2
-      Length: 0.3
+      Head Diameter: 0.30000001192092896
+      Head Length: 0.20000000298023224
+      Length: 0.30000001192092896
       Line Style: Lines
-      Line Width: 0.03
+      Line Width: 0.029999999329447746
       Name: Nav2 Path
       Offset:
         X: 0
@@ -251,10 +281,9 @@ Visualization Manager:
         Z: 0
       Pose Color: 255; 85; 255
       Pose Style: None
-      Queue Size: 10
-      Radius: 0.03
-      Shaft Diameter: 0.1
-      Shaft Length: 0.1
+      Radius: 0.029999999329447746
+      Shaft Diameter: 0.10000000149011612
+      Shaft Length: 0.10000000149011612
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -263,22 +292,43 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /plan
       Value: true
-
+    - Alpha: 1
+      Buffer Length: 1
+      Class: rviz_default_plugins/Path
+      Color: 255; 170; 0
+      Enabled: true
+      Head Diameter: 0.30000001192092896
+      Head Length: 0.20000000298023224
+      Length: 0.30000001192092896
+      Line Style: Lines
+      Line Width: 0.029999999329447746
+      Name: Robot Trail
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Pose Color: 255; 85; 255
+      Pose Style: None
+      Radius: 0.029999999329447746
+      Shaft Diameter: 0.10000000149011612
+      Shaft Length: 0.10000000149011612
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /robot_trail
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
     Fixed Frame: map
-    # 10, not 30. This RViz runs on a headless Xvnc with no GPU, so every frame
-    # is drawn by llvmpipe on the CPU — it was the single largest consumer on
-    # the machine at ~270% CPU, more than the whole rest of the stack. Nothing
-    # sees those 30 fps: the VNC stream and the dashboard's RViz tab both send
-    # far fewer, and a map/laser/costmap view has nothing that needs them.
-    # Measured 2026-08-02.
     Frame Rate: 10
   Name: root
   Tools:
     - Class: rviz_default_plugins/Interact
-      Hide Inactive Icon: false
+      Hide Inactive Objects: true
     - Class: rviz_default_plugins/MoveCamera
     - Class: rviz_default_plugins/Select
     - Class: rviz_default_plugins/FocusCamera
@@ -287,11 +337,10 @@ Visualization Manager:
     - Class: rviz_default_plugins/SetInitialPose
       Covariance x: 0.25
       Covariance y: 0.25
-      Covariance yaw: 0.06853891945200942
+      Covariance yaw: 0.06853891909122467
       Topic:
         Depth: 5
         Durability Policy: Volatile
-        Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /initialpose
@@ -299,7 +348,6 @@ Visualization Manager:
       Topic:
         Depth: 5
         Durability Policy: Volatile
-        Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /goal_pose
@@ -308,16 +356,19 @@ Visualization Manager:
       Topic:
         Depth: 5
         Durability Policy: Volatile
-        Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /clicked_point
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
   Value: true
   Views:
     Current:
+      Angle: -0.7749998569488525
       Class: rviz_default_plugins/TopDownOrtho
       Enable Stereo Rendering:
-        Stereo Eye Separation: 0.06
+        Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
@@ -330,18 +381,15 @@ Visualization Manager:
       X: 0
       Y: 0
     Saved: ~
-    Saved: ~
 Window Geometry:
   Camera RGB:
     collapsed: false
   Depth Image:
     collapsed: false
-  Displays:
-    collapsed: false
   Height: 900
   Hide Left Dock: false
   Hide Right Dock: false
-  QMainWindow State: 000000ff00000000fd000000040000000000000156000002d8fc020000000afb0000001200530065006c0065006300740069006f006e00000001e10000009b0000005c00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007300000002110000021a0000000000000000fb000000100044006900730070006c006100790073010000003d000002d8000000c900fffffffb0000002000730065006c0065006300740069006f006e00200077006900640067006500740100000138000000aa0000002600fffffffb0000000a0049006d0061006700650100000272000000cb00000000000000000000000a0043006100650072006100200052004700420001000002c900000000000000000000001c00430061006d0065007200610020004400650070007400680100000000000001500000000000000000000002f4000001b800fffffffa000000000100000002fb0000000a0056006900650077007300000000000000006b0000006b00fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e10000019600000003000004420000003efc0000000100000002fb0000000800540069006d00650100000000000004420000000000000000
-  Width: 1600
-  X: 0
-  Y: 0
+  QMainWindow State: 000000ff00000000fd0000000100000000000001400000032afc0200000002fb000000160044006500700074006800200049006d006100670065000000003d000001920000001600fffffffb0000001400430061006d006500720061002000520047004200000001d5000001920000001600ffffff000002f40000032a00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  Width: 756
+  X: 66
+  Y: 32

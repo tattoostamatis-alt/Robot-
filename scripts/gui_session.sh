@@ -7,8 +7,8 @@
 # port 8080 behind the one dashboard token. This script's only job is owning the
 # X displays and the app processes.
 #
-#   gui_session.sh start  rviz|moveit|gazebo|rtabmap
-#   gui_session.sh stop   rviz|moveit|gazebo|rtabmap
+#   gui_session.sh start  rviz|moveit|gazebo|rtabmap|rtabview
+#   gui_session.sh stop   rviz|moveit|gazebo|rtabmap|rtabview
 #   gui_session.sh status [app]        # prints "running <vnc_port>" or "stopped"
 #
 # Display map — RViz keeps :2 on purpose. `robot max` already starts :2 for the
@@ -17,10 +17,11 @@
 # Nav2 goal fail with planner error 208. So the dashboard attaches to the same
 # session rather than spawning a rival one.
 #
-#   rviz    :2  → 5902   (shared with the phone's RealVNC session)
-#   gazebo  :3  → 5903
-#   moveit  :4  → 5904
-#   rtabmap :5  → 5905
+#   rviz     :2  → 5902   (shared with the phone's RealVNC session)
+#   gazebo   :3  → 5903
+#   moveit   :4  → 5904
+#   rtabmap  :5  → 5905
+#   rtabview :7  → 5907   (read-only viewer for a SAVED snapshot, arg 3 = filename)
 
 set -u
 
@@ -46,15 +47,30 @@ VNCDIR=/home/dimi/.vnc
 SIM_DOMAIN_ID=77
 
 case "${2:-}" in
-  rviz)    DISP=2; GEOM=1600x900 ;;
-  gazebo)  DISP=3; GEOM=1600x900 ;;
-  moveit)  DISP=4; GEOM=1600x900 ;;
-  rtabmap) DISP=5; GEOM=1600x900 ;;
-  '')      [ "${1:-}" = status ] || { echo "usage: $0 {start|stop|status} {rviz|gazebo|moveit|rtabmap}" >&2; exit 2; } ;;
-  *)       echo "unknown app '${2}' (rviz|gazebo|moveit|rtabmap)" >&2; exit 2 ;;
+  rviz)     DISP=2; GEOM=1600x900 ;;
+  gazebo)   DISP=3; GEOM=1600x900 ;;
+  moveit)   DISP=4; GEOM=1600x900 ;;
+  rtabmap)  DISP=5; GEOM=1600x900 ;;
+  rtabview) DISP=7; GEOM=1600x900 ;;
+  '')       [ "${1:-}" = status ] || { echo "usage: $0 {start|stop|status} {rviz|gazebo|moveit|rtabmap|rtabview}" >&2; exit 2; } ;;
+  *)        echo "unknown app '${2}' (rviz|gazebo|moveit|rtabmap|rtabview)" >&2; exit 2 ;;
 esac
 APP="${2:-}"
 PORT=$((5900 + ${DISP:-0}))
+
+# rtabview needs a THIRD arg: which saved snapshot (see save_snapshot in
+# web_dashboard_node.py) to open. Read-only, its own process, its own display —
+# never touches the live `rtabmap` app's database or domain.
+RTAB_SAVED_DIR="/home/dimi/.home_robot/rtabmap/saved"
+if [ "$APP" = rtabview ] && [ "${1:-}" = start ]; then
+  SNAP_FILE="${3:-}"
+  case "$SNAP_FILE" in
+    '' | *[!A-Za-z0-9_.-]* )
+      echo "rtabview needs a valid snapshot filename as arg 3" >&2; exit 2 ;;
+  esac
+  SNAP_PATH="$RTAB_SAVED_DIR/$SNAP_FILE"
+  [ -f "$SNAP_PATH" ] || { echo "no such snapshot: $SNAP_FILE" >&2; exit 2; }
+fi
 
 # Per-app X session script. Each one sources ROS, starts a bare window manager
 # (openbox — without one, Qt dialogs come up undecorated and unmovable) and
@@ -155,6 +171,90 @@ set -m
 ros2 launch home_robot rtabmap.launch.py &
 echo \$! > "$VNCDIR/app-rtabmap.pgid"
 wait \$!
+EOF
+      ;;
+    rtabview)
+      # Read-only viewer for one SAVED snapshot (SNAP_PATH, validated above) —
+      # rtabmap-databaseViewer opens a .db file directly with no ROS launch at
+      # all, so this can never touch the live `rtabmap` app's database (which
+      # runs --delete_db_on_start) or interrupt an in-progress mapping session.
+      cat > "$f" <<EOF
+#!/bin/bash
+unset SESSION_MANAGER DBUS_SESSION_BUS_ADDRESS
+export LIBGL_ALWAYS_SOFTWARE=1
+source /opt/ros/jazzy/setup.bash
+openbox &
+( for _ in \$(seq 1 60); do
+    wmctrl -l 2>/dev/null | grep -q "RTAB-Map Database Viewer" && {
+      wmctrl -r "RTAB-Map Database Viewer" -b add,maximized_vert,maximized_horz; break; }
+    sleep 2
+  done
+  # Auto-drive to the assembled 3D point cloud. The tool's default view is
+  # per-frame "Constraints" (two camera images side by side) — useful for
+  # debugging matches, useless for "what does the room look like". Sequence
+  # verified by hand 2026-08-12 against this exact 1600x900 maximized layout:
+  #   View menu > 3D view (opens a docked 3D viewport, Cloud checkbox OFF by
+  #   default) > tick Cloud > Edit menu > View 3D map... (opens an "Export 3D
+  #   Clouds" settings dialog) > OK (assembles every frame into one cloud,
+  #   10-15s for a couple rooms).
+  #
+  # Tried also ticking Meshing here for a solid surface instead of a sparse
+  # cloud (genuinely clearer when it lands) — reverted 2026-08-12. Even with
+  # every click re-activating the window first, it silently no-op'd the
+  # Meshing checkbox on about half of repeated identical runs (point-cloud-
+  # only fallback, ~15s instead of ~130s, with no way to tell from outside
+  # the app that it happened) — no cheap way to verify a Qt widget's checked
+  # state from this script to retry on. Flaky automation of a "clearer" view
+  # is worse than reliable automation of an OK one; if this is revisited,
+  # the two extra clicks are in the git history of this file at this commit.
+  #
+  # ‼️ EVERY click below needs the window re-activated immediately first —
+  # measured 2026-08-12, a plain mousemove+click right after any menu/dialog
+  # opens silently no-ops about half the time otherwise (focus hasn't
+  # actually landed on the new widget yet even though it is on screen). This
+  # part reproduced reliably (2/2 clean runs) and is kept.
+  # Best-effort only: coordinates drift if this app ever changes its default
+  # layout, but nothing here is destructive — worst case the user lands on
+  # the plain per-frame view and can click through it by hand.
+  activate() { xdotool search --name "\$1" windowactivate 2>/dev/null; }
+  sleep 2
+  # A saved snapshot's embedded Core parameters can differ from this app's
+  # defaults (they will, for anything saved off the live robot's settings),
+  # which pops a blocking "Update parameters..." dialog BEFORE any menu is
+  # usable — every click below silently lands on/behind it otherwise. Only
+  # shows up sometimes (seen both ways across otherwise-identical runs, cause
+  # unclear), so poll a few times rather than assume either way.
+  for _ in \$(seq 1 5); do
+    wmctrl -l 2>/dev/null | grep -q "Update parameters" && {
+      activate "Update parameters"; sleep 1
+      xdotool mousemove 876 464 click 1; sleep 1; break; }
+    sleep 1
+  done
+  activate "RTAB-Map Database Viewer"; sleep 1
+  xdotool mousemove 93 31 click 1; sleep 1            # View menu
+  xdotool mousemove 127 205 click 1; sleep 2          # → 3D view
+  activate "RTAB-Map Database Viewer"; sleep 1
+  xdotool mousemove 69 272 click 1; sleep 1           # tick Cloud
+  activate "RTAB-Map Database Viewer"; sleep 1
+  xdotool mousemove 55 31 click 1; sleep 1            # Edit menu
+  xdotool mousemove 105 340 click 1; sleep 2          # → View 3D map...
+  activate "Export 3D Clouds"; sleep 1
+  xdotool mousemove 879 867 click 1                   # OK on the export dialog
+  # The assemble progress dialog is titled just "rtabmap-databaseViewer" (the
+  # bare binary name, not the main window's "RTAB-Map Database Viewer") and
+  # self-closes ("Close when done" is checked by default) — wait it out so a
+  # screenshot/VNC view taken right after this script returns shows the
+  # finished cloud. The initial sleep gives it time to actually appear first
+  # — otherwise the very next poll can run before the dialog exists, find no
+  # match, and the loop "finishes" immediately while assembly has barely
+  # started.
+  sleep 3
+  for _ in \$(seq 1 60); do
+    wmctrl -l 2>/dev/null | grep -q "rtabmap-databaseViewer" || break
+    sleep 2
+  done
+) &
+exec rtabmap-databaseViewer "$SNAP_PATH"
 EOF
       ;;
     gazebo)
@@ -291,7 +391,7 @@ case "${1:-}" in
     ;;
 
   *)
-    echo "usage: $0 {start|stop|status} {rviz|gazebo|moveit|rtabmap}" >&2
+    echo "usage: $0 {start|stop|status} {rviz|gazebo|moveit|rtabmap|rtabview}" >&2
     exit 2
     ;;
 esac

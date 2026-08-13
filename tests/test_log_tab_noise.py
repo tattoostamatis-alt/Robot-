@@ -126,15 +126,25 @@ _SUBS = {
 
 
 def _page_html():
+    from home_robot import arm_settings as arms
     from home_robot import collision_skirt as cs
+    from home_robot import mic_settings as ms
     from home_robot import safety_settings as ss
     html = _DASH.split('HTML_TEMPLATE = r"""', 1)[1].split('"""', 1)[0]
     subs = dict(_SUBS)
+    subs['__ARM_MECH_LIMITS__'] = json.dumps(
+        {j: list(v) for j, v in arms.MECH_LIMITS.items()})
     subs['__SAFETY_SPECS__'] = json.dumps(
         {s.key: {'kind': s.kind, 'def': s.default, 'lo': s.lo, 'hi': s.hi,
                  'step': s.step, 'warn_above': s.warn_above,
                  'warn_below': s.warn_below} for s in ss.SPECS})
     subs['__SAFETY_INFO__'] = json.dumps(ss.INFO_ONLY)
+    subs['__MIC_SPECS__'] = json.dumps(
+        {s.key: {'kind': s.kind, 'def': s.default, 'lo': s.lo, 'hi': s.hi,
+                 'step': s.step, 'warn_above': s.warn_above,
+                 'warn_below': s.warn_below} for s in ms.SPECS})
+    subs['__MIC_INFO__'] = json.dumps(ms.INFO_ONLY)
+    subs['__WAKE_MODEL_CHOICES__'] = json.dumps(ms.WAKE_MODEL_CHOICES)
     subs['__SKIRT_MARGINS__'] = json.dumps(cs.ALLOWED_MARGINS_MM)
     subs['__SKIRT_DEFAULT_MM__'] = json.dumps(cs.MARGIN_DEFAULT_MM)
     for token, value in subs.items():

@@ -95,6 +95,136 @@ TRANSLATIONS = {
 
     # ── arm pane ──────────────────────────────────────────────────────────
     'Αρθρώσεις':         ('Joints', 'Gelenke'),
+    'Όρια & ταχύτητα':   ('Limits & speed', 'Grenzen & Geschwindigkeit'),
+    'ταχύτητα':          ('speed', 'Geschwindigkeit'),
+    '(δεν τρέχει)':      ('(not running)', '(läuft nicht)'),
+    'Η ταχύτητα ρυθμίζει ΚΑΙ το χειριστήριο (jog) ΚΑΙ πόσο απότομα ξεκινούν '
+    'οι κινήσεις από εδώ — όχι το ανώτατο όριο του σερβοκινητήρα, που δεν '
+    'έχει μετρηθεί ασφαλές να ανέβει. Τα όρια των αρθρώσεων δεν μπορούν '
+    'ποτέ να ξεπεράσουν το μηχανικό όριο του σερβοκινητήρα.':
+        ('Speed here controls BOTH the joystick jog AND how sharply moves '
+         'from this panel start — not the servo\'s own top speed, which has '
+         'not been measured safe to raise. A joint\'s limits can never '
+         'exceed the servo\'s mechanical range.',
+         'Die Geschwindigkeit steuert HIER sowohl den Joystick-Jog ALS AUCH '
+         'wie ruckartig Bewegungen von diesem Panel starten — nicht die '
+         'Höchstgeschwindigkeit des Servos selbst, die nicht als sicher '
+         'gemessen wurde. Die Grenzen eines Gelenks können den mechanischen '
+         'Bereich des Servos nie überschreiten.'),
+    'Επαναφέρει τα όρια των αρθρώσεων ΚΑΙ την ταχύτητα στις μετρημένες '
+    'προεπιλογές. Να συνεχίσω;':
+        ('Resets the joint limits AND the speed to the measured defaults. '
+         'Continue?',
+         'Setzt die Gelenkgrenzen UND die Geschwindigkeit auf die '
+         'gemessenen Standardwerte zurück. Fortfahren?'),
+    # ── microphone settings + LED ring (sound pane) ─────────────────────────
+    'Ρυθμίσεις μικροφώνου': ('Microphone settings', 'Mikrofoneinstellungen'),
+    'Λέξη-αφύπνιση':      ('Wake word', 'Weckwort'),
+    'Οι επιλογές εκτός από «Έι ρομπότ» είναι έτοιμα αγγλικά μοντέλα του '
+    'openWakeWord — δουλεύουν αμέσως, χωρίς εκπαίδευση, αλλά είναι ονόματα '
+    'ΑΛΛΩΝ βοηθών (Alexa, Jarvis, ...), όχι δικά του. Για ένα εντελώς νέο '
+    'όνομα/φράση χρειάζεται να εκπαιδευτεί καινούργιο μοντέλο (':
+        ('The options other than "Hey robot" are ready-made English '
+         'openWakeWord models — they work immediately, with no training, '
+         'but they are OTHER assistants\' names (Alexa, Jarvis, ...), not '
+         'this robot\'s own. A completely new name/phrase needs a newly '
+         'trained model (',
+         'Die Optionen außer "Hey Robot" sind fertige englische '
+         'openWakeWord-Modelle — sie funktionieren sofort, ohne Training, '
+         'sind aber die Namen ANDERER Assistenten (Alexa, Jarvis, ...), '
+         'nicht die eigenen des Roboters. Ein völlig neuer Name/Ausdruck '
+         'braucht ein neu trainiertes Modell ('),
+    ') — δεν αλλάζει από εδώ.':
+        (') — not something this page changes.',
+         ') — wird hier nicht geändert.'),
+    'Έι ρομπότ (προεπιλογή, εκπαιδευμένο)':
+        ('Hey robot (default, trained)', 'Hey Robot (Standard, trainiert)'),
+    'Alexa (αγγλικό, χωρίς εκπαίδευση)':
+        ('Alexa (English, no training)', 'Alexa (Englisch, kein Training)'),
+    'Hey Jarvis (αγγλικό, χωρίς εκπαίδευση)':
+        ('Hey Jarvis (English, no training)', 'Hey Jarvis (Englisch, kein Training)'),
+    'Hey Mycroft (αγγλικό, χωρίς εκπαίδευση)':
+        ('Hey Mycroft (English, no training)', 'Hey Mycroft (Englisch, kein Training)'),
+    'Hey Marvin (αγγλικό, χωρίς εκπαίδευση)':
+        ('Hey Marvin (English, no training)', 'Hey Marvin (Englisch, kein Training)'),
+    'Ευαισθησία λέξης-αφύπνισης «Έι ρομπότ»':
+        ('Wake-word sensitivity ("Hey robot")',
+         'Empfindlichkeit des Weckworts ("Hey Robot")'),
+    'Πιο ψηλά = πιο δύσκολο να «ξυπνήσει» κατά λάθος· πιο χαμηλά = πιο εύκολο '
+    'να μην το προσέξει.':
+        ('Higher = harder to "wake" by accident; lower = easier to miss it.',
+         'Höher = schwerer aus Versehen zu "wecken"; niedriger = leichter, '
+         'es zu verpassen.'),
+    'Φιλτράρισμα χαμηλού θορύβου (ανεμιστήρας/ρεύμα)':
+        ('Low-noise filtering (fan/mains hum)',
+         'Rauschfilterung (Lüfter/Netzbrummen)'),
+    '0 = απενεργοποιημένο. Μεγαλύτερη τιμή κόβει πιο χαμηλές συχνότητες πριν '
+    'την ανίχνευση της λέξης-αφύπνισης — λιγότερα ψεύτικα ξυπνήματα από '
+    'θόρυβο.':
+        ('0 = disabled. A higher value cuts more low frequencies before '
+         'wake-word detection — fewer false wake-ups from noise.',
+         '0 = deaktiviert. Ein höherer Wert schneidet mehr tiefe Frequenzen '
+         'vor der Weckwort-Erkennung ab — weniger falsche Weckungen durch '
+         'Rauschen.'),
+    'Να διακόπτεται λέγοντας «Έι ρομπότ» ενώ μιλάει':
+        ('Interruptible by saying "Hey robot" while it talks',
+         'Unterbrechbar durch "Hey Robot" während es spricht'),
+    '‼️ Μετρήθηκε ότι 46 στις 81 «διακοπές» ήταν το ΙΔΙΟ το ηχείο του '
+    'ρομπότ, όχι άνθρωπος. Το ρομπότ το απενεργοποιεί ξανά μόνο του μετά '
+    'από 3 άδειες διακοπές στη σειρά.':
+        ('‼️ Measured: 46 of 81 "interruptions" were the robot\'s OWN '
+         'speaker, not a person. The robot disables it again by itself '
+         'after 3 empty interruptions in a row.',
+         '‼️ Gemessen: 46 von 81 "Unterbrechungen" waren der EIGENE '
+         'Lautsprecher des Roboters, keine Person. Der Roboter deaktiviert '
+         'es nach 3 leeren Unterbrechungen in Folge selbst wieder.'),
+    'Πόσο σίγουρο πρέπει να είναι για να δεχτεί τη διακοπή':
+        ('How sure it must be to accept the interruption',
+         'Wie sicher es sein muss, um die Unterbrechung zu akzeptieren'),
+    'Ευαισθησία έναρξης εγγραφής ομιλίας':
+        ('Sensitivity to start recording speech',
+         'Empfindlichkeit für den Aufnahmestart'),
+    '‼️ Ξαναμετριέται αυτόματα από τον θόρυβο του δωματίου σε κάθε '
+    'επανεκκίνηση — μια τιμή που αλλάζεις εδώ χάνεται στο επόμενο':
+        ('‼️ Automatically re-measured from room noise on every restart — '
+         'a value you change here is lost at the next',
+         '‼️ Wird bei jedem Neustart automatisch aus dem Raumgeräusch neu '
+         'gemessen — ein hier geänderter Wert geht beim nächsten verloren'),
+    'Χρήση του VAD του υλικού (XVF3800)':
+        ('Use the hardware VAD (XVF3800)', 'Hardware-VAD verwenden (XVF3800)'),
+    '🔇 Σίγαση μικροφώνου (privacy mode)':
+        ('🔇 Mute microphone (privacy mode)',
+         '🔇 Mikrofon stummschalten (Privatmodus)'),
+    'Κόβει την ανίχνευση λέξης-αφύπνισης ΚΑΙ την εγγραφή στην πηγή — το '
+    'ρομπότ δεν ακούει τίποτα όσο είναι ενεργό. Το δαχτυλίδι LED γίνεται '
+    'κόκκινο.':
+        ('Cuts wake-word detection AND recording at the source — the robot '
+         'hears nothing while this is on. The LED ring turns red.',
+         'Unterbindet Weckwort-Erkennung UND Aufnahme an der Quelle — der '
+         'Roboter hört nichts, solange dies aktiv ist. Der LED-Ring wird '
+         'rot.'),
+    '🔌 Power-cycle μικροφώνου':
+        ('🔌 Power-cycle the microphone', '🔌 Mikrofon Power-Cycle'),
+    'Επαναφορά όλων των ρυθμίσεων μικροφώνου στις προεπιλογές;':
+        ('Reset all microphone settings to defaults?',
+         'Alle Mikrofoneinstellungen auf Standard zurücksetzen?'),
+    'Γίνεται power-cycle…': ('Power-cycling…', 'Power-Cycle läuft…'),
+    'Δαχτυλίδι LED':      ('LED ring', 'LED-Ring'),
+    'Ενεργό δαχτυλίδι LED': ('LED ring on', 'LED-Ring aktiv'),
+    'Φωτεινότητα':        ('Brightness', 'Helligkeit'),
+    'Χρώμα δείκτη κατεύθυνσης (σε αναμονή)':
+        ('Direction-pointer colour (idle)', 'Richtungszeiger-Farbe (im Leerlauf)'),
+    'Χρώμα φόντου (σε αναμονή)':
+        ('Background colour (idle)', 'Hintergrundfarbe (im Leerlauf)'),
+    'Χρώμα όσο ακούει την εντολή':
+        ('Colour while listening to the command', 'Farbe während des Zuhörens'),
+    'Χρώμα όσο επεξεργάζεται (STT)':
+        ('Colour while processing (STT)', 'Farbe bei der Verarbeitung (STT)'),
+    'Χρώμα όσο είναι σε σίγαση':
+        ('Colour while muted', 'Farbe bei Stummschaltung'),
+    'Ανίχνευση ομιλίας (υλικό)':
+        ('Speech detected (hardware)', 'Sprache erkannt (Hardware)'),
+
     'Δαγκάνα':           ('Gripper', 'Greifer'),
     'άνοιγμα':           ('opening', 'Öffnung'),
     '✋ Άνοιγμα':         ('✋ Open', '✋ Öffnen'),
@@ -511,31 +641,37 @@ TRANSLATIONS = {
     'Ενεργοποίηση':      ('Activate', 'Aktivieren'),
     'επεκτάσιμος':       ('extendable', 'erweiterbar'),
     'χαρτογράφηση…':     ('mapping…', 'kartiere…'),
-    'Θα σταματήσει η πλοήγηση και θα ξαναξεκινήσουν όλα με τον χάρτη':
-        ('Navigation will stop and everything will restart with the map',
-         'Die Navigation stoppt und alles startet neu mit der Karte'),
-    'Διαρκεί περίπου 90 δευτερόλεπτα. Να συνεχίσω;':
-        ('It takes about 90 seconds. Continue?',
-         'Es dauert etwa 90 Sekunden. Fortfahren?'),
+    # Still used by the keepout/skirt-margin restart flows, which are still
+    # full-stack restarts (unlike the map switch/new below, hot-swapped since
+    # 2026-08-10).
     'Επανεκκίνηση… η σελίδα θα ξανασυνδεθεί μόνη της.':
         ('Restarting… the page will reconnect on its own.',
          'Neustart… die Seite verbindet sich von selbst wieder.'),
-    'Ξεκινά ΝΕΑ χαρτογράφηση (SLAM). Ο τρέχων χάρτης δεν χάνεται, αλλά ΟΛΑ '
-    'ξαναξεκινούν (~90 δευτερόλεπτα) και η πλοήγηση σταματά μέχρι να '
-    'αποθηκεύσεις τον καινούργιο. Να συνεχίσω;':
-        ('A NEW mapping run (SLAM) will start. The current map is not lost, '
-         'but EVERYTHING restarts (~90 seconds) and navigation stops until '
-         'you save the new one. Continue?',
+    'Αλλαγή στον χάρτη':
+        ('Switching to map', 'Wechsel zur Karte'),
+    'Ο εντοπισμός επανεκκινείται (λίγα δευτερόλεπτα) — η φωνή, η κάμερα και ο '
+    'βραχίονας ΔΕΝ διακόπτονται. Να συνεχίσω;':
+        ('Localization restarts (a few seconds) — voice, camera and the arm '
+         'are NOT interrupted. Continue?',
+         'Die Lokalisierung startet neu (wenige Sekunden) — Stimme, Kamera '
+         'und Arm werden NICHT unterbrochen. Fortfahren?'),
+    'Αλλαγή χάρτη…':
+        ('Switching map…', 'Kartenwechsel…'),
+    'Ξεκινά ΝΕΑ χαρτογράφηση (SLAM). Ο τρέχων χάρτης δεν χάνεται. Μόνο ο '
+    'εντοπισμός επανεκκινείται (λίγα δευτερόλεπτα) — η φωνή, η κάμερα και ο '
+    'βραχίονας ΔΕΝ διακόπτονται. Να συνεχίσω;':
+        ('A NEW mapping run (SLAM) will start. The current map is not lost. '
+         'Only localization restarts (a few seconds) — voice, camera and the '
+         'arm are NOT interrupted. Continue?',
          'Eine NEUE Kartierung (SLAM) beginnt. Die aktuelle Karte geht nicht '
-         'verloren, aber ALLES startet neu (~90 Sekunden) und die Navigation '
-         'stoppt, bis du die neue speicherst. Fortfahren?'),
-    'Επανεκκίνηση σε χαρτογράφηση… η σελίδα θα ξανασυνδεθεί μόνη της. '
-    'Μετά οδήγησε το ρομπότ σε όλο τον χώρο και αποθήκευσε.':
-        ('Restarting into mapping… the page will reconnect on its own. '
-         'Then drive the robot around the whole space and save.',
-         'Neustart in die Kartierung… die Seite verbindet sich von selbst '
-         'wieder. Fahre dann den Roboter durch den ganzen Raum und '
-         'speichere.'),
+         'verloren. Nur die Lokalisierung startet neu (wenige Sekunden) — '
+         'Stimme, Kamera und Arm werden NICHT unterbrochen. Fortfahren?'),
+    'Ξεκινά χαρτογράφηση… Οδήγησε το ρομπότ σε όλο τον χώρο και μετά '
+    'αποθήκευσε.':
+        ('Mapping starting… Drive the robot around the whole space and then '
+         'save.',
+         'Kartierung startet… Fahre den Roboter durch den ganzen Raum und '
+         'speichere dann.'),
     'Δώσε όνομα με λατινικά γράμματα, αριθμούς, - ή _':
         ('Use a name with Latin letters, digits, - or _',
          'Verwende einen Namen aus lateinischen Buchstaben, Ziffern, - oder _'),

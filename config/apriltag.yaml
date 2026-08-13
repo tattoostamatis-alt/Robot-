@@ -27,4 +27,4 @@
         tag:
             ids: [0, 1]
             frames: [saloni_tag, gripper_tag]
-            sizes: [0.13, 0.02]  # gripper_tag: measured black-square edge = 20 mm
+            sizes: [0.13, 0.03]  # gripper_tag: measured black-square edge = 30 mm

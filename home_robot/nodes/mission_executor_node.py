@@ -119,6 +119,28 @@ class MissionExecutorNode(Node):
         self.declare_parameter('place_timeout', 30.0)
         self.declare_parameter('fetch_max_retries', 1)       # approach+pick retries
         self.declare_parameter('inspect_settle', 2.5)        # s — let the detector stabilise
+        # Final-metres nudge: Nav2 parks fetch_approach_dist (0.4 m) from the
+        # object, but that's measured off a memory/search estimate, not the
+        # precise TF-based check pick_place_node makes once it can actually
+        # see the thing — live 2026-08-11, a slipper it drove up to came back
+        # 'out_of_reach' at 0.53 m vs. max_reach 0.45 m, an 8 cm miss well
+        # inside a safe blind creep. Mirrors llm_bridge_node.py's _pick_object
+        # approach loop (same cmd_vel_safe path, same speed), scaled down:
+        # fetch has already navigated close, so a big residual gap means
+        # something else is wrong and should fall through to re-search
+        # instead of creeping blindly across a room.
+        # ‼️ 0.5 was too tight: the live near-miss measured 0.51m and 0.53m
+        # across two tests, both just OVER a 0.5 cap, so _pick_approach_gap
+        # returned None and no nudge ever fired. 0.8 gives real headroom
+        # above the observed range while staying well under llm_bridge_node's
+        # 1.5 (that one covers a raw "object somewhere nearby", not a target
+        # Nav2 already parked next to).
+        self.declare_parameter('pick_approach_max', 0.8)     # m — beyond this, don't nudge, re-search instead
+        self.declare_parameter('pick_approach_margin', 0.7)  # fraction of reach to stop short at
+        self.declare_parameter('pick_approach_step', 0.15)   # m — max per nudge, re-measure between
+        self.declare_parameter('pick_approach_tries', 3)     # nudge/re-measure cycles before giving up
+        self.declare_parameter('pick_approach_timeout', 5.0) # s — hard cap on one open-loop drive
+        self.declare_parameter('pick_approach_settle', 2.0)  # s — wait for fresh detections after moving
         # Delivery: 'start_pose' returns to where the command was given; 'follow'
         # then homes in on the user's *current* position (they may have moved).
         self.declare_parameter('delivery_mode', 'start_pose')
@@ -156,6 +178,12 @@ class MissionExecutorNode(Node):
         self._sort_max_items      = self.get_parameter('sort_max_items').value
         self._sort_max_attempts   = self.get_parameter('sort_max_attempts').value
         self._sort_max_reach      = self.get_parameter('sort_max_reach').value
+        self._pick_approach_max     = self.get_parameter('pick_approach_max').value
+        self._pick_approach_margin  = self.get_parameter('pick_approach_margin').value
+        self._pick_approach_step    = self.get_parameter('pick_approach_step').value
+        self._pick_approach_tries   = self.get_parameter('pick_approach_tries').value
+        self._pick_approach_timeout = self.get_parameter('pick_approach_timeout').value
+        self._pick_approach_settle  = self.get_parameter('pick_approach_settle').value
 
         self._locations  = _load_locations()
         self._state      = State.IDLE
@@ -682,13 +710,62 @@ class MissionExecutorNode(Node):
         return memory_target(self._mem_value, now=self._now(), max_age=self._memory_max_age)
 
     def _do_pick(self, label: str, hold: bool) -> bool:
-        self._pick_event.clear()
-        self._pick_value = None
-        self._pick_pub.publish(String(data=json.dumps({'label': label, 'hold': hold})))
-        if not self._pick_event.wait(self._pick_timeout):
-            self._speak('Ο βραχίονας άργησε να απαντήσει.')
+        """One or more pick_command round trips, closing a small out_of_reach
+        gap with a blind forward nudge between tries (see pick_approach_*
+        params above) instead of giving up on the first refusal."""
+        for attempt in range(self._pick_approach_tries):
+            self._pick_event.clear()
+            self._pick_value = None
+            self._pick_pub.publish(String(data=json.dumps({'label': label, 'hold': hold})))
+            if not self._pick_event.wait(self._pick_timeout):
+                self._speak('Ο βραχίονας άργησε να απαντήσει.')
+                return False
+            result = self._pick_value or {}
+            if result.get('status') == 'ok':
+                return True
+            last = attempt == self._pick_approach_tries - 1
+            if result.get('status') != 'out_of_reach' or last or self._cancel_flag.is_set():
+                return False
+            gap = self._pick_approach_gap(result)
+            if gap is None:
+                return False
+            if not self._drive_forward_nudge(gap):
+                return False
+        return False
+
+    def _pick_approach_gap(self, result):
+        """How far to creep so the target lands inside the arm's envelope.
+
+        None when out_of_reach's distance exceeds pick_approach_max — fetch
+        has already navigated close, so a miss that large means the approach
+        pose itself was wrong (stale memory, bad localization), and the
+        caller's existing "not here" / re-search fallback is the right
+        response, not a blind drive across the room."""
+        distance, reach = result.get('distance'), result.get('max_reach')
+        if not isinstance(distance, (int, float)) or distance > self._pick_approach_max:
+            return None
+        reach = reach if isinstance(reach, (int, float)) else 0.45
+        want = max(0.0, distance - reach * self._pick_approach_margin)
+        return min(want, self._pick_approach_step)
+
+    def _drive_forward_nudge(self, metres):
+        """Blocking, open-loop nudge forward — same cmd_vel_safe path and
+        speed as llm_bridge_node.py's _drive_forward, kept separate because
+        the two nodes don't share a base class."""
+        speed = 0.1                                       # m/s, matches `move`
+        duration = min(metres / speed, self._pick_approach_timeout)
+        self.get_logger().info(f'pick approach: {metres:.2f} m ({duration:.1f} s)')
+        twist = Twist()
+        twist.linear.x = speed
+        end = time.monotonic() + duration
+        while time.monotonic() < end and not self._cancel_flag.is_set():
+            self._cmd_vel_pub.publish(twist)
+            time.sleep(0.05)
+        self._cmd_vel_pub.publish(Twist())
+        if self._cancel_flag.is_set():
             return False
-        return (self._pick_value or {}).get('status') == 'ok'
+        time.sleep(self._pick_approach_settle)
+        return True
 
     def _do_place(self) -> bool:
         self._place_event.clear()

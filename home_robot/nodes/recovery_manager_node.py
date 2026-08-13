@@ -95,6 +95,18 @@ class RecoveryManagerNode(Node):
         self.declare_parameter('reissue_max',            4)     # re-issues w/o progress before giving up
         self.declare_parameter('reissue_progress_dist',  0.25)  # m odom advance that resets the count
         self.declare_parameter('goal_max_age',           30.0)  # s — don't re-issue a stale plan endpoint
+        # _check_stuck can only fire while cmd_vel is actively commanded — it
+        # has nothing to watch when the planner refuses to produce a plan AT
+        # ALL from the robot's current pose (footprint wedged in a genuine
+        # inflation cell, not a stale costmap mark — clear_costmaps alone
+        # doesn't free that). bt_navigator's own number_of_recoveries feedback
+        # keeps climbing in that case with zero cmd_vel ever published; this
+        # is the threshold (recoveries, on the CURRENT goal, with cmd_vel
+        # never once active) before _on_nav_feedback escalates to the same
+        # nudge/backup _run_recovery uses. Found 2026-08-11 replaying a
+        # fetch_sim_gazebo run that looped "clearing costmaps too" #1-#15
+        # and never once nudged.
+        self.declare_parameter('planner_stuck_recoveries', 3)
 
         self._stuck_timeout   = self.get_parameter('stuck_timeout').value
         self._min_disp        = self.get_parameter('min_displacement').value
@@ -116,6 +128,7 @@ class RecoveryManagerNode(Node):
         self._reissue_max     = self.get_parameter('reissue_max').value
         self._reissue_prog    = self.get_parameter('reissue_progress_dist').value
         self._goal_max_age    = self.get_parameter('goal_max_age').value
+        self._planner_stuck_recoveries = self.get_parameter('planner_stuck_recoveries').value
 
         # Last global-plan endpoint = the goal we're driving to (map frame),
         # captured from /plan so re-issue works for any goal owner.
@@ -131,6 +144,11 @@ class RecoveryManagerNode(Node):
         self._cmd_active = False   # True when cmd_vel_smoothed magnitude > threshold
         self._cmd_active_since: float | None = None
         self._cmd_last_rx: float | None = None  # last cmd_vel_smoothed arrival
+        # Per-CURRENT-goal: has cmd_vel EVER gone active since bt_navigator
+        # started counting recoveries from 0? Reset on that edge in
+        # _on_nav_feedback, not on cmd_vel going idle — see _on_nav_feedback.
+        self._cmd_ever_active_this_goal = False
+        self._planner_stuck_triggered = False  # one escalation per goal attempt
         self._status = STATUS_IDLE
         self._cancelled = False    # set by /mission/cancel; see _on_cancel
         # Goal handle of the Nav2 behavior currently running, so a cancel can
@@ -224,6 +242,8 @@ class RecoveryManagerNode(Node):
         now = self.get_clock().now().nanoseconds / 1e9
         with self._lock:
             self._cmd_last_rx = now
+            if active:
+                self._cmd_ever_active_this_goal = True
             if active and not self._cmd_active:
                 self._cmd_active = True
                 self._cmd_active_since = now
@@ -273,6 +293,15 @@ class RecoveryManagerNode(Node):
             if self._last_goal is not None:
                 self._last_goal_rx = self.get_clock().now().nanoseconds / 1e9
         n = msg.feedback.number_of_recoveries
+        if n == 0 and self._last_num_recoveries != 0:
+            # bt_navigator numbers recoveries from 0 for every NEW
+            # NavigateToPose goal — this edge is the per-goal reset point.
+            # _on_plan's reset can't be used here: /plan only republishes on
+            # a SUCCESSFUL compute_path_to_pose, so a goal whose planner
+            # never once succeeds (the exact case below) never fires it.
+            with self._lock:
+                self._cmd_ever_active_this_goal = False
+            self._planner_stuck_triggered = False
         if self._last_num_recoveries is not None and n > self._last_num_recoveries:
             # bt_navigator's own RoundRobin clears costmaps on only 1 of its 5
             # recovery branches (BackUp/DriveOnHeading/Spin/Wait are the other
@@ -283,6 +312,22 @@ class RecoveryManagerNode(Node):
             self.get_logger().info(f'bt_navigator recovery #{n} — clearing costmaps too')
             threading.Thread(target=self._clear_costmaps, daemon=True).start()
         self._last_num_recoveries = n
+
+        # Planner-only failure: costmap-clearing above fixes a STALE mark, but
+        # a footprint genuinely wedged in a real inflation cell just keeps
+        # failing to plan — with cmd_vel NEVER active, _check_stuck has
+        # nothing to trigger on, so nothing ever escalates to the physical
+        # nudge/backup that would actually free it. One escalation per goal
+        # attempt (_planner_stuck_triggered, reset on the n==0 edge above).
+        with self._lock:
+            never_moved = not self._cmd_ever_active_this_goal
+        if (self._enabled and self._status == STATUS_IDLE
+                and not self._planner_stuck_triggered
+                and never_moved and n >= self._planner_stuck_recoveries):
+            self._planner_stuck_triggered = True
+            self._declare_stuck(
+                f'{n} bt_navigator recoveries on this goal, cmd_vel never active '
+                f'(planner refuses to start a plan)')
 
     def _on_cancel(self, _msg: String):
         """Someone cancelled the navigation. Forget the goal; do not resume it.
@@ -346,15 +391,22 @@ class RecoveryManagerNode(Node):
         disp = math.sqrt((max(xs) - min(xs))**2 + (max(ys) - min(ys))**2)
 
         if disp < self._min_disp:
-            self.get_logger().warn(
-                f'STUCK detected — {elapsed:.1f}s with cmd_vel, displacement={disp:.3f}m'
-            )
-            self._status = STATUS_STUCK
-            self._publish_status(STATUS_STUCK)
-            self._cancelled = False     # a new pinch, not the cancelled one
-            threading.Thread(
-                target=self._run_recovery, args=(self._max_attempts,), daemon=True
-            ).start()
+            self._declare_stuck(f'{elapsed:.1f}s with cmd_vel, displacement={disp:.3f}m')
+
+    def _declare_stuck(self, reason: str):
+        """Shared entry point for both stuck-detection paths.
+
+        _check_stuck (cmd_vel active but no displacement) and _on_nav_feedback
+        (planner never even produces a cmd_vel) both land here so there is
+        exactly one place that flips STATUS_STUCK and kicks off _run_recovery.
+        """
+        self.get_logger().warn(f'STUCK detected — {reason}')
+        self._status = STATUS_STUCK
+        self._publish_status(STATUS_STUCK)
+        self._cancelled = False     # a new pinch, not the cancelled one
+        threading.Thread(
+            target=self._run_recovery, args=(self._max_attempts,), daemon=True
+        ).start()
 
     # ── Recovery sequence ────────────────────────────────────────────
 
