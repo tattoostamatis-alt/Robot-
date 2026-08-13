@@ -173,15 +173,15 @@ Visualization Manager:
       Name: 3D Map (RTAB-Map)
       Position Transformer: XYZ
       Selectable: true
-      Size (Pixels): 2
-      Size (m): 0.019999999552965164
-      Style: Points
+      Size (Pixels): 3
+      Size (m): 0.029999999329447746
+      Style: Flat Squares
       Topic:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /cloud_map
+        Value: /rtabmap/cloud_map
       Use Fixed Frame: true
       Use rainbow: false
       Value: true
@@ -365,21 +365,26 @@ Visualization Manager:
   Value: true
   Views:
     Current:
-      Angle: -0.7749998569488525
-      Class: rviz_default_plugins/TopDownOrtho
+      Class: rviz_default_plugins/Orbit
+      Distance: 8
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+      Focal Shape Fixed Size: true
+      Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Scale: 52.35987854003906
+      Pitch: 0.7853981852531433
       Target Frame: <Fixed Frame>
-      Value: TopDownOrtho (rviz_default_plugins)
-      X: 0
-      Y: 0
+      Value: Orbit (rviz_default_plugins)
+      Yaw: 0.7853981852531433
     Saved: ~
 Window Geometry:
   Camera RGB:

@@ -67,6 +67,7 @@ def generate_launch_description():
     use_tts       = LaunchConfiguration('use_tts',       default='false')
     use_rtabmap   = LaunchConfiguration('use_rtabmap',   default='false')
     use_explore   = LaunchConfiguration('use_explore',   default='false')
+    use_nav2      = LaunchConfiguration('use_nav2',      default='true')
     use_obstacle_safety = LaunchConfiguration('use_obstacle_safety', default='true')
     obstacle_safety_distance = LaunchConfiguration('obstacle_safety_distance', default='0.5')
     # ‼️ Default TRUE. bringup on its own is the MAPPING launch (use_slam
@@ -568,17 +569,20 @@ def generate_launch_description():
                 'autostart':    'true',
             }.items(),
         ),
-    ])
+    ], condition=IfCondition(use_nav2))
 
     # Self-heal: 60s after launch, configure+activate any nav server that is
     # not active (see 2026-07-03 incident: behavior_server/velocity_smoother/
     # collision_monitor came up inactive under boot load). No-op when healthy.
+    # Skipped along with nav2_node itself when use_nav2:=false — there is
+    # nothing for it to activate, and the script would just fail every 60s.
     nav2_ensure_active = TimerAction(
         period=60.0,
         actions=[ExecuteProcess(
             cmd=['bash', PathJoinSubstitution([pkg, 'scripts', 'ensure_nav_active.sh'])],
             output='screen',
         )],
+        condition=IfCondition(use_nav2),
     )
 
     # ── Keepout zones (use_keepout, default false) ──────────────────
@@ -1402,6 +1406,11 @@ def generate_launch_description():
         DeclareLaunchArgument('use_tts',       default_value='false'),
         DeclareLaunchArgument('use_rtabmap',   default_value='false'),
         DeclareLaunchArgument('use_explore',   default_value='false'),
+        DeclareLaunchArgument('use_nav2',      default_value='true',
+            description='Nav2 (controller/planner/bt_navigator/etc). Every '
+                        'existing caller gets true unchanged; false is for a '
+                        'sensors+SLAM+RViz-only run with no navigation stack '
+                        'competing for CPU.'),
         DeclareLaunchArgument('use_joy',       default_value='true'),
         DeclareLaunchArgument('joy_device_name',
                               default_value='DualSense Wireless Controller'),

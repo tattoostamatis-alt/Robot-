@@ -6,11 +6,11 @@ teleop_twist_joy_node:
     axis_linear:
       x: 1      # left stick vertical (up = forward)
     scale_linear:
-      x: 0.50   # 2026-07-28: user asked for flat-out driving. 0.50 is the
-                # Roomba's mechanical ceiling (500 mm/s in the OI), so there is
-                # nothing above this — the driver would clamp it anyway.
-                # ‼️ For MAPPING runs drop back to 0.10 (RUNBOOK_remap): driving
-                # this fast smears the walls and ruins the map.
+      x: 0.10   # Dropped from 0.50 (flat-out) for this mapping session — the
+                # ‼️ note right here said fast driving smears the walls, and
+                # that is exactly what showed up: point-cloud spikes shooting
+                # out past the real room boundary. Put back to 0.50 when
+                # you're done mapping and just want to drive normally.
     scale_linear_turbo:
       x: 0.50
 

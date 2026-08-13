@@ -76,6 +76,8 @@ def _setup(context, *args, **kwargs):
     localization = LaunchConfiguration('localization').perform(context).lower() in ('true', '1')
     detect_rate = LaunchConfiguration('detection_rate').perform(context)
     use_viz     = LaunchConfiguration('use_viz').perform(context).lower() in ('true', '1')
+    depth_decim = LaunchConfiguration('depth_decimation').perform(context)
+    cell_size   = LaunchConfiguration('cell_size').perform(context)
 
     os.makedirs(os.path.dirname(os.path.expanduser(db_path)), exist_ok=True)
 
@@ -131,15 +133,31 @@ def _setup(context, *args, **kwargs):
         'Reg/Strategy':               '1' if use_scan else '0',   # 1 = ICP w/ scan
         'Optimizer/Slam2D':           'true',
         'Mem/STMSize':                '30',
-        # 3D occupancy from the depth cloud, decimated: full resolution is 640x480
-        # points per keyframe and the export becomes unusable on this machine.
-        'Grid/FromDepth':             'true',
+        # ‼️ Grid/Sensor is what actually picks the occupancy-grid/cloud source
+        # (0 = scan only, 1 = depth only, 2 = both) — Grid/FromDepth does NOT
+        # exist on this rtabmap_ros version and was silently ignored (same
+        # dead-param trap as cloud_decimation earlier). Left at its default 0
+        # for two mapping sessions, every point in /cloud_map, /cloud_obstacles
+        # and /cloud_ground came out at Z=0.00 — a flat re-publish of the 2D
+        # LiDAR ring, no furniture, because the D435 depth was never actually
+        # feeding the grid despite Grid/3D=true. 2 = fuse both; the scan still
+        # keeps corridors square (see Reg/Strategy above), the depth is what
+        # gives the cloud real height.
+        'Grid/Sensor':                '2',
         'Grid/3D':                    'true',
-        'Grid/CellSize':              '0.05',
+        'Grid/CellSize':              cell_size,
         'Grid/RangeMax':              '4.0',    # D435 depth is noise past ~4 m
-        'Grid/DepthDecimation':       '2',
+        'Grid/DepthDecimation':       depth_decim,
         'Grid/MaxObstacleHeight':     '2.0',
         'Grid/RayTracing':            'true',
+        # Grid/Sensor:=2 (above) measured at 0.8-2.0s per keyframe against the
+        # 1s budget — the mini PC could not keep up, so keyframes fell behind
+        # in real time and the driven area came out with visible gaps between
+        # them ("sparse dots"). Depth noise floats a haze of stray points
+        # around every real surface too, worse at range. Both show up as
+        # exactly what was reported: sparse AND foggy at once.
+        'Grid/NoiseFilteringRadius':  '0.05',
+        'Grid/NoiseFilteringMinNeighbors': '5',
         'Vis/MinInliers':             '15',
     }
 
@@ -159,6 +177,19 @@ def _setup(context, *args, **kwargs):
             }],
             remappings=remaps,
             arguments=args,
+        ),
+        # publish_tf is False (RULE 1), so /rtabmap/cloud_map arrives stamped
+        # in `rtabmap_map` with no transform to anywhere else — invisible in
+        # any viewer using the live TF tree (RViz's robot.rviz included).
+        # Since map_frame_id tracks odom_frame_id (=anchor) with no drift
+        # correction of its own, `rtabmap_map` and `anchor` are the SAME frame
+        # by construction: a one-time identity static transform is exact, not
+        # an approximation, and — unlike publish_tf:=true — it is a new leaf
+        # under `anchor`, never the map->odom edge AMCL/slam_toolbox own.
+        Node(
+            package='tf2_ros', executable='static_transform_publisher',
+            name='rtabmap_map_anchor',
+            arguments=['--frame-id', anchor, '--child-frame-id', 'rtabmap_map'],
         ),
     ]
 
@@ -201,5 +232,20 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'use_viz', default_value='true',
             description='Also start rtabmap_viz (the Qt GUI the tab streams).'),
+        DeclareLaunchArgument(
+            'depth_decimation', default_value='2',
+            description='Grid/DepthDecimation — pixel skip per axis on the '
+                        'D435 depth frame when building the 3D cloud/grid. '
+                        '1 = full 640x480 per keyframe measured at 0.8-2.0s '
+                        'per keyframe on this machine with Grid/Sensor:=2 — '
+                        'over the 1s/keyframe budget, so keyframes fell '
+                        'behind and the driven path came out with visible '
+                        'gaps. 2 is the affordable default; drop to 1 only '
+                        'if the machine is otherwise idle.'),
+        DeclareLaunchArgument(
+            'cell_size', default_value='0.02',
+            description='Grid/CellSize — voxel size of /cloud_map in metres. '
+                        'Smaller = denser point cloud, more CPU/RAM per '
+                        'keyframe and a heavier topic to stream.'),
         OpaqueFunction(function=_setup),
     ])
