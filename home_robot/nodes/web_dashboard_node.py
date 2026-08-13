@@ -27,6 +27,7 @@ import re
 import base64
 import json
 import math
+import glob
 import os
 import secrets
 import socket
@@ -4163,6 +4164,32 @@ def _map_pgm_path(name: str) -> Optional[str]:
     return None
 
 
+def _delete_map(name: str) -> int:
+    """Remove every file this map's name owns: the core yaml/pgm/slam-toolbox
+    pair, its per-map rooms (room_files.py) and keepout zones
+    (keepout_files.py), its low-res Gazebo companion (map_downsample.py,
+    "<name>_lo.*"), and any straighten-apply .bak snapshots. Returns how many
+    files were actually removed, so the route can tell "nothing here" apart
+    from "deleted".
+    """
+    patterns = [
+        name + '.yaml', name + '.pgm', name + '.data', name + '.posegraph',
+        name + '_room_mask.png', name + '_room_colors.yaml',
+        name + '_keepout_zones.yaml',
+        name + '_lo.yaml', name + '_lo.pgm',
+        name + '.pgm.bak-*',
+    ]
+    removed = 0
+    for pat in patterns:
+        for path in glob.glob(os.path.join(SRC_MAPS_DIR, pat)):
+            try:
+                os.remove(path)
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
 @app.get('/maps/straighten/{name}')
 async def maps_straighten_preview(request: Request, name: str, t: str = ''):
     """Side-by-side PNGs of the saved map as-is and cosmetically straightened —
@@ -4299,16 +4326,52 @@ async def rtabmap_saved(request: Request, t: str = ''):
             'snapshots': snaps}
 
 
+@app.get('/rtabmap/delete/{name}')
+async def rtabmap_delete(request: Request, name: str, t: str = ''):
+    """Remove one saved 3D-map snapshot (see /rtabmap/saved). Same filename
+    whitelist as the rtabview GUI route, since this also reaches a file path.
+    """
+    if not _authorised(t, request.cookies):
+        return JSONResponse({'error': 'unauthorized'}, status_code=401)
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+\.db', name):
+        return JSONResponse({'error': 'bad snapshot filename'}, status_code=400)
+    path = os.path.join(RTAB_SAVED_DIR, name)
+
+    def remove():
+        try:
+            os.remove(path)
+            return True
+        except OSError:
+            return False
+
+    ok = await asyncio.to_thread(remove)
+    if not ok:
+        return JSONResponse({'error': f'no such snapshot: {name}'}, status_code=404)
+    return {'name': name, 'ok': True}
+
+
 @app.get('/maps/{action}/{name}')
 async def maps_action(request: Request, action: str, name: str, t: str = ''):
     if not _authorised(t, request.cookies):
         return JSONResponse({'error': 'unauthorized'}, status_code=401)
     # Names go into a shell command and a file path, so they are whitelisted
     # rather than escaped.
-    if action not in ('switch', 'save', 'new') or not re.fullmatch(r'[A-Za-z0-9_-]{1,40}', name):
+    if action not in ('switch', 'save', 'new', 'delete') or not re.fullmatch(r'[A-Za-z0-9_-]{1,40}', name):
         return JSONResponse({'error': 'bad request'}, status_code=400)
-    if action == 'switch' and name not in {m['name'] for m in _list_maps()}:
+    if action in ('switch', 'delete') and name not in {m['name'] for m in _list_maps()}:
         return JSONResponse({'error': f'no such map: {name}'}, status_code=404)
+
+    if action == 'delete':
+        # Deleting the active map would leave map_server/AMCL pointed at
+        # files that vanish out from under them — force a switch first,
+        # same rule the "Ενεργοποίηση" button already enforces the other way.
+        active = await asyncio.to_thread(ros_node.active_map) if ros_node else None
+        if name == active:
+            return JSONResponse({'error': 'cannot delete the active map'},
+                                 status_code=400)
+        removed = await asyncio.to_thread(_delete_map, name)
+        return {'action': action, 'name': name, 'ok': removed > 0,
+                'result': f'{removed} files removed'}
 
     args = ['bash', MAP_SESSION_SH, action]
     if action != 'new':
@@ -6648,6 +6711,12 @@ async function rtabSavedRefresh(){
       viewBtn.textContent = t('👁 Προβολή');
       viewBtn.onclick = () => rtabViewOpen(s.name, viewBtn);
       row.appendChild(viewBtn);
+      const delBtn = document.createElement('button');
+      delBtn.className = 'btn';
+      delBtn.textContent = '🗑';
+      delBtn.title = t('Διαγραφή χάρτη');
+      delBtn.onclick = () => rtabSnapshotDelete(s.name);
+      row.appendChild(delBtn);
       box.appendChild(row);
     }
   }
@@ -6657,6 +6726,18 @@ function rtabSavePoll(){
   const msg = $('rt-save-msg');
   if (msg) msg.textContent = t('Αποθήκευση σε εξέλιξη…');
   setTimeout(rtabSavedRefresh, 1000);
+}
+
+async function rtabSnapshotDelete(name){
+  if(!confirm(t('Διαγραφή; ') + name)) return;
+  const msg = $('rt-save-msg');
+  if (msg) msg.textContent = t('Διαγραφή…');
+  try {
+    const r = await (await fetch('/rtabmap/delete/' + encodeURIComponent(name)
+                                 + (TOKEN_QS || ''))).json();
+    if (msg) msg.textContent = r.ok ? '' : t('Απέτυχε') + ': ' + (r.error || '');
+  } catch(e){ if (msg) msg.textContent = t('Απέτυχε') + ': ' + e; }
+  rtabSavedRefresh();
 }
 
 // Opens a SAVED snapshot (read-only, its own process/display — see the
@@ -9559,6 +9640,13 @@ async function mapsRefresh(){
     clean.title = t('Καθαρή εκδοχή');
     clean.onclick = () => mapStraightenPreview(m.name);
     row.appendChild(clean);
+    if(!isActive){
+      const del = document.createElement('button');
+      del.className = 'btn'; del.textContent = '🗑';
+      del.title = t('Διαγραφή χάρτη');
+      del.onclick = () => mapDelete(m.name);
+      row.appendChild(del);
+    }
     box.appendChild(row);
   }
 }
@@ -9580,6 +9668,17 @@ async function mapSwitch(name){
   // which does not retry itself — a second, later attempt catches that.
   setTimeout(wallsReload, 10000);
   setTimeout(wallsReload, 16000);
+}
+
+async function mapDelete(name){
+  if(!confirm(t('Διαγραφή; ') + name)) return;
+  mapMsg(t('Διαγραφή…'));
+  try {
+    const r = await (await fetch('/maps/delete/' + encodeURIComponent(name)
+                                 + (TOKEN_QS || ''))).json();
+    mapMsg(r.ok ? t('Διαγράφηκε') + ': ' + name : t('Απέτυχε') + ': ' + (r.error || ''));
+  } catch(e){ mapMsg(t('Απέτυχε') + ': ' + e); }
+  mapsRefresh();
 }
 
 // The 3D view caches wallsModel forever once loaded (wallsLoad() is a

@@ -468,6 +468,8 @@ TRANSLATIONS = {
          'liest die Zonen nur beim Start.'),
     'Προσθήκη…':          ('Adding…', 'Hinzufügen…'),
     'Διαγραφή…':          ('Deleting…', 'Lösche…'),
+    'Διαγράφηκε':         ('Deleted', 'Gelöscht'),
+    'Διαγραφή χάρτη':     ('Delete map', 'Karte löschen'),
     'Θα επανεκκινήσει όλη τη στοίβα (~90 δευτερόλεπτα) με τις απαγορευμένες '
     'ζώνες ενεργές. Να συνεχίσω;':
         ('This will restart the whole stack (~90 seconds) with keepout zones '
