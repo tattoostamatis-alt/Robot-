@@ -455,14 +455,16 @@ class STTNode(Node):
                     self._sil_count += 1
                 else:
                     self._sil_count = 0
-                # One-directional on purpose: the VAD may only EXTEND a
-                # recording, never end one. If the DSP still hears speech while
-                # the energy dipped (a quiet syllable, the user turning away),
-                # keep the window open. The reverse — letting it cut — would
-                # truncate people mid-sentence, and the energy threshold plus
-                # max_record_seconds already bound the recording.
-                if self._vad_on and self._vad_trustworthy():
-                    self._sil_count = 0
+                # 2026-08-13: the VAD used to also reset _sil_count on its own
+                # ("may only EXTEND a recording, never end one"), so the DSP's
+                # speech flag alone could keep a turn open. Live on this
+                # hardware it flips True/False constantly even at rest — see
+                # project memory — so that reset fired on nearly every chunk
+                # and every recording rode out to max_record_seconds instead of
+                # ending on silence_limit. Silence is now decided by energy
+                # alone; the VAD still gates the START of a recording (energy
+                # AND vad must agree there), which is the check that was
+                # actually validated live.
 
                 if (self._sil_count  >= self._silence_limit_chunks or
                         len(self._record_buf) >= self._max_chunks):
