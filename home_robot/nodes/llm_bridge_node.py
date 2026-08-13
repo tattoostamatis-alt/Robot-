@@ -47,10 +47,12 @@ from home_robot import arm_motion
 from home_robot import llm_quota
 from home_robot.status_query import (ROOM_NAMES_EL, format_location,
                                      format_status, is_location_query,
-                                     is_status_query, wants_battery)
+                                     is_status_query, rooms_from_locations,
+                                     wants_battery)
 from home_robot.motion_confirm import (MOTION_TOOLS, PENDING_TTL,
                                        confirm_question, is_affirmative,
                                        is_negative)
+from home_robot.simple_commands import parse_arm_command, parse_simple_motion
 from home_robot.stop_command import is_stop_command, strip_accents
 from home_robot.tool_router import select_tools
 from home_robot.vocabulary import (greek_accusative, greek_for,
@@ -1093,6 +1095,31 @@ class LLMBridgeNode(Node):
             reply = format_location(self._current_room)
             self.get_logger().info(f'Max: {reply}')
             self.response_pub.publish(String(data=reply))
+            return
+
+        # Bare goto/move/turn/arm, ahead of the LLM for latency (see
+        # simple_commands.py). Unlike these same tools called by the model,
+        # a match here skips motion_confirm too — the phrasing is narrow and
+        # verb-anchored enough not to be the overheard-conversation shape
+        # confirm_motion exists for. Takes the busy lock like a status query:
+        # a real action, so it must not interleave with one already running.
+        simple = (parse_arm_command(text)
+                  or parse_simple_motion(text, rooms_from_locations(self.locations)))
+        if simple is not None and self._busy.acquire(blocking=False):
+            name, args = simple
+            self.get_logger().info(f'Simple motion command (keyword gate): {text} -> {name}{args}')
+
+            def _run():
+                try:
+                    self._motion_confirmed = True
+                    result = self._dispatch_tool(name, args)
+                finally:
+                    self._motion_confirmed = False
+                    self._busy.release()
+                self.get_logger().info(f'{name} -> {result}')
+                self._speak_dispatch_result(name, result)
+
+            threading.Thread(target=_run, daemon=True).start()
             return
 
         if not self._busy.acquire(blocking=False):
