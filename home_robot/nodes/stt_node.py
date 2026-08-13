@@ -40,7 +40,15 @@ class STTNode(Node):
         # clip (int8, 8 threads): large-v3 beam5 11.7 s vs medium beam5 4.6 s
         # (~2.5x faster) with identical transcription. large-v3 stays available
         # via `model_size:=large-v3` if a hard Greek clip needs the accuracy.
-        self.declare_parameter('model_size',        'medium')
+        # 2026-08-13: switched default to large-v3-turbo (distilled 4-layer
+        # decoder — close to medium's latency, closer to large-v3's accuracy).
+        # NOT YET HW-verified on real speech: an attempt to test it by having
+        # the robot TTS a sentence to itself and recording mic/audio failed
+        # because ch0 runs through XVF3800 AEC (ch5 reference), which cancels
+        # the robot's own speaker output before it reaches this topic — the
+        # capture was near-silent and both models hallucinated on it. A real
+        # accuracy check needs an actual human voice near the mic.
+        self.declare_parameter('model_size',        'large-v3-turbo')
         # 8 threads is the sweet spot on this 16-core CPU (~25% faster than the
         # ctranslate2 default of ~4; 12+ regresses from oversubscription). YOLO
         # moved off the CPU to the iGPU, so these cores are free during STT.
