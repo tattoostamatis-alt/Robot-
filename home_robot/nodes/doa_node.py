@@ -13,7 +13,8 @@ Topics published:
 
 Topics subscribed:
   /wake_word    (String)  — triggers LISTENING LED state (+ turn, only if armed)
-  /speech_text  (String)  — transitions LED back to IDLE
+  /stt/state    (String)  — 'processing' when recording ends (Whisper started),
+                            'idle' when the turn is fully done (any outcome)
   /doa/rotate_enable (Bool) — the dashboard's switch; arms/disarms the turn
   /emergency_stop    (Bool) — latched; never turn while it is set
 
@@ -24,9 +25,17 @@ is not a command.
 
 LED states:
   IDLE       — DoA mode (mode=4): 1 LED points toward detected speaker
-  LISTENING  — breath blue: robot is recording the command
-  PROCESSING — breath orange: Whisper is transcribing
-  IDLE again — DoA mode resumes after speech_text or timeout
+  LISTENING  — breath blue: robot is actively recording the command
+  PROCESSING — breath orange: recording ended, Whisper is transcribing
+  IDLE again — DoA mode resumes once stt/state says 'idle', or on timeout
+
+2026-08-13: LISTENING used to only end on /speech_text, which fires after
+Whisper finishes — so the blue "still recording you" light stayed on through
+the whole ~2-9s transcription too, well after the user stopped talking (empty
+transcriptions never even fired it, leaving LISTENING on until the timeout).
+stt_node now publishes stt/state='processing' the instant recording actually
+ends (silence or max length), so PROCESSING (orange) starts right when the
+person stops talking, and 'idle' fires uniformly for every turn outcome.
 
 DoA convention (XVF3800): 0° = front of device, increases clockwise.
 ROS angular.z positive = counter-clockwise — rotation is negated accordingly.
@@ -263,8 +272,8 @@ class DoaNode(Node):
         self.create_subscription(
             Bool, 'doa/rotate_enable', self._on_rotate_enable, _latched)
 
-        self.create_subscription(String, 'wake_word',   self._on_wake_word,   10)
-        self.create_subscription(String, 'speech_text', self._on_speech_text, 10)
+        self.create_subscription(String, 'wake_word', self._on_wake_word, 10)
+        self.create_subscription(String, 'stt/state', self._on_stt_state, 10)
         # ‼️ Nothing else in this node consulted the e-stop. The driver drops
         # the wheel writes, so the robot did stay still — but this node went on
         # publishing a turn for the whole sweep, and the moment the latch was
@@ -469,14 +478,15 @@ class DoaNode(Node):
         self.get_logger().info('Listen timeout — returning to idle')
         self._set_led_state(self._STATE_IDLE)
 
-    # ── Speech text received (STT done) ───────────────────────────
-    def _on_speech_text(self, _msg: String):
-        if self._listen_timer is not None:
-            self._listen_timer.cancel()
-            self._listen_timer = None
-        self._set_led_state(self._STATE_PROCESSING)
-        # Brief processing flash, then back to idle
-        threading.Timer(3.0, lambda: self._set_led_state(self._STATE_IDLE)).start()
+    # ── STT turn state (recording ended / turn fully done) ─────────
+    def _on_stt_state(self, msg: String):
+        if msg.data == 'processing':
+            if self._listen_timer is not None:
+                self._listen_timer.cancel()
+                self._listen_timer = None
+            self._set_led_state(self._STATE_PROCESSING)
+        elif msg.data == 'idle':
+            self._set_led_state(self._STATE_IDLE)
 
     # ── Rotation ───────────────────────────────────────────────────
     def _rotate_toward(self, angle_deg: float):

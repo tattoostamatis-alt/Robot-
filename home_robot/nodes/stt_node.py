@@ -194,7 +194,11 @@ class STTNode(Node):
         self.create_timer(1.0, self._audio_watchdog)
         self.create_timer(2.0, self._busy_watchdog)
 
-        self.text_pub = self.create_publisher(String, 'speech_text', 10)
+        self.text_pub  = self.create_publisher(String, 'speech_text', 10)
+        # Lets doa_node's LED track the true recording/thinking boundary
+        # instead of only knowing "done" once Whisper returns text — see
+        # doa_node.py's 2026-08-13 note.
+        self.state_pub = self.create_publisher(String, 'stt/state', 10)
         self.create_subscription(String,         'wake_word', self._on_wake_word, 10)
         self.create_subscription(Int16MultiArray, 'mic/audio', self._on_audio,    200)
         self.create_subscription(Bool,           SPEAKING_TOPIC, self._on_tts_speaking, 10)
@@ -287,6 +291,7 @@ class STTNode(Node):
                 self._busy.release()
             except RuntimeError:
                 pass
+            self.state_pub.publish(String(data='idle'))
             return True
 
     def _busy_watchdog(self):
@@ -476,6 +481,7 @@ class STTNode(Node):
                         len(self._record_buf) >= self._max_chunks):
                     audio = np.concatenate(self._record_buf)
                     self._state = 'idle'
+                    self.state_pub.publish(String(data='processing'))
                     threading.Thread(target=self._transcribe,
                                      args=(audio, self._busy_gen),
                                      daemon=True).start()
