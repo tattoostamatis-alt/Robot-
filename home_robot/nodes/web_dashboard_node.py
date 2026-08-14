@@ -2611,6 +2611,65 @@ class DashboardNode(Node):
             'nerf_train', {'running': False, 'done': False, 'error': None}),
             'perception_stopped': True}, remember=False)
 
+    # ── Pose / AprilTag — on-demand from the Κάμερα tab ─────────────────────
+    # Both ride their own use_X launch flag by default (see bringup.launch.py /
+    # localize.launch.py) so `robot max` still starts them — this only adds a
+    # LIVE toggle on top, for the case where they were on at boot but are not
+    # needed right now (pose+gesture ~25% CPU, apriltag ~29%, measured
+    # 2026-08-14). Same fire-and-forget `subprocess.Popen`/`pkill -f` idiom as
+    # `_nerf_stop_perception` above and `_switch_backend` below — status is
+    # never tracked here, the client reads it straight off the `sys` message's
+    # `nodes` list (already broadcast every tick), so a stray click racing a
+    # slow start/stop still self-corrects on the next tick instead of lying.
+    def _toggle_pose(self, on: bool):
+        if on:
+            if self._node_running('pose_node'):
+                return
+            subprocess.Popen(['ros2', 'run', 'home_robot', 'pose_node.py'],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              start_new_session=True)
+            subprocess.Popen(['ros2', 'run', 'home_robot', 'fall_monitor_node.py',
+                               '--ros-args', '-p', 'hold_s:=6.0', '-p', 'speak:=true'],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              start_new_session=True)
+            subprocess.Popen(['ros2', 'run', 'home_robot', 'gesture_node.py',
+                               '--ros-args',
+                               '-p', 'auto_goal:=false', '-p', 'motion_gestures:=false',
+                               '-p', 'confirm_hits:=5', '-p', 'max_distance:=8.0'],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              start_new_session=True)
+        else:
+            for name in ('pose_node.py', 'fall_monitor_node.py', 'gesture_node.py'):
+                subprocess.run(['pkill', '-f', name])
+
+    def _toggle_apriltag(self, on: bool):
+        if on:
+            if self._node_running('apriltag_node'):
+                return
+            cfg = os.path.join(SHARE, 'config', 'apriltag.yaml')
+            # ‼️ apriltag_node's OWN default node name is 'apriltag', not
+            # 'apriltag_node' — the launch file only gets the latter because
+            # its Node(name='apriltag_node') implies a `-r __node:=` remap.
+            # Without it here, _node_running('apriltag_node') never sees this
+            # process (measured 2026-08-14: process alive, node name wrong,
+            # so the toggle looked broken from the dashboard's status pill).
+            subprocess.Popen(['ros2', 'run', 'apriltag_ros', 'apriltag_node',
+                               '--ros-args', '-r', '__node:=apriltag_node',
+                               '--params-file', cfg,
+                               '-r', 'image_rect:=/camera/camera/color/image_raw',
+                               '-r', 'camera_info:=/camera/camera/color/camera_info'],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              start_new_session=True)
+            subprocess.Popen(['ros2', 'run', 'home_robot', 'apriltag_relocalizer.py',
+                               '--ros-args',
+                               '-p', 'tag_frame:=saloni_tag', '-p', 'base_frame:=base_link',
+                               '-p', 'map_frame:=map'],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              start_new_session=True)
+        else:
+            for name in ('apriltag_node', 'apriltag_relocalizer.py'):
+                subprocess.run(['pkill', '-f', name])
+
     def _nerf_train_start(self):
         with self._nerf_train_lock:
             if self._nerf_train_proc is not None and self._nerf_train_proc.poll() is None:
@@ -3466,6 +3525,12 @@ class DashboardNode(Node):
             self._nerf_train_stop()
         elif t == 'nerf_stop_perception':
             threading.Thread(target=self._nerf_stop_perception, daemon=True).start()
+        elif t == 'toggle_pose':
+            threading.Thread(target=self._toggle_pose, args=(bool(msg.get('on')),),
+                              daemon=True).start()
+        elif t == 'toggle_apriltag':
+            threading.Thread(target=self._toggle_apriltag, args=(bool(msg.get('on')),),
+                              daemon=True).start()
         elif t == 'gesture_go':
             # gesture_node holds the point; it re-checks that one exists, so an
             # eager click before any gesture is a logged warning, not a goal.
@@ -5167,6 +5232,20 @@ button{font:inherit;color:inherit}
         </div>
         <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
           Τα πράσινα πλαίσια είναι άνθρωποι, τα πορτοκαλί αντικείμενα· ο κίτρινος σκελετός είναι 17 σημεία COCO. ‼️ Χρειάζονται τα perception nodes — ξεκίνα με «robot max use_perception:=true», αλλιώς η εικόνα μένει καθαρή και ο μετρητής στο 0. Το «Ακολούθησέ με» σταματά μόνο του μετά από 30 δευτερόλεπτα.
+        </p>
+      </div>
+      <div class="card">
+        <h3>Πρόσθετη αντίληψη</h3>
+        <div class="row">
+          <button class="btn" id="b-pose-toggle">Pose/χειρονομίες</button>
+          <span class="pill" id="pose-pill">—</span>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <button class="btn" id="b-apriltag-toggle">AprilTag</button>
+          <span class="pill" id="apriltag-pill">—</span>
+        </div>
+        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+          Σβηστά γλιτώνουν CPU όταν δεν τα χρειάζεσαι (pose+χειρονομίες ~25%, AprilTag ~29% σε αυτό το μηχάνημα). Το AprilTag χρειάζεται για επαναδιόρθωση θέσης στο σαλόνι μετά από μεγάλο drift.
         </p>
       </div>
       <div class="card">
@@ -7163,6 +7242,7 @@ const HANDLERS = {
     renderSys(m);
     $('s-nodecount').textContent = m.nodes.length;
     $('s-nodes').textContent = m.nodes.join('\n');
+    updatePerceptionToggles(m.nodes);
   },
   llm_backend(m){ onBackend(m); },
   quota(m){ onQuota(m); },
@@ -9187,6 +9267,31 @@ $('b-nerf-train-stop').addEventListener('click',()=>send({type:'nerf_train_stop'
 $('b-nerf-stop-perception').addEventListener('click',()=>send({type:'nerf_stop_perception'}));
 $('b-follow').addEventListener('click',()=>send({type:'follow', on:true}));
 $('b-follow-stop').addEventListener('click',()=>send({type:'follow', on:false}));
+
+// ── Pose / AprilTag on-demand toggles ───────────────────────────────────────
+// State is never tracked client-side: each click just asks for the opposite of
+// whatever the button currently shows (driven by the last 'sys' message's node
+// list, see updatePerceptionToggles below), so a slow start/stop racing a
+// second click self-corrects on the next tick instead of getting out of sync.
+$('b-pose-toggle').addEventListener('click', () => {
+  send({type:'toggle_pose', on: !$('b-pose-toggle').classList.contains('pri')});
+});
+$('b-apriltag-toggle').addEventListener('click', () => {
+  send({type:'toggle_apriltag', on: !$('b-apriltag-toggle').classList.contains('pri')});
+});
+function updatePerceptionToggles(nodes){
+  const poseOn = nodes.includes('pose_node'), tagOn = nodes.includes('apriltag_node');
+  const pb = $('b-pose-toggle'), pp = $('pose-pill');
+  pb.classList.toggle('pri', poseOn);
+  pb.textContent = (poseOn ? '■ ' : '▶ ') + t('Pose/χειρονομίες');
+  pp.textContent = poseOn ? t('ενεργό') : t('σβηστό');
+  pp.className = 'pill ' + (poseOn ? 'ok' : '');
+  const ab = $('b-apriltag-toggle'), ap = $('apriltag-pill');
+  ab.classList.toggle('pri', tagOn);
+  ab.textContent = (tagOn ? '■ ' : '▶ ') + t('AprilTag');
+  ap.textContent = tagOn ? t('ενεργό') : t('σβηστό');
+  ap.className = 'pill ' + (tagOn ? 'ok' : '');
+}
 
 $('b-sf-reset').addEventListener('click', ()=>{
   if(!confirm(t('Επαναφορά όλων των ρυθμίσεων ασφαλείας στις προεπιλογές;'))) return;
