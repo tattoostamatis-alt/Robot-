@@ -89,6 +89,20 @@ TRANSLATIONS = {
          '„robot max use_perception:=true", sonst bleibt das Bild sauber und '
          'der Zähler auf 0. „Folge mir" stoppt nach 30 Sekunden von selbst.'),
 
+    # ── camera pane: on-demand Pose/AprilTag toggles ────────────────────────
+    'Πρόσθετη αντίληψη': ('Additional perception', 'Zusätzliche Wahrnehmung'),
+    'Pose/χειρονομίες':  ('Pose/gestures', 'Pose/Gesten'),
+    'AprilTag':          ('AprilTag', 'AprilTag'),
+    'Σβηστά γλιτώνουν CPU όταν δεν τα χρειάζεσαι (pose+χειρονομίες ~25%, '
+    'AprilTag ~29% σε αυτό το μηχάνημα). Το AprilTag χρειάζεται για '
+    'επαναδιόρθωση θέσης στο σαλόνι μετά από μεγάλο drift.':
+        ('Off saves CPU when you don\'t need them (pose+gestures ~25%, '
+         'AprilTag ~29% on this machine). AprilTag is needed to re-fix '
+         'position in the living room after a big drift.',
+         'Aus spart CPU, wenn nicht gebraucht (Pose+Gesten ~25%, AprilTag '
+         '~29% auf dieser Maschine). AprilTag wird gebraucht, um die '
+         'Position im Wohnzimmer nach großem Drift neu zu fixieren.'),
+
     # ── camera pane ───────────────────────────────────────────────────────
     'Τι βλέπει':         ('What it sees', 'Was es sieht'),
     'Κατάσταση περιβάλλοντος': ('Situation', 'Umgebungslage'),
@@ -1134,6 +1148,7 @@ TRANSLATIONS = {
     '🔍 Αναζήτηση (10s)': ('🔍 Search (10s)', '🔍 Suchen (10s)'),
     'ενεργό':            ('on', 'ein'),
     'ανενεργό':          ('off', 'aus'),
+    'σβηστό':            ('off', 'aus'),
     'Αποσύνδεση':        ('Disconnect', 'Trennen'),
     'Καμία συσκευή.':    ('No devices.', 'Keine Geräte.'),
     'Ήχος & σύστημα':    ('Audio & system', 'Audio & System'),

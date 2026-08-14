@@ -585,6 +585,7 @@ class DashboardNode(Node):
         # Tabs currently listening to the microphone. Per socket, like the
         # cloud stream: two phones listening must not switch each other off.
         self._listen_ws: Set[object] = set()
+        self._mic_sub = None
         self._cloud_last = 0.0
         # _set_camera_pointcloud turns the D435's pointcloud filter on for as
         # long as someone is on the 3D tab — but ONLY if this node is the one
@@ -647,13 +648,19 @@ class DashboardNode(Node):
         # around the robot — at ~3 Hz. Small enough to send as a PNG per update
         # without thinking about it, and it is the one view that explains why
         # the robot swerved or refused a doorway when the map looks clear.
-        self.create_subscription(OccupancyGrid, '/local_costmap/costmap',
-                                 self._cb_costmap, 1)
+        #
+        # ‼️ 2026-08-14: both subscriptions used to be unconditional, with
+        # `_cb_costmap` gating its own work on `_costmap_on` and `_cb_semantic`
+        # not gating at all. Same bug class as _cb_camera (see its comment):
+        # an in-callback early-return does not stop rclpy's own executor from
+        # paying to deserialise and dispatch every message first — confirmed
+        # with py-spy record (--pid, --duration 15) showing 89.93% of all
+        # sampled time inside rclpy's own wait_for_ready_callbacks, not in any
+        # one callback body. So _set_costmap_sub creates/destroys both
+        # subscriptions together, same as _set_camera_sub.
         self._costmap_on: Set[object] = set()   # sockets watching the tab
-        self.create_subscription(PointCloud2, '/semantic_obstacles',
-                                 self._cb_semantic,
-                                 QoSProfile(depth=1,
-                                            reliability=QoSReliabilityPolicy.BEST_EFFORT))
+        self._costmap_sub = None
+        self._semantic_sub = None
         self._semantic_pts: list = []
         self._semantic_time = 0.0
 
@@ -693,8 +700,14 @@ class DashboardNode(Node):
 
         # ── Gestures / observations / timeline ──────────────────────────────
         # ‼️ The SHARED mic topic, not the ALSA device. wake_word_node owns the
-        # stream; stt_node and sound_event_node read this same topic.
-        self.create_subscription(Int16MultiArray, '/mic/audio', self._cb_mic, 30)
+        # stream; stt_node and sound_event_node read this same topic — this
+        # dashboard is just one more subscriber, so unsubscribing costs it
+        # nothing (the audio keeps flowing to the others regardless). No
+        # unconditional subscription here — see _set_mic_sub, same pattern as
+        # _set_camera_sub/_set_costmap_sub. Measured ~13 msgs/s continuously
+        # published whether or not anyone is on the dashboard's mic-listen
+        # feature, and _cb_mic's own `if not self._listen_ws: return` never
+        # stopped rclpy paying to deserialise and dispatch each one first.
         self.create_subscription(String, '/gesture_status', self._cb_gesture, 10)
         self.create_subscription(String, '/observations', self._cb_observations, 10)
         self.create_subscription(String, '/object_memory', self._cb_object_memory, 5)
@@ -1738,6 +1751,21 @@ class DashboardNode(Node):
             return
         self._state.broadcast({'type': 'keepout_activated', 'ok': True, 'on': on})
 
+    def _set_costmap_sub(self, on: bool):
+        """Subscribe to the costmap + semantic-obstacle streams only while
+        _costmap_on is non-empty — see the comment on it in __init__."""
+        if on and self._costmap_sub is None:
+            self._costmap_sub = self.create_subscription(
+                OccupancyGrid, '/local_costmap/costmap', self._cb_costmap, 1)
+            self._semantic_sub = self.create_subscription(
+                PointCloud2, '/semantic_obstacles', self._cb_semantic,
+                QoSProfile(depth=1, reliability=QoSReliabilityPolicy.BEST_EFFORT))
+        elif not on and self._costmap_sub is not None:
+            self.destroy_subscription(self._costmap_sub)
+            self.destroy_subscription(self._semantic_sub)
+            self._costmap_sub = None
+            self._semantic_sub = None
+
     def _cb_semantic(self, msg: PointCloud2):
         """Obstacles the DETECTOR put into the costmap, not the LiDAR.
 
@@ -1747,6 +1775,8 @@ class DashboardNode(Node):
         strangely wide berth. Only the outline is needed here, so the cloud is
         thinned hard — it is drawn as a scatter over a 3 m window.
         """
+        if not self._costmap_on:
+            return    # defensive only, see _set_costmap_sub
         try:
             pts = []
             step, n = msg.point_step, msg.width * msg.height
@@ -1768,7 +1798,7 @@ class DashboardNode(Node):
     # there" is answered by how far the blue bleeds out from the walls.
     def _cb_costmap(self, msg: OccupancyGrid):
         if not self._costmap_on:
-            return                      # nobody is on the tab; skip the encode
+            return    # defensive only, see _set_costmap_sub
         w, h = msg.info.width, msg.info.height
         if w == 0 or h == 0:
             return
@@ -2887,6 +2917,16 @@ class DashboardNode(Node):
     def _broadcast_compass(self):
         self._state.broadcast({'type': 'compass', 'offset': self._compass_offset})
 
+    def _set_mic_sub(self, on: bool):
+        """Subscribe to /mic/audio only while _listen_ws is non-empty — see
+        the comment where the (removed) unconditional subscription was."""
+        if on and self._mic_sub is None:
+            self._mic_sub = self.create_subscription(
+                Int16MultiArray, '/mic/audio', self._cb_mic, 30)
+        elif not on and self._mic_sub is not None:
+            self.destroy_subscription(self._mic_sub)
+            self._mic_sub = None
+
     def _cb_mic(self, msg: Int16MultiArray):
         """Forward raw 16 kHz mono PCM to whoever is listening.
 
@@ -2895,7 +2935,7 @@ class DashboardNode(Node):
         bytes and cost a parse per chunk at 10 Hz per client.
         """
         if not self._listen_ws:
-            return
+            return    # defensive only, see _set_mic_sub
         self._state.send_bytes(self._listen_ws,
                                np.asarray(msg.data, dtype=np.int16).tobytes())
 
@@ -3426,12 +3466,14 @@ class DashboardNode(Node):
         # Same for a tab that was listening: a closed phone must not leave the
         # microphone streaming to nobody.
         self._listen_ws.discard(client)
+        self._set_mic_sub(bool(self._listen_ws))
         # A tab closed on the 3D pane never sends its 'off', so the camera would
         # keep building pointclouds for nobody.
         self._fuse_ws.discard(client)
         self._fuse_cam_ws.discard(client)
         self._set_camera_pointcloud(bool(self._cloud_ws or self._fuse_cam_ws))
         self._costmap_on.discard(client)
+        self._set_costmap_sub(bool(self._costmap_on))
 
     def dispatch(self, msg: dict, client=None):
         t = msg.get('type')
@@ -3520,6 +3562,7 @@ class DashboardNode(Node):
                     self._costmap_on.add(client)
                 else:
                     self._costmap_on.discard(client)
+                self._set_costmap_sub(bool(self._costmap_on))
         elif t == 'check_room':
             room = str(msg.get('room', '')).strip()
             question = str(msg.get('question', '')).strip() or 'τι βλέπεις;'
@@ -3602,6 +3645,7 @@ class DashboardNode(Node):
                     self._listen_ws.add(client)
                 else:
                     self._listen_ws.discard(client)
+                self._set_mic_sub(bool(self._listen_ws))
         elif t == 'sys_rotate_token':
             # Writing the file is enough: the node reads it at startup, so the
             # new token takes effect on the next restart and the current tab
