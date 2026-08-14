@@ -524,8 +524,11 @@ class DashboardNode(Node):
         self.create_subscription(String, '/current_room', self._cb_room, latch)
 
         # ── Camera / perception ─────────────────────────────────────────────
-        self.create_subscription(Image,
-            '/camera/camera/color/image_raw', self._cb_camera, 5)
+        # No image subscription here — see _set_camera_sub, toggled by the
+        # 'cam_view' message. Detection counts/boxes come from _cb_objects/
+        # _cb_poses on /detected_objects & /pose_detections below, which stay
+        # subscribed unconditionally: they are tiny JSON strings at a few Hz,
+        # nothing like the cost of the raw color stream.
         self.create_subscription(String, '/detected_objects', self._cb_objects, 5)
         # YOLO11n-pose, 17 COCO keypoints per person (pose_node.py, iGPU/ROCm).
         self.create_subscription(String, '/pose_detections', self._cb_poses, 5)
@@ -555,6 +558,30 @@ class DashboardNode(Node):
         # closed while the tab was open never sent its 'off', so the stream ran
         # forever at 150 kB/s with nobody watching.
         self._cloud_ws: Set[object] = set()
+        # Tabs on the Κάμερα pane. _cb_camera used to process EVERY color
+        # frame (cvtColor + resize + overlay draw + JPEG encode) unconditionally
+        # — whether or not the /camera.mjpeg stream this buffer feeds had a
+        # single viewer. Same fix as _cloud_ws.
+        #
+        # ‼️ An early-return inside the callback alone was NOT enough — traced
+        # with a temporary /debug/threads (sys._current_frames per thread) and
+        # confirmed via /proc/<pid>/task/<tid>/stat deltas: the rclpy spin
+        # thread stayed pinned near 65-70% of a core even with the callback
+        # body confirmed skipped every time (0/156 "full" runs logged). That
+        # baseline turned out to be mostly UNRELATED to the camera (still
+        # present with the subscription removed entirely — the volume of this
+        # node's ~40 other subscriptions, plausibly the tf2 listener, is the
+        # likely rest of the story and remains uninvestigated, root/py-spy
+        # would be the next step). What IS attributable to the camera,
+        # measured with a controlled on/off A-B test over a live websocket:
+        # ~13 points of a core, 2026-08-14. Real, worth having off by default,
+        # just smaller than first suspected — DDS deserialises a
+        # full-resolution color Image message at ~30 Hz before the callback
+        # body ever runs, so the SUBSCRIPTION itself is created/destroyed
+        # here instead, same principle as _set_camera_pointcloud toggling the
+        # driver's own pointcloud.enable rather than filtering it out locally.
+        self._cam_ws: Set[object] = set()
+        self._camera_sub = None
         # Tabs currently listening to the microphone. Per socket, like the
         # cloud stream: two phones listening must not switch each other off.
         self._listen_ws: Set[object] = set()
@@ -2236,7 +2263,28 @@ class DashboardNode(Node):
             self._cam_state_last = payload
             self._state.broadcast(payload)
 
+    def _set_camera_sub(self, on: bool):
+        """Subscribe to the raw color stream only while _cam_ws is non-empty.
+
+        See the comment on _cam_ws in __init__: an early-return inside the
+        callback still pays for DDS deserialising every full-resolution color
+        frame (~30 Hz) before the callback body runs at all — measured ~13
+        points of a core. Creating/destroying the subscription itself is the
+        only way to actually stop paying it.
+        """
+        if on and self._camera_sub is None:
+            self._camera_sub = self.create_subscription(
+                Image, '/camera/camera/color/image_raw', self._cb_camera, 5)
+        elif not on and self._camera_sub is not None:
+            self.destroy_subscription(self._camera_sub)
+            self._camera_sub = None
+
     def _cb_camera(self, msg: Image):
+        # Defensive only — _set_camera_sub means this should never fire while
+        # _cam_ws is empty, but destroy_subscription() does not guarantee an
+        # in-flight callback is cancelled.
+        if not self._cam_ws:
+            return
         try:
             enc = msg.encoding.lower()
             arr = np.frombuffer(msg.data, np.uint8).reshape(msg.height, msg.width, -1)
@@ -3373,6 +3421,8 @@ class DashboardNode(Node):
     def release_client(self, client):
         """A browser went away — forget anything it had switched on."""
         self._cloud_ws.discard(client)
+        self._cam_ws.discard(client)
+        self._set_camera_sub(bool(self._cam_ws))
         # Same for a tab that was listening: a closed phone must not leave the
         # microphone streaming to nobody.
         self._listen_ws.discard(client)
@@ -3428,6 +3478,15 @@ class DashboardNode(Node):
                     self._cloud_ws.discard(client)
                 self._set_camera_pointcloud(
                     bool(self._cloud_ws or self._fuse_cam_ws))
+        elif t == 'cam_view':
+            # Same idea as 'cloud': the raw color subscription (_set_camera_sub)
+            # only exists while at least one socket is on the tab.
+            if client is not None:
+                if msg.get('on'):
+                    self._cam_ws.add(client)
+                else:
+                    self._cam_ws.discard(client)
+                self._set_camera_sub(bool(self._cam_ws))
         elif t == 'fusion':
             # Two switches, not one: the EKF panel is a few hundred bytes at
             # 4 Hz, while the sensor comparison turns the D435's pointcloud
@@ -6470,6 +6529,7 @@ function showTab(id){
   if (id === 'rtabmap'){ rtabSavedRefresh(); }
   if (VNC_APPS[id]) ensureVnc(id);
   cloudSetActive(id === 'cloud');
+  camSetActive(id === 'cam');
   costSetActive(id === 'cost');
   fuseSetActive(id === 'fuse');
   if (id === 'cost'){ buildCostLegend(); costShowSize(); }
@@ -10741,6 +10801,20 @@ function cloudSetActive(on){
   if(on) cloudDraw();
 }
 
+// Same idea: the backend's raw color subscription (_set_camera_sub) only
+// exists while nobody is on this tab (~13 points of a core measured live,
+// 2026-08-14 — see the comment on _cam_ws for why an in-callback early-return
+// alone was not enough). Clearing src (not just hiding the pane) is what
+// actually closes the /camera.mjpeg connection — a display:none <img> keeps
+// fetching.
+let camOn = false;
+function camSetActive(on){
+  if(on === camOn) return;
+  camOn = on;
+  send({type: 'cam_view', on: on});
+  $('cam').src = on ? ('/camera.mjpeg' + TOKEN_QS) : '';
+}
+
 // ── log tail ───────────────────────────────────────────────────────────────
 // Levels are rcl_interfaces/Log: 30 WARN, 40 ERROR, 50 FATAL. Auto-scroll is
 // suppressed when the user has scrolled up to read something — otherwise the
@@ -10826,8 +10900,8 @@ usbBuild();                // same: the buttons carry translatable labels
 powerBuild();
 applyLang();               // also builds the tabs, so it precedes showTab()
 
-// Set in JS so the stream carries the same token as the page.
-$('cam').src = '/camera.mjpeg' + TOKEN_QS;
+// camSetActive (called from showTab) sets $('cam').src, so it only starts
+// requesting /camera.mjpeg if the page happens to load straight onto 'cam'.
 showTab('map');
 resize(); connect();
 </script>
