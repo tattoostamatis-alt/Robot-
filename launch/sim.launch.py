@@ -139,6 +139,12 @@ def generate_launch_description():
     )
 
     # ── gz <-> ROS bridge ────────────────────────────────────────
+    # Camera topics are bridged under their gz-side names (/camera/image etc,
+    # the rgbd_camera sensor's auto-suffixed <topic>camera</topic> from the
+    # xacro) and then remapped to the exact names rtabmap.launch.py's
+    # hardcoded `remaps` expect (see its docstring — this only exists to
+    # feed that launch file for a sim test of the anchor_frame fix, real
+    # bringup.launch.py/localize.launch.py own those names normally).
     bridge = Node(
         package='ros_gz_bridge',
         executable='parameter_bridge',
@@ -147,6 +153,14 @@ def generate_launch_description():
             '/cmd_vel_safe@geometry_msgs/msg/Twist]gz.msgs.Twist',
             '/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan',
             '/odom@nav_msgs/msg/Odometry[gz.msgs.Odometry',
+            '/camera/image@sensor_msgs/msg/Image[gz.msgs.Image',
+            '/camera/depth_image@sensor_msgs/msg/Image[gz.msgs.Image',
+            '/camera/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo',
+        ],
+        remappings=[
+            ('/camera/image', '/camera/camera/color/image_raw'),
+            ('/camera/depth_image', '/camera/camera/aligned_depth_to_color/image_raw'),
+            ('/camera/camera_info', '/camera/camera/color/camera_info'),
         ],
         parameters=[{'use_sim_time': True}],
         output='screen',

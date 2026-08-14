@@ -79,6 +79,29 @@
     <origin xyz="0 0 ${lidar_z}"/>
   </joint>
 
+  <!-- D435 stand-in, matching the real robot's measured mount
+       (bringup.launch.py tf_base_camera: x=0.14 z=0.586 pitch=0.525 rad
+       / 30.1deg down — see [[project_robot_camera_pitch_wrong]]).
+       camera_link keeps the normal X-forward/Z-up body convention (what the
+       gz sensor plugin actually renders along); camera_color_optical_frame
+       is a pure REP103 rotation (Z-forward/X-right/Y-down, no extra
+       translation) so RTAB-Map/image_geometry get the frame they assume —
+       the sensor itself attaches to camera_link with optical_frame_id
+       pointed at the rotated frame below, not by moving the render pose. -->
+  <link name="camera_link"/>
+  <joint name="camera_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="camera_link"/>
+    <origin xyz="0.14 0 0.586" rpy="0 0.525 0"/>
+  </joint>
+
+  <link name="camera_color_optical_frame"/>
+  <joint name="camera_optical_joint" type="fixed">
+    <parent link="camera_link"/>
+    <child link="camera_color_optical_frame"/>
+    <origin xyz="0 0 0" rpy="-1.5707963 0 -1.5707963"/>
+  </joint>
+
   <!-- ── Gazebo: diff-drive + lidar sensor ───────────────────────── -->
   <gazebo>
     <plugin filename="gz-sim-diff-drive-system" name="gz::sim::systems::DiffDrive">
@@ -112,6 +135,36 @@
         </horizontal></scan>
         <range><min>0.15</min><max>12.0</max><resolution>0.01</resolution></range>
       </lidar>
+      <always_on>1</always_on>
+      <visualize>true</visualize>
+    </sensor>
+  </gazebo>
+
+  <!-- D435 stand-in: rgbd_camera sensor attached to the PHYSICAL link
+       (camera_link, X-forward — this is the axis gz actually renders
+       along; confirmed against gz-sim8's own depth_camera_sensor.sdf
+       example, where a pure yaw rotation alone re-aimed the view, which
+       only makes sense if the render axis is local +X, not OpenGL -Z).
+       optical_frame_id only relabels the message headers to the REP103
+       frame defined above in the URDF — it does not move the render, so
+       this keeps the true 30.1deg-down tilt while still handing RTAB-Map
+       a properly-oriented optical frame. Modest 424x240 res + 15Hz: this
+       machine renders in software (llvmpipe, no GPU) and RGBD is much
+       heavier per-frame than the lidar. -->
+  <gazebo reference="camera_link">
+    <sensor name="camera" type="rgbd_camera">
+      <update_rate>15</update_rate>
+      <topic>camera</topic>
+      <camera>
+        <horizontal_fov>1.2043</horizontal_fov>
+        <image>
+          <width>424</width>
+          <height>240</height>
+          <format>R8G8B8</format>
+        </image>
+        <clip><near>0.1</near><far>8.0</far></clip>
+        <optical_frame_id>camera_color_optical_frame</optical_frame_id>
+      </camera>
       <always_on>1</always_on>
       <visualize>true</visualize>
     </sensor>
