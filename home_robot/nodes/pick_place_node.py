@@ -123,8 +123,9 @@ class PickPlaceNode(Node):
         self.declare_parameter('arm_speed', 0)             # passed through to T:104 "spd", 0 = firmware default
         self.declare_parameter('movement_settle_time', 2.0)  # s — no completion feedback from arm_driver.py, see module docstring
         self.declare_parameter('tf_timeout', 2.0)
-        self.declare_parameter('max_reach', 0.45)          # m from arm_base — see _run_pick
+        self.declare_parameter('max_reach', 0.52)          # m from arm_base — see _run_pick
         self.declare_parameter('open_vocab_hold', 3.0)     # s — ride out flickering open-vocab frames
+        self.declare_parameter('coco_hold', 3.0)            # s — same flicker fix as open_vocab_hold, for /detected_objects
         self.declare_parameter('pin_ttl', 30.0)            # s — how long a lost sighting stays usable
         # Visual servoing (closed-loop XY refinement while hovering)
         self.declare_parameter('servo_enabled', True)
@@ -165,6 +166,7 @@ class PickPlaceNode(Node):
         self.tf_timeout = self.get_parameter('tf_timeout').value
         self.max_reach = self.get_parameter('max_reach').value
         self.open_vocab_hold = self.get_parameter('open_vocab_hold').value
+        self.coco_hold = self.get_parameter('coco_hold').value
         self.pin_ttl = self.get_parameter('pin_ttl').value
         # label -> ((x, y, z) in odom, monotonic stamp of the sighting)
         self._pinned = {}
@@ -200,6 +202,7 @@ class PickPlaceNode(Node):
         # without a COCO frame overwriting the list in between.
         self._latest_open_vocab = None
         self._open_vocab_stamp = 0.0      # monotonic time of the last non-empty frame
+        self._coco_stamp = 0.0            # monotonic time of the last non-empty COCO frame
         self._busy = threading.Lock()
         # A pick is ~10 s of blocking arm moves with no way to interrupt it.
         # Cancellation here is deliberately CONSERVATIVE: it stops before
@@ -227,10 +230,24 @@ class PickPlaceNode(Node):
         self.get_logger().info('Pick-place node started (HW-unverified — see module docstring)')
 
     def _on_detected_objects(self, msg: String):
+        """Latest COCO hits, with the same empty-frame hold-off as open_vocab.
+
+        object_detector flickers the same way open_vocab_detector does (2026-08-14:
+        a bottle at conf 0.74 was reported in only 5 of 37 consecutive frames) — an
+        empty frame here does not erase a recent non-empty one until it is
+        `coco_hold` seconds stale. See _on_open_vocab_detections for the original
+        fix and why overwriting on every message is wrong.
+        """
         try:
-            self._latest_objects = json.loads(msg.data)
+            objects = json.loads(msg.data)
         except json.JSONDecodeError:
-            pass
+            return
+        now = time.monotonic()
+        if objects:
+            self._latest_objects = objects
+            self._coco_stamp = now
+        elif now - self._coco_stamp > self.coco_hold:
+            self._latest_objects = objects
 
     def _on_open_vocab_detections(self, msg: String):
         """Latest open-vocabulary hits, with an empty frame held off briefly.
@@ -386,8 +403,19 @@ class PickPlaceNode(Node):
         # left the user watching a motionless arm — the same "says it acted,
         # did not act" failure that made «πιάσε την παντόφλα» so confusing on
         # 2026-08-06. The reported reach of the RoArm-M3 is ~0.51 m from the
-        # base; max_reach stays under it because that figure is for a straight
-        # arm with nothing in the gripper.
+        # base; max_reach used to stay under it because that figure is for a
+        # straight arm with nothing in the gripper.
+        #
+        # 2026-08-14: replaced with a real tape measurement — user measured
+        # 640mm from the vacuum centre (base_link) straight out and DOWN to
+        # the floor, the actual low reach used to grasp something on the
+        # ground, not a spec-sheet straight-arm figure. Converted into the
+        # arm_base frame this check runs in (arm_base sits 0.10m forward /
+        # 0.18m up from base_link, see tf_base_arm in bringup.launch.py):
+        # horizontal 0.64-0.10=0.54m, vertical drop to the floor 0.18m,
+        # 3D distance sqrt(0.54^2 + 0.18^2) = 0.57m. max_reach stays a margin
+        # under that measured ceiling, same as it stayed under the old spec
+        # figure.
         distance = math.sqrt(ax * ax + ay * ay + az * az)
         if distance > self.max_reach:
             self._say(f'Το βλέπω, αλλά είναι πολύ μακριά για τον βραχίονα '
@@ -455,6 +483,22 @@ class PickPlaceNode(Node):
         # claiming success we never actually saw (2026-08-11 slipper: reported
         # «Τακτοποίησα» after "lost sight of target, using best estimate").
         uncertain = servo_confident is False
+
+        # ‼️ servo_confident only certifies the XY lock BEFORE descending — it
+        # says nothing about whether the close actually caught the object.
+        # 2026-08-14 baby bottle, HW: servo converged (spread=0mm) and this
+        # still reported «Τακτοποίησα» while the bottle sat knocked over on
+        # the floor exactly where it started — the descend+close+lift has no
+        # feedback of its own (arm/joint_states is not trustworthy either,
+        # see project_robot_simple_command_gates memory). The one signal we
+        # do have: if the object is still detected right where we grasped it,
+        # closing on it obviously failed, confident servo or not.
+        still_there = self._relock(target['label'], ax, ay)
+        if still_there is not None:
+            self.get_logger().warn(
+                f'"{target["label"]}" still detected at the grasp point after '
+                f'lifting — the gripper closed on nothing')
+            uncertain = True
 
         if hold:
             # Keep it in the gripper for transport (fetch). A later place_command

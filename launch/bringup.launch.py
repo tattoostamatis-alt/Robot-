@@ -290,11 +290,29 @@ def generate_launch_description():
     #
     # Remeasure after ANY change to the camera bracket, and prefer the plane
     # fit over a protractor: 5 deg here is ~7 cm of height error at 0.8 m.
+    #
+    # Remeasured 2026-08-14 (later the same day, aimed at a clear floor patch):
+    # scripts/measure_camera_pitch.py gave height 0.577 m, pitch 28.1 deg
+    # (0.491 rad) downward — height agrees with the taped 0.56 m to within
+    # 1.7 cm, which is the sanity check that the fit hit real floor this time.
+    # This SUPERSEDES the same-day pitch=0 rejection above: that run's ~1.09 m
+    # result was the "wrong surface" failure mode the docstring warns about
+    # (the robot was not aimed at a clear near floor patch then), not evidence
+    # the bracket is actually level. Root-caused via a live pick_place_node
+    # calibration test: a detection at (0.103, 0.17, 0.603) in the camera
+    # frame transformed through pitch=0 to base_link (0.753, -0.088, 0.392) —
+    # 39 cm off the floor and 0.853 m away — while the object was tape-measured
+    # at 0.640 m from base_link on the floor. A 28 deg uncorrected downward
+    # tilt is exactly the kind of error that produces both a too-far distance
+    # and a too-high Z. This is very likely why grasps kept failing: az was
+    # computed at the wrong height even when xy was roughly right. Re-run the
+    # script (clear floor patch, nothing in the middle third of frame) after
+    # any bracket change.
     tf_base_camera = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
-        arguments=['--x', '0.14', '--y', '0.0', '--z', '0.586',
-                   '--roll', '0', '--pitch', '0.525', '--yaw', '0',
+        arguments=['--x', '0.15', '--y', '0.0', '--z', '0.577',
+                   '--roll', '0', '--pitch', '0.491', '--yaw', '0',
                    '--frame-id', 'base_link', '--child-frame-id', 'camera_link'],
         name='tf_base_camera',
     )
@@ -312,7 +330,15 @@ def generate_launch_description():
         package='tf2_ros',
         executable='static_transform_publisher',
         name='tf_base_arm',
-        arguments=['--x', '0.12', '--y', '0.0', '--z', '0.186',
+        # Measured 2026-08-14 (user, tape): 100mm forward of the vacuum
+        # centre, centred left/right, first servo (base rotation pivot) at
+        # 180mm off the floor — the two higher servos (230mm) are downstream
+        # of that pivot in the arm's own kinematic chain, not part of this
+        # mount TF. Fully extended the arm reaches 780mm off the floor
+        # (reach reference, not a TF value). Old x=0.12/z=0.186 was a stale
+        # placeholder — identical x to the camera's old value, never actually
+        # measured for the arm.
+        arguments=['--x', '0.10', '--y', '0.0', '--z', '0.18',
                    '--roll', '0', '--pitch', '0', '--yaw', '0',
                    '--frame-id', 'base_link', '--child-frame-id', 'arm_base'],
         condition=IfCondition(use_arm),
