@@ -5163,7 +5163,7 @@ button{font:inherit;color:inherit}
 /* ── Map ── */
 #map-wrap{position:relative;background:#0c0c0e;border:1px solid #2c2c32;
   border-radius:12px;overflow:hidden;cursor:crosshair;flex:1;min-height:200px}
-#map-canvas{width:100%;height:100%;display:block}
+#map-canvas{width:100%;height:100%;display:block;touch-action:none}
 /* ‼️ Square, and capped. The costmap is a 60x60 grid of a 3x3 m window, so
    flex:1 stretched it across a 1200x450 pane: every cell became a ~20x7 px
    slab, the window read as a rectangle when it is a square, and the whole
@@ -5397,7 +5397,7 @@ button{font:inherit;color:inherit}
         <label style="display:flex;align-items:center;gap:9px;font-size:12.5px;
           cursor:pointer;user-select:none;margin-top:6px">
           <input type="checkbox" id="b-place-room-rect" style="vertical-align:-2px">
-          ⬜ 2 κλικ στον χάρτη ζωγραφίζουν δωμάτιο σαν τετράγωνο (απέναντι γωνίες)
+          ⬜ Σύρε με το ποντίκι πάνω στο δωμάτιο — τετραγωνίζεται αυτόματα
         </label>
         <div class="row" id="place-room-rect-row" style="margin-top:6px;gap:8px;display:none">
           <input type="color" id="prr-color" value="#cc44ff"
@@ -7252,10 +7252,21 @@ function draw(){
     ctx.beginPath(); ctx.arc(c.x,c.y,6,0,Math.PI*2); ctx.stroke();
     ctx.setLineDash([]);
   }
-  if(prrCorner){
-    const c=w2c(prrCorner.x,prrCorner.y);
-    ctx.strokeStyle='#cc44ff'; ctx.setLineDash([4,3]); ctx.lineWidth=1.5;
-    ctx.beginPath(); ctx.arc(c.x,c.y,6,0,Math.PI*2); ctx.stroke();
+  if(prrPath && prrPath.length > 1){
+    // The freehand stroke itself, thin and faint — what actually gets sent is
+    // only its bounding box (drawn below), so the stroke is just a "yes, I'm
+    // drawing" trace, not the shape that ends up painted.
+    ctx.strokeStyle='rgba(204,68,255,.55)'; ctx.lineWidth=2;
+    ctx.beginPath();
+    prrPath.forEach((p,i)=>{ const c=w2c(p.x,p.y); i?ctx.lineTo(c.x,c.y):ctx.moveTo(c.x,c.y); });
+    ctx.stroke();
+    // Live bounding-box preview — this rectangle is what place_room_rect
+    // will actually paint, so the dashed box is the real feedback.
+    const xs=prrPath.map(p=>p.x), ys=prrPath.map(p=>p.y);
+    const p0=w2c(Math.min(...xs),Math.min(...ys)), p1=w2c(Math.max(...xs),Math.max(...ys));
+    ctx.strokeStyle='#cc44ff'; ctx.setLineDash([5,4]); ctx.lineWidth=1.5;
+    ctx.strokeRect(Math.min(p0.x,p1.x), Math.min(p0.y,p1.y),
+                   Math.abs(p1.x-p0.x), Math.abs(p1.y-p0.y));
     ctx.setLineDash([]);
   }
 
@@ -8746,15 +8757,14 @@ function syncClickModeRows(){
   $('place-room-row').style.display = $('b-place-room').checked ? '' : 'none';
   $('place-room-rect-row').style.display = $('b-place-room-rect').checked ? '' : 'none';
   $('kz-add-row').style.display = $('b-kz-add').checked ? '' : 'none';
-  if(!$('b-kz-add').checked) kzCorner = null;             // abandon a half-drawn zone
-  if(!$('b-place-room-rect').checked) prrCorner = null;   // abandon a half-drawn room rect
+  if(!$('b-kz-add').checked) kzCorner = null;   // abandon a half-drawn zone
+  if(!$('b-place-room-rect').checked) prrPath = null;   // abandon a half-drawn freehand room
 }
 CLICK_MODE_BOXES.forEach(id => $(id).addEventListener('change', () => {
   if($(id).checked) CLICK_MODE_BOXES.filter(o => o !== id).forEach(o => $(o).checked = false);
   syncClickModeRows();
 }));
 let kzCorner = null;    // first click of a 2-click keepout rectangle, or null
-let prrCorner = null;   // first click of a 2-click room rectangle, or null
 canvas.addEventListener('click',e=>{
   const r=canvas.getBoundingClientRect();
   const cx=(e.clientX-r.left)*canvas.width/r.width;
@@ -8768,23 +8778,7 @@ canvas.addEventListener('click',e=>{
     $('kz-msg').textContent = t('Προσθήκη…'); $('kz-msg').style.color = '#71717a';
     return;
   }
-  if($('b-place-room-rect').checked){
-    if(!prrCorner){ prrCorner = wp; draw(); return; }
-    const name = $('prr-name').value.trim();
-    if(!name){
-      $('room-edit-msg').textContent = t('Δώσε πρώτα όνομα δωματίου.');
-      $('room-edit-msg').style.color = '#f87171';
-      prrCorner = null; draw();
-      return;
-    }
-    const hex = $('prr-color').value;
-    send({type:'place_room_rect', x1:prrCorner.x, y1:prrCorner.y, x2:wp.x, y2:wp.y, name,
-          color:[parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)]});
-    prrCorner = null;
-    $('room-edit-msg').textContent = t('Τοποθέτηση…');
-    $('room-edit-msg').style.color = '#71717a';
-    return;
-  }
+  if($('b-place-room-rect').checked) return;   // handled by the pointerdown/move/up drag below
   if($('b-place-room').checked){
     const name = $('pr-name').value.trim();
     if(!name){
@@ -8804,6 +8798,51 @@ canvas.addEventListener('click',e=>{
     return;
   }
   goal=wp; send({type:'nav_goal',x:wp.x,y:wp.y});
+  draw();
+});
+
+// Freehand room drawing (b-place-room-rect): the drawn stroke itself is
+// thrown away, only its bounding box is sent — same place_room_rect
+// backend as before, which already took two opposite corners, and a
+// bounding box's min/max IS exactly that. Pointer events (not mouse+touch
+// separately) so a finger drag on the phone works the same as a mouse drag.
+let prrPath = null;   // array of {x,y} world points while dragging, or null
+canvas.addEventListener('pointerdown', e => {
+  if(!$('b-place-room-rect').checked) return;
+  const r=canvas.getBoundingClientRect();
+  const cx=(e.clientX-r.left)*canvas.width/r.width;
+  const cy=(e.clientY-r.top)*canvas.height/r.height;
+  const wp=c2w(cx,cy); if(!wp) return;
+  prrPath = [wp];
+  draw();
+});
+canvas.addEventListener('pointermove', e => {
+  if(!prrPath) return;
+  const r=canvas.getBoundingClientRect();
+  const cx=(e.clientX-r.left)*canvas.width/r.width;
+  const cy=(e.clientY-r.top)*canvas.height/r.height;
+  const wp=c2w(cx,cy); if(!wp) return;
+  prrPath.push(wp);
+  draw();
+});
+canvas.addEventListener('pointerup', () => {
+  if(!prrPath) return;
+  const path = prrPath; prrPath = null;
+  if(path.length < 2){ draw(); return; }   // a tap, not a drag — nothing to paint
+  const name = $('prr-name').value.trim();
+  if(!name){
+    $('room-edit-msg').textContent = t('Δώσε πρώτα όνομα δωματίου.');
+    $('room-edit-msg').style.color = '#f87171';
+    draw();
+    return;
+  }
+  const xs=path.map(p=>p.x), ys=path.map(p=>p.y);
+  const hex = $('prr-color').value;
+  send({type:'place_room_rect', x1:Math.min(...xs), y1:Math.min(...ys),
+        x2:Math.max(...xs), y2:Math.max(...ys), name,
+        color:[parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)]});
+  $('room-edit-msg').textContent = t('Τοποθέτηση…');
+  $('room-edit-msg').style.color = '#71717a';
   draw();
 });
 
