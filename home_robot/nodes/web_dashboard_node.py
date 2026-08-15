@@ -7855,7 +7855,7 @@ function renderAcoustic(m){
 // ── resizable viewers ──────────────────────────────────────────────────────
 // The big panels are flex:1 so they fill the pane. Dragging the grip pins an
 // explicit height instead; double-tapping it gives the pane back its space.
-const VIEWERS = ['map-wrap', 'cam-wrap', 'cost-wrap', 'arm3d', 'cloud-canvas'];
+const VIEWERS = ['map-wrap', 'cam-wrap', 'cost-wrap', 'arm3d', 'cloud-canvas', 'scan3d'];
 
 function loadSizes(){
   try { return JSON.parse(localStorage.getItem('hr_sizes') || '{}'); }
@@ -10775,14 +10775,14 @@ resize(); connect();
 {"imports": {"three": "/vendor/three/three.module.min.js"}}
 </script>
 <script type="module">
-// Photorealistic "Σάρωμα" view for the map tab's third button. A separate
+// Photorealistic "Σάρωμα" view for the map tab's second button. A separate
 // module script (import needs type="module") from the classic one above —
-// Three.js is the one deliberate exception to "no three.js, self-contained
-// page" (see wallsDraw's comment): a phone LiDAR scan's baked texture needs
-// a real WebGL scene graph, which the hand-rolled canvas painter's-algorithm
-// renderer the walls/arm tabs use has no material system for. Vendored
-// locally under /vendor/three (see THREE_VENDOR_DIR), not a CDN, so this
-// still works with no internet.
+// Three.js is the one deliberate exception to this dashboard's otherwise
+// self-contained, no-three.js canvas rendering (arm tab etc.): a phone
+// LiDAR scan's baked texture needs a real WebGL scene graph, which the
+// hand-rolled canvas painter's-algorithm renderer has no material system
+// for. Vendored locally under /vendor/three (see THREE_VENDOR_DIR), not a
+// CDN, so this still works with no internet.
 //
 // A module's top-level scope is its own, but it still chains to the page's
 // outer script-scope for name lookup — TOKEN_QS/$/t below are the classic
@@ -10833,6 +10833,7 @@ import { OrbitControls } from '/vendor/three/addons/controls/OrbitControls.js';
     controls = new OrbitControls(camera, renderer.domElement);
     controls.target.set(0, 1, 0);
     controls.update();
+    controls.addEventListener('change', saveCam);
     scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.2));
     const sun = new THREE.DirectionalLight(0xfff4e0, 1.0);
     sun.position.set(3, 6, 2);
@@ -10931,6 +10932,27 @@ import { OrbitControls } from '/vendor/three/addons/controls/OrbitControls.js';
     marker.rotation.y = m.yaw;
   }
 
+  // Remembers the camera framing across page loads (localStorage, same
+  // pattern as loadSizes()/saveSizes() for the resizable viewer panels) —
+  // added on request so "the size it's at right now" survives a reload
+  // instead of resetting to the whole-house auto-fit every time.
+  const CAM_KEY = 'hr_scan3d_camera';
+  function loadCam(){
+    try { return JSON.parse(localStorage.getItem(CAM_KEY)); } catch(e){ return null; }
+  }
+  let saveCamTimer = null;
+  function saveCam(){
+    clearTimeout(saveCamTimer);
+    saveCamTimer = setTimeout(() => {
+      try {
+        localStorage.setItem(CAM_KEY, JSON.stringify({
+          pos: camera.position.toArray(),
+          target: controls.target.toArray(),
+        }));
+      } catch(e){}
+    }, 300);   // debounced: 'change' fires on every drag/wheel tick
+  }
+
   function load(){
     if (loading || loaded) return;
     loading = true;
@@ -10944,16 +10966,23 @@ import { OrbitControls } from '/vendor/three/addons/controls/OrbitControls.js';
         // across, and the arm tab's fixed-FOCAL mistake (memory:
         // project_robot_arm_3d_model) is exactly the failure mode a
         // hardcoded camera position falls into here: too close, inside the
-        // walls, or too far to make anything out.
+        // walls, or too far to make anything out. Skipped once a saved
+        // camera exists — the user's own last framing wins from then on.
         const box = new THREE.Box3().setFromObject(gltf.scene);
         const size = box.getSize(new THREE.Vector3());
         const centre = box.getCenter(new THREE.Vector3());
         const radius = Math.max(size.x, size.y, size.z, 1) * 0.9;
-        camera.position.set(centre.x + radius, centre.y + radius * 0.6, centre.z + radius);
         camera.near = radius / 100;
         camera.far = radius * 20;
         camera.updateProjectionMatrix();
-        controls.target.copy(centre);
+        const saved = loadCam();
+        if (saved){
+          camera.position.fromArray(saved.pos);
+          controls.target.fromArray(saved.target);
+        } else {
+          camera.position.set(centre.x + radius, centre.y + radius * 0.6, centre.z + radius);
+          controls.target.copy(centre);
+        }
         controls.update();
         loaded = true; loading = false;
         if (info) info.textContent = t('έτοιμο');
