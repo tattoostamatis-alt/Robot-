@@ -7115,6 +7115,21 @@ function draw(){
     ctx.setLineDash([]);
   }
 
+  // Robot trail — where it has actually driven this session (pose(m) pushes
+  // into robotTrail on >5cm movement). History, drawn before the plan so the
+  // (brighter, thicker) upcoming route reads on top of it. Same colour and
+  // >5cm-movement source as the 3D walls view's trail (wallsDraw()) — this
+  // was the one map view that didn't render it yet.
+  if(robotTrail.length > 1){
+    ctx.strokeStyle = '#38bdf8'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    robotTrail.forEach(([x, y], i) => {
+      const p = w2c(x, y);
+      i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y);
+    });
+    ctx.stroke();
+  }
+
   // Global plan
   if(plan && plan.length>1){
     ctx.strokeStyle='rgba(96,165,250,.9)'; ctx.lineWidth=2.5;
@@ -11026,8 +11041,28 @@ import { OrbitControls } from '/vendor/three/addons/controls/OrbitControls.js';
   const info = document.getElementById('scan3d-info');
 
   let renderer, scene, camera, controls, marker, goalMarker, scanRoot;
+  let trailLine, planLine, trailLen = -1, planLen = -1;
   let loaded = false, loading = false;
   const raycaster = new THREE.Raycaster();
+
+  // Map (x,y) polyline -> a THREE.Line, rebuilding its geometry only when
+  // the point count actually changed (robotTrail/plan are appended-to or
+  // replaced wholesale, not mutated in place, so a length check is enough
+  // to skip the rebuild on the ~55 idle frames between real updates).
+  function syncLine(line, pts, prevLen, y){
+    if (pts.length === prevLen) return prevLen;
+    line.visible = pts.length > 1;
+    if (pts.length > 1){
+      const arr = new Float32Array(pts.length * 3);
+      for (let i = 0; i < pts.length; i++){
+        arr[i*3] = pts[i][0]; arr[i*3+1] = y; arr[i*3+2] = -pts[i][1];
+      }
+      line.geometry.dispose();
+      line.geometry = new THREE.BufferGeometry();
+      line.geometry.setAttribute('position', new THREE.BufferAttribute(arr, 3));
+    }
+    return pts.length;
+  }
 
   function ensureScene(){
     if (renderer) return;
@@ -11059,6 +11094,17 @@ import { OrbitControls } from '/vendor/three/addons/controls/OrbitControls.js';
     goalMarker = new THREE.Mesh(ring, new THREE.MeshStandardMaterial({color: 0xffa040}));
     goalMarker.visible = false;
     scene.add(goalMarker);
+    // Trail (where driven, same colour/source as the 2D canvas's) and plan
+    // (upcoming Nav2 route, same blue as the 2D canvas's) — both read the
+    // classic script's shared arrays each frame, like goalMarker does.
+    trailLine = new THREE.Line(new THREE.BufferGeometry(),
+      new THREE.LineBasicMaterial({color: 0x38bdf8}));
+    trailLine.visible = false;
+    scene.add(trailLine);
+    planLine = new THREE.Line(new THREE.BufferGeometry(),
+      new THREE.LineBasicMaterial({color: 0x60a5fa}));
+    planLine.visible = false;
+    scene.add(planLine);
     wireClickToNavigate();
     window.addEventListener('resize', resize);
     resize();
@@ -11109,6 +11155,8 @@ import { OrbitControls } from '/vendor/three/addons/controls/OrbitControls.js';
       goalMarker.visible = loaded && !!goal;
       if (goal) goalMarker.position.set(goal.x, 0.03, -goal.y);
     }
+    if (loaded && trailLine) trailLen = syncLine(trailLine, robotTrail, trailLen, 0.03);
+    if (loaded && planLine) planLen = syncLine(planLine, plan || [], planLen, 0.04);
     controls.update();
     renderer.render(scene, camera);
   }
