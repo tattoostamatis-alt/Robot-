@@ -2344,6 +2344,18 @@ class DashboardNode(Node):
             self._state.camera_jpg = jpg.tobytes()
             self._state.camera_at = time.monotonic()
             self._state.camera_seq += 1
+            # Pushed over the same /ws binary channel as the mic audio — see
+            # the 2026-08-14 note on camSetActive client-side: Safari's <img>
+            # does not decode multipart/x-mixed-replace (only a top-level
+            # navigation to /camera.mjpeg does), so the HTTP MJPEG stream
+            # rendered black there despite being perfectly healthy. The
+            # websocket is already proven to reach this exact browser (mic
+            # audio, pointcloud), so frames ride it instead. JPEG bytes always
+            # start with FFD8 (SOI), which is how the client tells a camera
+            # frame apart from a PCM audio chunk on the one shared binary
+            # channel without a wire-format change to the (working) audio path.
+            if self._cam_ws:
+                self._state.send_bytes(self._cam_ws, self._state.camera_jpg)
             self._judge_frame(bgr)
         except Exception as e:
             # Was a bare `pass`. A frame this callback cannot decode stops the
@@ -8583,8 +8595,17 @@ function connect(){
                      setTimeout(connect,2000); };
   ws.binaryType = 'arraybuffer';
   ws.onmessage = e=>{
-    // Audio arrives as binary; everything else is JSON.
-    if(e.data instanceof ArrayBuffer){ playPcmChunk(e.data); return; }
+    // Audio and camera frames both arrive as binary; everything else is JSON.
+    // A JPEG always starts with the FFD8 SOI marker, which is how the two
+    // binary payloads on this one channel are told apart — see the comment
+    // in _cb_camera (web_dashboard_node.py) for why the camera rides this
+    // channel at all instead of its own HTTP stream.
+    if(e.data instanceof ArrayBuffer){
+      const b = new Uint8Array(e.data);
+      if(b.length >= 2 && b[0] === 0xFF && b[1] === 0xD8) camShowFrame(b);
+      else playPcmChunk(e.data);
+      return;
+    }
     const m=JSON.parse(e.data);
     const h=HANDLERS[m.type];
     if(h) h(m);
@@ -10698,11 +10719,27 @@ function cloudSetActive(on){
 // actually closes the /camera.mjpeg connection — a display:none <img> keeps
 // fetching.
 let camOn = false;
+let camBlobUrl = null;
 function camSetActive(on){
   if(on === camOn) return;
   camOn = on;
   send({type: 'cam_view', on: on});
   $('cam').src = on ? ('/camera.mjpeg' + TOKEN_QS) : '';
+  if(!on && camBlobUrl){ URL.revokeObjectURL(camBlobUrl); camBlobUrl = null; }
+}
+
+// Safari-only in practice (see _cb_camera's comment in web_dashboard_node.py
+// for why the camera also rides the websocket): each frame replaces the
+// <img> src with a fresh blob URL. The OLD url is revoked only after the
+// new one is assigned, not before — revoking the one still on-screen while
+// it might still be decoding risks the image going blank between frames.
+function camShowFrame(bytes){
+  if(!camOn) return;
+  const url = URL.createObjectURL(new Blob([bytes], {type: 'image/jpeg'}));
+  const old = camBlobUrl;
+  camBlobUrl = url;
+  $('cam').src = url;
+  if(old) URL.revokeObjectURL(old);
 }
 
 // ── log tail ───────────────────────────────────────────────────────────────
