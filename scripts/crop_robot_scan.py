@@ -5,21 +5,26 @@ used to clean up config/robot_scan.glb for the map tab's "Σάρωμα" view.
 
 The raw scan includes whatever surface the robot was sitting on when
 scanned — a wide, roughly flat, light-coloured (wood-toned) patch several
-times the robot's own footprint. Two independent signals separate it from
-the robot, combined with AND so either one catches what the other misses:
+times the robot's own footprint, AND showing through the gaps in the
+robot's own base ring at low height. That second part is what makes this
+harder than a plain crop: radius-from-centre and colour brightness/warmth
+both put genuine floor pixels at the same range of values as the robot's
+own base at low height (a light-toned floor patch sits at small radius
+right in the gaps of the base ring; the base ring itself has bright
+specular highlights and a lighter-toned top plate elsewhere) — no single
+threshold on either signal alone was clean.
 
-  - radius: horizontal distance from the object's own (x,z) centre. The
-    floor patch extends far past the robot's actual footprint.
-  - brightness: the robot is dark (a bimodal split in per-vertex sampled
-    texture colour landed the cut around brightness 105 on this scan —
-    see the histogram in the session that wrote this script), the floor
-    patch is light.
-
-Neither alone was clean: radius-only left a light sliver where the floor
-dips low and close to the object's own axis at the very base; a tighter
-radius cut off jagged edges of the robot's own flared base instead of
-floor. Brightness needs sampling the actual baseColorTexture (no per-vertex
-colour in this GLB), via trimesh's TextureVisuals.to_color().
+What actually separated them: HEIGHT. Per-2cm-band colour composition
+(session that wrote this script) showed floor-toned pixels are 28-82% of
+every band below y=0.10, then abruptly under 3% in every band above it —
+a sharp, reliable cutoff. So the real fix is simpler than the two-signal
+approach it replaced: keep only y > ~0.095, plus a generous radius cap as
+a safety net against anything far off the object's own axis (a small
+disconnected debris fragment from the same scan sat well outside this).
+The lost bottom ~10cm of the base becomes a flat cut, which the map tab's
+loadRobotModel() already treats as the new floor-contact point (it shifts
+the model so its lowest remaining point sits on the floor) — it reads as
+"resting on the ground", not "floating".
 
 Connected-component filtering (keep only the largest mesh island) was tried
 and abandoned: this scan, like the house scan in ply_to_map.py's neighbour
@@ -29,7 +34,7 @@ usable as "the main body."
 
 Usage:
     crop_robot_scan.py robot_raw.glb config/robot_scan.glb
-        [--radius 0.20] [--brightness 105]
+        [--min-height 0.095] [--radius 0.30]
 """
 
 import argparse
@@ -43,10 +48,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('src_glb')
     ap.add_argument('dst_glb')
-    ap.add_argument('--radius', type=float, default=0.20,
-                     help='max horizontal distance (m) from the object centre to keep')
-    ap.add_argument('--brightness', type=float, default=105,
-                     help='max mean RGB (0-255) to keep — the floor patch is lighter than this')
+    ap.add_argument('--min-height', type=float, default=0.095,
+                     help='drop everything below this local Y (m) — where the floor shows through the base')
+    ap.add_argument('--radius', type=float, default=0.30,
+                     help='max horizontal distance (m) from the object centre — catches off-axis debris')
     args = ap.parse_args()
 
     scene = trimesh.load(args.src_glb)
@@ -55,14 +60,13 @@ def main():
     v = mesh.vertices
     cx, cz = np.median(v[:, 0]), np.median(v[:, 2])
     r = np.hypot(v[:, 0] - cx, v[:, 2] - cz)
-    brightness = mesh.visual.to_color().vertex_colors[:, :3].mean(axis=1)
 
     face_r_max = r[mesh.faces].max(axis=1)
-    face_bright = brightness[mesh.faces].mean(axis=1)
-    keep = (face_r_max < args.radius) & (face_bright < args.brightness)
+    face_y_min = v[mesh.faces][:, :, 1].min(axis=1)
+    keep = (face_y_min > args.min_height) & (face_r_max < args.radius)
 
     if not keep.any():
-        print('nothing left after filtering — check --radius/--brightness', file=sys.stderr)
+        print('nothing left after filtering — check --min-height/--radius', file=sys.stderr)
         return 1
 
     sub = mesh.submesh([keep], append=True)
