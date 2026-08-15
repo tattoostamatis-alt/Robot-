@@ -107,10 +107,10 @@ SRC_MAPS_DIR = (os.path.join(SRC_HOME, 'maps')
                 else os.path.join(SHARE, 'maps'))
 NOVNC_DIR = '/usr/share/novnc'
 # Vendored locally (not a CDN) so the "Σάρωμα" 3D-scan view still works with
-# no internet — the one deliberate exception to "no three.js, self-contained
-# page" (see wallsDraw's comment): a photorealistic textured mesh needs a
-# real WebGL scene graph, which the hand-rolled canvas painter's-algorithm
-# renderer used for the walls/arm tabs cannot give it.
+# no internet — the one deliberate exception to this dashboard's otherwise
+# self-contained, no-three.js canvas rendering (arm tab etc.): a
+# photorealistic textured mesh needs a real WebGL scene graph, which the
+# hand-rolled canvas painter's-algorithm renderer cannot give it.
 THREE_VENDOR_DIR = os.path.join(SRC_HOME, 'web_static', 'vendor', 'three')
 
 # RTAB-Map keeps ONE live database (house.db) that grows for as long as the
@@ -5172,23 +5172,11 @@ button{font:inherit;color:inherit}
     <section class="pane active" id="p-map">
       <div class="row" style="margin-bottom:8px">
         <button class="btn pri" id="map-view-2d">🗺️ 2D</button>
-        <button class="btn" id="map-view-3d">🏗️ 3D</button>
         <button class="btn" id="map-view-scan">📸 Σάρωμα</button>
       </div>
       <div id="map-wrap">
         <canvas id="map-canvas"></canvas>
         <div class="ovl">ΧΑΡΤΗΣ · κλικ για πλοήγηση</div>
-      </div>
-      <div class="card" id="map-walls3d-card" style="display:none">
-        <h3>Τοίχοι 3D <span class="badge" id="walls3d-info">—</span>
-          <button class="btn" id="b-walls3d-reset" style="float:right">Επαναφορά όψης</button>
-        </h3>
-        <canvas id="walls3d" style="width:100%;height:min(58vh,600px);min-height:260px;
-          background:#0a0a0b;border-radius:8px;touch-action:none;cursor:grab;
-          display:block"></canvas>
-        <div style="color:#71717a;font-size:11.5px;margin-top:6px">
-          Σύρε για περιστροφή · ροδέλα για ζουμ · από τον καθαρό (τετραγωνισμένο) 2D χάρτη
-        </div>
       </div>
       <div class="card" id="map-scan3d-card" style="display:none">
         <h3>Φωτορεαλιστικό σάρωμα <span class="badge" id="scan3d-info">—</span></h3>
@@ -6627,24 +6615,20 @@ function showTab(id){
 }
 
 // ── map tab: 2D / 3D toggle ─────────────────────────────────────────────────
-// One pane, two views of the SAME active map — replaces what used to be a
-// separate "Τοίχοι 3D" tab. 3D geometry (/maps/walls3d) is fetched lazily on
-// first switch to 3D (wallsLoad() is idempotent), same as the arm's model.
-let mapView = '3d';
+// One pane, two views of the SAME active map. The old "Τοίχοι 3D"
+// extruded-walls view was dropped per user request (2026-08-15) — the
+// photorealistic scan view covers 3D, this canvas only does 2D now.
+let mapView = '2d';
 function setMapView(view){
   mapView = view;
   $('map-view-2d').classList.toggle('pri', view === '2d');
-  $('map-view-3d').classList.toggle('pri', view === '3d');
   $('map-view-scan').classList.toggle('pri', view === 'scan');
   $('map-wrap').style.display = view === '2d' ? '' : 'none';
-  $('map-walls3d-card').style.display = view === '3d' ? '' : 'none';
   $('map-scan3d-card').style.display = view === 'scan' ? '' : 'none';
   if (view === '2d') resize();
-  else if (view === '3d') { wallsLoad(); wallsDraw(); }
   else if (view === 'scan' && window.hrScan3d) window.hrScan3d.activate();
 }
 $('map-view-2d').onclick = () => setMapView('2d');
-$('map-view-3d').onclick = () => setMapView('3d');
 $('map-view-scan').onclick = () => setMapView('scan');
 // NB: the initial showTab() call lives at the bottom of the script — calling it
 // here would touch VNC_APPS before its `const` is initialised (temporal dead
@@ -7117,9 +7101,7 @@ function draw(){
 
   // Robot trail — where it has actually driven this session (pose(m) pushes
   // into robotTrail on >5cm movement). History, drawn before the plan so the
-  // (brighter, thicker) upcoming route reads on top of it. Same colour and
-  // >5cm-movement source as the 3D walls view's trail (wallsDraw()) — this
-  // was the one map view that didn't render it yet.
+  // (brighter, thicker) upcoming route reads on top of it.
   if(robotTrail.length > 1){
     ctx.strokeStyle = '#38bdf8'; ctx.lineWidth = 3.5;
     ctx.beginPath();
@@ -7267,7 +7249,6 @@ const HANDLERS = {
     }
     draw();
     drawCompass2();
-    if (mapView === '3d') wallsDraw();
     if (window.hrScan3d) window.hrScan3d.setPose(m);
   },
   scan(m){ scan=m; draw(); },
@@ -7874,7 +7855,7 @@ function renderAcoustic(m){
 // ── resizable viewers ──────────────────────────────────────────────────────
 // The big panels are flex:1 so they fill the pane. Dragging the grip pins an
 // explicit height instead; double-tapping it gives the pane back its space.
-const VIEWERS = ['map-wrap', 'cam-wrap', 'cost-wrap', 'arm3d', 'cloud-canvas', 'walls3d'];
+const VIEWERS = ['map-wrap', 'cam-wrap', 'cost-wrap', 'arm3d', 'cloud-canvas'];
 
 function loadSizes(){
   try { return JSON.parse(localStorage.getItem('hr_sizes') || '{}'); }
@@ -8010,8 +7991,7 @@ function setupCards(){
 // A canvas inside a folded card has no size; on unfold it needs repainting.
 function redrawVisible(){
   for (const f of [window.draw, window.armDraw, window.drawCompass2,
-                   window.drawPointRing, window.drawCost, window.cloudDraw,
-                   window.wallsDraw]){
+                   window.drawPointRing, window.drawCost, window.cloudDraw]){
     if (typeof f === 'function') { try { f(); } catch(e){} }
   }
   window.dispatchEvent(new Event('resize'));
@@ -9936,11 +9916,6 @@ async function mapSwitch(name){
   catch(e){ /* fire-and-forget: the swap keeps going server-side either way */ }
   setTimeout(mapsRefresh, 4000);
   setTimeout(mapsRefresh, 10000);
-  // Two attempts, same reasoning as mapsRefresh above: the first can race the
-  // hot-swap (map_server briefly down) and land on wallsLoad()'s error path,
-  // which does not retry itself — a second, later attempt catches that.
-  setTimeout(wallsReload, 10000);
-  setTimeout(wallsReload, 16000);
 }
 
 async function mapDelete(name){
@@ -9952,15 +9927,6 @@ async function mapDelete(name){
     mapMsg(r.ok ? t('Διαγράφηκε') + ': ' + name : t('Απέτυχε') + ': ' + (r.error || ''));
   } catch(e){ mapMsg(t('Απέτυχε') + ': ' + e); }
   mapsRefresh();
-}
-
-// The 3D view caches wallsModel forever once loaded (wallsLoad() is a
-// load-once guard, see its comment) — without this it kept showing whichever
-// map was active when the page first opened 3D, even after switching maps.
-function wallsReload(){
-  wallsModel = null;
-  wallsLoading = false;
-  if (mapView === '3d') wallsLoad();
 }
 
 async function mapNew(){
@@ -10379,214 +10345,6 @@ function armDraw(){
   };
 })();
 
-// ── Τοίχοι 3D (floorplan extruded from the 2D map) ─────────────────────────
-// Same painter's-algorithm canvas approach as the arm/point-cloud tabs above
-// — no three.js, self-contained page. Geometry is /maps/walls3d: one quad
-// per straight wall segment, already rectilinear (see map_walls3d.py), so
-// there is no mesh to walk, just a box per wall. World axes here match the
-// arm's convention (Z up, yaw rotates the XY ground plane) so toView/project
-// below are the identical formulas, just renamed.
-let wallsModel = null, wallsBounds = null, wallsLoading = false;
-let wallsYaw = -0.7, wallsPitch = -0.55, wallsZoom = 1;
-
-function wallsLoad(){
-  if (wallsModel || wallsLoading) return;
-  wallsLoading = true;
-  $('walls3d-info').textContent = t('φόρτωση…');
-  fetch('/maps/walls3d' + TOKEN_QS)
-    .then(r => r.ok ? r.json() : Promise.reject(r.status))
-    .then(m => {
-      wallsModel = m.walls || [];
-      let minX=1e9, maxX=-1e9, minY=1e9, maxY=-1e9;
-      for (const wobj of wallsModel) for (const [x,y] of wobj.corners){
-        if (x<minX) minX=x; if (x>maxX) maxX=x;
-        if (y<minY) minY=y; if (y>maxY) maxY=y;
-      }
-      wallsBounds = wallsModel.length ? {minX,maxX,minY,maxY} : null;
-      $('walls3d-info').textContent = wallsModel.length + ' ' + t('τοίχοι');
-      wallsDraw();
-    })
-    .catch(e => {
-      wallsLoading = false;
-      $('walls3d-info').textContent = t('δεν φορτώθηκε');
-    });
-}
-
-// One wall footprint (a world-XY quad) extruded into 6 quad faces -> 12 tris.
-// No backface culling here (unlike the arm): the outer-boundary edges and
-// the interior-wall rectangles come from two different contour sources with
-// no shared winding guarantee, and at ~50 boxes drawing both sides of every
-// face costs nothing worth chasing that down for.
-function wallsAddBox(corners, height, out){
-  const b  = corners.map(([x,y]) => [x, y, 0]);
-  const tp = corners.map(([x,y]) => [x, y, height]);
-  const quads = [
-    [b[0],b[1],b[2],b[3]], [tp[0],tp[1],tp[2],tp[3]],
-    [b[0],b[1],tp[1],tp[0]], [b[1],b[2],tp[2],tp[1]],
-    [b[2],b[3],tp[3],tp[2]], [b[3],b[0],tp[0],tp[3]],
-  ];
-  for (const q of quads){
-    out.push([q[0],q[1],q[2]]);
-    out.push([q[0],q[2],q[3]]);
-  }
-}
-
-const WALLS_COLOR = [150, 155, 168];
-
-function wallsDraw(){
-  const cv = $('walls3d'); if (!cv) return;
-  const ctx = cv.getContext('2d');
-  const dpr = window.devicePixelRatio || 1;
-  const w = cv.clientWidth, h = cv.clientHeight;
-  if (cv.width !== w*dpr || cv.height !== h*dpr){ cv.width = w*dpr; cv.height = h*dpr; }
-  ctx.setTransform(dpr,0,0,dpr,0,0);
-  ctx.clearRect(0,0,w,h);
-  if (!wallsModel || !wallsBounds) return;
-
-  const b = wallsBounds;
-  const span = Math.max(b.maxX-b.minX, b.maxY-b.minY, 1);
-  const cx0 = (b.minX+b.maxX)/2, cy0 = (b.minY+b.maxY)/2;
-
-  const cy = Math.cos(wallsYaw), sy = Math.sin(wallsYaw);
-  const cp = Math.cos(wallsPitch), sp = Math.sin(wallsPitch);
-  const toView = v => {
-    const xr =  v[0]*cy + v[1]*sy;
-    const yr = -v[0]*sy + v[1]*cy;
-    return [xr, yr*sp + v[2]*cp, yr*cp - v[2]*sp];
-  };
-  // Gentle perspective, scaled to the building rather than a fixed metre
-  // count — same reasoning as the arm tab's FOCAL, different unit (metres of
-  // floorplan instead of metres of arm reach).
-  const FOCAL = span * 2.0;
-  const scale = (Math.min(w, h) * 0.8 / span) * wallsZoom;
-  let ox = 0, oy = 0;
-  const project = p => {
-    const k = FOCAL / (FOCAL + p[2]);
-    return [ox + p[0]*scale*k, oy - p[1]*scale*k, k];
-  };
-  const centre = v => [v[0]-cx0, v[1]-cy0, v[2]];
-
-  const faces = [];
-  const tris = [];
-  for (const wobj of wallsModel) wallsAddBox(wobj.corners, wobj.height, tris);
-  for (const [p0,p1,p2] of tris){
-    const vv = [toView(centre(p0)), toView(centre(p1)), toView(centre(p2))];
-    const ux=vv[1][0]-vv[0][0], uy=vv[1][1]-vv[0][1], uz=vv[1][2]-vv[0][2];
-    const wx=vv[2][0]-vv[0][0], wy=vv[2][1]-vv[0][1], wz=vv[2][2]-vv[0][2];
-    let nx=uy*wz-uz*wy, ny=uz*wx-ux*wz, nz=ux*wy-uy*wx;
-    const nl = Math.hypot(nx,ny,nz) || 1;
-    nx/=nl; ny/=nl; nz/=nl;
-    const p = vv.map(project);
-    faces.push([(vv[0][2]+vv[1][2]+vv[2][2])/3, p, [nx,ny,nz]]);
-  }
-  faces.sort((a,b2) => b2[0]-a[0]);
-
-  // Centre on the projected bounding box, not a world-space guess — same
-  // trick the arm tab uses, so panning while dragging keeps the model on
-  // screen instead of drifting off one edge.
-  let bx0=1e9, by0=1e9, bx1=-1e9, by1=-1e9;
-  for (const f of faces) for (const q of f[1]){
-    if (q[0]<bx0) bx0=q[0]; if (q[0]>bx1) bx1=q[0];
-    if (q[1]<by0) by0=q[1]; if (q[1]>by1) by1=q[1];
-  }
-  ox = bx1>bx0 ? w/2-(bx0+bx1)/2 : w/2;
-  oy = bx1>bx0 ? h/2-(by0+by1)/2 : h/2;
-
-  // Floor grid, drawn before the walls so it always sits behind them.
-  const gridStep = span/10, gridN = 6;
-  ctx.lineWidth = 1;
-  for (let i=-gridN; i<=gridN; i++){
-    for (const axis of [0,1]){
-      const p0 = project(toView(centre(axis===0 ? [cx0+i*gridStep, cy0-gridN*gridStep, 0]
-                                                 : [cx0-gridN*gridStep, cy0+i*gridStep, 0])));
-      const p1 = project(toView(centre(axis===0 ? [cx0+i*gridStep, cy0+gridN*gridStep, 0]
-                                                 : [cx0+gridN*gridStep, cy0+i*gridStep, 0])));
-      ctx.strokeStyle = (i===0) ? '#33333d' : '#1e1e24';
-      // project() already bakes ox/oy in (it runs after they're set, unlike
-      // the wall faces below which were projected back when ox/oy were still
-      // 0) — adding them again here doubled the offset and pushed almost the
-      // whole grid off-canvas, leaving only the corner that happened to wrap
-      // back into view. Found while adding the robot trail, which had copied
-      // this same pattern and gone off-screen the same way.
-      ctx.beginPath(); ctx.moveTo(p0[0], p0[1]); ctx.lineTo(p1[0], p1[1]); ctx.stroke();
-    }
-  }
-
-  // Two-sided Lambert (abs of the dot) — see wallsAddBox for why nothing is
-  // culled: an inward-wound triangle should still read as lit, not black.
-  const L = ARM_LIGHT;
-  for (const [, p, n] of faces){
-    const diff = Math.abs(n[0]*L[0] + n[1]*L[1] + n[2]*L[2]);
-    const f = 0.35 + 0.65*diff;
-    const r  = Math.min(255, WALLS_COLOR[0]*f)|0;
-    const g2 = Math.min(255, WALLS_COLOR[1]*f)|0;
-    const bl = Math.min(255, WALLS_COLOR[2]*f)|0;
-    ctx.fillStyle = ctx.strokeStyle = `rgb(${r},${g2},${bl})`;
-    ctx.beginPath();
-    ctx.moveTo(p[0][0]+ox, p[0][1]+oy);
-    ctx.lineTo(p[1][0]+ox, p[1][1]+oy);
-    ctx.lineTo(p[2][0]+ox, p[2][1]+oy);
-    ctx.closePath();
-    ctx.fill();
-    ctx.lineWidth = 0.6;
-    ctx.stroke();
-  }
-
-  // Robot trail — drawn last (on top), no depth test against the walls: at
-  // floor height inside rooms that already-correct-looking painter's-order
-  // omission is not worth a depth buffer for a 2D line. project() already
-  // bakes ox/oy in at this point in the function (see the grid comment
-  // above) — do NOT add them again here.
-  if (robotTrail.length > 1){
-    ctx.strokeStyle = '#38bdf8';
-    ctx.lineWidth = 3.5;
-    ctx.beginPath();
-    robotTrail.forEach(([x, y], i) => {
-      const p = project(toView(centre([x, y, 0.03])));
-      if (i === 0) ctx.moveTo(p[0], p[1]);
-      else ctx.lineTo(p[0], p[1]);
-    });
-    ctx.stroke();
-  }
-  if (pose){
-    const p = project(toView(centre([pose.x, pose.y, 0.05])));
-    ctx.fillStyle = '#f59e0b';
-    ctx.beginPath(); ctx.arc(p[0], p[1], 5, 0, Math.PI * 2); ctx.fill();
-  }
-}
-
-(function wallsWireInteraction(){
-  const cv = $('walls3d'); if (!cv) return;
-  let drag = null;
-  const pos = e => e.touches ? [e.touches[0].clientX, e.touches[0].clientY]
-                             : [e.clientX, e.clientY];
-  const down = e => { drag = pos(e); cv.style.cursor='grabbing'; };
-  const move = e => {
-    if (!drag) return;
-    const [x,y] = pos(e);
-    wallsYaw   += (x - drag[0]) * 0.01;
-    wallsPitch += (y - drag[1]) * 0.01;
-    wallsPitch = Math.max(-1.4, Math.min(1.4, wallsPitch));
-    drag = [x,y];
-    e.preventDefault();
-    wallsDraw();
-  };
-  const up = () => { drag = null; cv.style.cursor='grab'; };
-  cv.addEventListener('mousedown', down);
-  cv.addEventListener('touchstart', down, {passive:true});
-  window.addEventListener('mousemove', move);
-  cv.addEventListener('touchmove', move, {passive:false});
-  window.addEventListener('mouseup', up);
-  cv.addEventListener('touchend', up);
-  cv.addEventListener('wheel', e => {
-    e.preventDefault();
-    wallsZoom = Math.max(0.4, Math.min(3, wallsZoom * (e.deltaY > 0 ? 0.9 : 1.1)));
-    wallsDraw();
-  }, {passive:false});
-  $('b-walls3d-reset').onclick = () => {
-    wallsYaw=-0.7; wallsPitch=-0.55; wallsZoom=1; wallsDraw();
-  };
-})();
 
 // ── who is speaking ─────────────────────────────────────────────────────────
 // Deliberately shows what it does NOT know: a name with no matched face reads
