@@ -3946,6 +3946,23 @@ async def arm_model(request: Request, t: str = ''):
                         headers={'Cache-Control': 'public, max-age=86400'})
 
 
+@app.get('/robot_scan.glb')
+async def robot_scan_glb(request: Request, t: str = ''):
+    """Photorealistic textured scan of the robot itself (phone LiDAR, e.g.
+    Scaniverse), shown at the live pose in the map tab's "Σάρωμα" view in
+    place of the plain orange cone marker. One global asset (unlike
+    /maps/scan.glb, which is per-map) — the robot doesn't change per map.
+    """
+    if not _authorised(t, request.cookies):
+        return Response('Unauthorized', status_code=401)
+    path = os.path.join(SRC_CONFIG_DIR, 'robot_scan.glb')
+    if not os.path.exists(path):
+        return JSONResponse({'error': 'no robot_scan.glb in config/'}, status_code=404)
+    with open(path, 'rb') as f:
+        return Response(f.read(), media_type='model/gltf-binary',
+                        headers={'Cache-Control': 'public, max-age=86400'})
+
+
 @app.get('/camera.mjpeg')
 async def camera(request: Request, t: str = ''):
     if not _authorised(t, request.cookies):
@@ -10799,6 +10816,7 @@ import { OrbitControls } from '/vendor/three/addons/controls/OrbitControls.js';
   const info = document.getElementById('scan3d-info');
 
   let renderer, scene, camera, controls, marker, goalMarker, scanRoot;
+  let robotGroup, robotModelReady = false;
   let trailLine, planLine, trailLen = -1, planLen = -1;
   let loaded = false, loading = false;
   const raycaster = new THREE.Raycaster();
@@ -10845,6 +10863,13 @@ import { OrbitControls } from '/vendor/three/addons/controls/OrbitControls.js';
     marker = new THREE.Mesh(cone, new THREE.MeshStandardMaterial({color: 0xf59e0b}));
     marker.visible = false;
     scene.add(marker);
+    // Photorealistic robot marker: loaded lazily below (loadRobotModel), only
+    // takes over from the cone once it actually loads — the cone is the
+    // fallback if /robot_scan.glb 404s.
+    robotGroup = new THREE.Group();
+    robotGroup.visible = false;
+    scene.add(robotGroup);
+    loadRobotModel();
     // Goal marker: flat ring on the floor, same #ffa040 as the 2D canvas's
     // click-to-navigate circle (draw()'s goal marker) — same shared `goal`
     // global, just a different renderer drawing it.
@@ -10926,10 +10951,44 @@ import { OrbitControls } from '/vendor/three/addons/controls/OrbitControls.js';
   // (large) loaded mesh, only the small marker gets that transform per pose.
   function setPose(m){
     if (!marker) return;
-    if (!m){ marker.visible = false; return; }
-    marker.visible = loaded;
+    if (!m){
+      marker.visible = false;
+      if (robotGroup) robotGroup.visible = false;
+      return;
+    }
+    // The photorealistic robot model, once loaded, replaces the cone —
+    // never both at once, so a still-loading/missing scan doesn't leave the
+    // robot invisible in the meantime.
+    marker.visible = loaded && !robotModelReady;
     marker.position.set(m.x, 0.06, -m.y);
     marker.rotation.y = m.yaw;
+    if (robotGroup){
+      robotGroup.visible = loaded && robotModelReady;
+      robotGroup.position.set(m.x, 0.01, -m.y);
+      robotGroup.rotation.y = m.yaw;
+    }
+  }
+
+  // Loads config/robot_scan.glb (a phone LiDAR scan of the physical robot,
+  // e.g. Scaniverse) once, independent of the house scan's load(). Same
+  // native-Y-up == this scene's world convention as the house mesh (see
+  // load()'s comment) — no axis rotation needed, just centre it on its own
+  // local (x,z) origin and shift it up so its lowest scanned point sits on
+  // the floor, since the raw scan's own origin is wherever Scaniverse put it.
+  function loadRobotModel(){
+    new GLTFLoader().load('/robot_scan.glb' + (TOKEN_QS || ''),
+      (gltf) => {
+        const box = new THREE.Box3().setFromObject(gltf.scene);
+        const centre = box.getCenter(new THREE.Vector3());
+        gltf.scene.position.x -= centre.x;
+        gltf.scene.position.z -= centre.z;
+        gltf.scene.position.y -= box.min.y;
+        robotGroup.add(gltf.scene);
+        robotModelReady = true;
+        setPose(pose || null);
+      },
+      undefined,
+      () => { /* no robot_scan.glb yet — the cone marker stays the fallback */ });
   }
 
   // Remembers the camera framing across page loads (localStorage, same
