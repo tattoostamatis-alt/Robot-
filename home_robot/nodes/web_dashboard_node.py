@@ -1615,6 +1615,106 @@ class DashboardNode(Node):
         self.get_logger().info(f'room placed on {map_name}: {name} ({label_id})')
         self._state.broadcast({'type': 'room_saved', 'ok': True})
 
+    def _place_room_rect(self, x1, y1, x2, y2, name, color):
+        """Draw-a-rectangle version of _place_room, for spaces
+        room_segment.segment's distance-transform watershed can't cleanly
+        separate — open-plan areas with no doorway pinch point, where a
+        single click either grabs the whole open area or nothing. Same
+        two-opposite-corners convention as _add_keepout_zone, but paints
+        <map>_room_mask.png pixels directly instead of adding a vector zone:
+        rooms have no polygon format anywhere in this file (see
+        room_files.py) — a flat pixel mask is what rendering/picking/the
+        room list already read, so a raw rectangle rasterizes straight into
+        it, no intersection with the flood-fill segmentation needed.
+
+        Unlike _place_room, this does NOT stay inside one recognised blob —
+        it is the deliberately blunt tool for when the room shape isn't one.
+        It still skips occupied (wall) pixels within the rectangle so a
+        painted room doesn't tint the walls bounding it.
+        """
+        try:
+            name = str(name).strip()
+            if not name:
+                raise ValueError('όνομα δωματίου κενό')
+            if not (isinstance(color, list) and len(color) == 3):
+                raise ValueError('άκυρο χρώμα')
+            rgb = [max(0, min(255, int(v))) for v in color]
+            x1, y1, x2, y2 = float(x1), float(y1), float(x2), float(y2)
+            if abs(x2 - x1) < 0.10 or abs(y2 - y1) < 0.10:
+                raise ValueError('πολύ μικρό τετράγωνο — μάλλον misclick')
+
+            map_name = self.active_map()
+            if not map_name:
+                raise ValueError('κανένας αποθηκευμένος χάρτης ενεργός')
+
+            yaml_path = os.path.join(SRC_MAPS_DIR, f'{map_name}.yaml')
+            with open(yaml_path) as f:
+                meta = yaml.safe_load(f)
+            res = float(meta['resolution'])
+            ox, oy = float(meta['origin'][0]), float(meta['origin'][1])
+            w_px, h_px = self._map_pgm_shape(map_name)
+
+            def to_px(x, y):
+                col = int((x - ox) / res)
+                row = h_px - 1 - int((y - oy) / res)   # image-side up, same as _place_room
+                return col, row
+
+            c1, r1 = to_px(x1, y1)
+            c2, r2 = to_px(x2, y2)
+            c_lo, c_hi = sorted((c1, c2))
+            r_lo, r_hi = sorted((r1, r2))
+            c_lo, c_hi = max(0, c_lo), min(w_px, c_hi + 1)
+            r_lo, r_hi = max(0, r_lo), min(h_px, r_hi + 1)
+            if c_hi <= c_lo or r_hi <= r_lo:
+                raise ValueError('εκτός χάρτη')
+
+            from PIL import Image
+            pgm_path = os.path.join(SRC_MAPS_DIR, f'{map_name}.pgm')
+            gray = np.array(Image.open(pgm_path))
+            if gray.ndim == 3:
+                gray = gray[:, :, 0]
+            not_wall = gray[r_lo:r_hi, c_lo:c_hi] > 50   # exclude occupied/near-black cells
+
+            mask_path, colours_path = room_files.paths_for(map_name)
+            mask_arr = None
+            if os.path.exists(mask_path):
+                mask_arr = np.array(Image.open(mask_path).convert('RGBA'))
+                if mask_arr.shape[:2] != (h_px, w_px):
+                    mask_arr = None    # stale mask from a different map size
+            if mask_arr is None:
+                mask_arr = np.zeros((h_px, w_px, 4), np.uint8)
+            try:
+                with open(colours_path) as f:
+                    colours = yaml.safe_load(f) or {}
+            except OSError:
+                colours = {}
+
+            region = mask_arr[r_lo:r_hi, c_lo:c_hi]
+            region[not_wall, 0] = rgb[0]
+            region[not_wall, 1] = rgb[1]
+            region[not_wall, 2] = rgb[2]
+            region[not_wall, 3] = 255
+            colours[name] = rgb
+
+            Image.fromarray(mask_arr).save(mask_path)
+            with open(colours_path, 'w') as f:
+                yaml.safe_dump(colours, f, allow_unicode=True)
+        except Exception as exc:
+            self.get_logger().warn(f'place_room_rect: {exc!r}')
+            self._state.broadcast({'type': 'room_saved', 'ok': False,
+                                   'error': str(exc)})
+            return
+
+        self._room_mask_key = None
+        if self._last_map is not None:
+            self._cb_map(self._last_map)
+        else:
+            _, _, names = self._load_room_mask()
+            self._state.map_rooms = {n: list(c) for n, c in (names or {}).items()}
+            self._state.broadcast({'type': 'map_rooms', 'rooms': self._state.map_rooms})
+        self.get_logger().info(f'room rect placed on {map_name}: {name}')
+        self._state.broadcast({'type': 'room_saved', 'ok': True})
+
     # ── keepout zones ────────────────────────────────────────────────────
     # Areas Nav2 must not enter — see home_robot/keepout_files.py for why the
     # zones are per-map (maps/<map>_keepout_zones.yaml) but the rendered mask
@@ -3615,6 +3715,12 @@ class DashboardNode(Node):
                              args=(msg.get('x'), msg.get('y'),
                                    msg.get('name', ''), msg.get('color')),
                              daemon=True).start()
+        elif t == 'place_room_rect':
+            threading.Thread(target=self._place_room_rect,
+                             args=(msg.get('x1'), msg.get('y1'),
+                                   msg.get('x2'), msg.get('y2'),
+                                   msg.get('name', ''), msg.get('color')),
+                             daemon=True).start()
         elif t == 'add_keepout_zone':
             threading.Thread(target=self._add_keepout_zone,
                              args=(msg.get('x1'), msg.get('y1'),
@@ -5285,6 +5391,18 @@ button{font:inherit;color:inherit}
           <input type="color" id="pr-color" value="#cc44ff"
             style="width:34px;height:30px;padding:0;border:none;background:none;flex:0 0 auto">
           <input type="text" id="pr-name" placeholder="π.χ. κρεβατοκάμαρα"
+            style="flex:1;min-width:100px;background:#232329;border:1px solid #2c2c32;
+            border-radius:8px;color:#e4e4e7;padding:6px 9px;font-size:12.5px">
+        </div>
+        <label style="display:flex;align-items:center;gap:9px;font-size:12.5px;
+          cursor:pointer;user-select:none;margin-top:6px">
+          <input type="checkbox" id="b-place-room-rect" style="vertical-align:-2px">
+          ⬜ 2 κλικ στον χάρτη ζωγραφίζουν δωμάτιο σαν τετράγωνο (απέναντι γωνίες)
+        </label>
+        <div class="row" id="place-room-rect-row" style="margin-top:6px;gap:8px;display:none">
+          <input type="color" id="prr-color" value="#cc44ff"
+            style="width:34px;height:30px;padding:0;border:none;background:none;flex:0 0 auto">
+          <input type="text" id="prr-name" placeholder="π.χ. κρεβατοκάμαρα"
             style="flex:1;min-width:100px;background:#232329;border:1px solid #2c2c32;
             border-radius:8px;color:#e4e4e7;padding:6px 9px;font-size:12.5px">
         </div>
@@ -7134,6 +7252,12 @@ function draw(){
     ctx.beginPath(); ctx.arc(c.x,c.y,6,0,Math.PI*2); ctx.stroke();
     ctx.setLineDash([]);
   }
+  if(prrCorner){
+    const c=w2c(prrCorner.x,prrCorner.y);
+    ctx.strokeStyle='#cc44ff'; ctx.setLineDash([4,3]); ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.arc(c.x,c.y,6,0,Math.PI*2); ctx.stroke();
+    ctx.setLineDash([]);
+  }
 
   // Robot trail — where it has actually driven this session (pose(m) pushes
   // into robotTrail on >5cm movement). History, drawn before the plan so the
@@ -8614,20 +8738,23 @@ function connect(){
 function send(o){ if(ws&&ws.readyState===1) ws.send(JSON.stringify(o)); }
 
 // ── map click ──────────────────────────────────────────────────────────────
-// Three click-modes share the canvas with plain navigation, so they are
-// mutually exclusive checkboxes: checking one un-checks the others, rather
-// than layering meanings onto the same click with no visual cue.
-const CLICK_MODE_BOXES = ['b-pick-room', 'b-place-room', 'b-kz-add'];
+// Click-modes share the canvas with plain navigation, so they are mutually
+// exclusive checkboxes: checking one un-checks the others, rather than
+// layering meanings onto the same click with no visual cue.
+const CLICK_MODE_BOXES = ['b-pick-room', 'b-place-room', 'b-place-room-rect', 'b-kz-add'];
 function syncClickModeRows(){
   $('place-room-row').style.display = $('b-place-room').checked ? '' : 'none';
+  $('place-room-rect-row').style.display = $('b-place-room-rect').checked ? '' : 'none';
   $('kz-add-row').style.display = $('b-kz-add').checked ? '' : 'none';
-  if(!$('b-kz-add').checked) kzCorner = null;   // abandon a half-drawn zone
+  if(!$('b-kz-add').checked) kzCorner = null;             // abandon a half-drawn zone
+  if(!$('b-place-room-rect').checked) prrCorner = null;   // abandon a half-drawn room rect
 }
 CLICK_MODE_BOXES.forEach(id => $(id).addEventListener('change', () => {
   if($(id).checked) CLICK_MODE_BOXES.filter(o => o !== id).forEach(o => $(o).checked = false);
   syncClickModeRows();
 }));
 let kzCorner = null;    // first click of a 2-click keepout rectangle, or null
+let prrCorner = null;   // first click of a 2-click room rectangle, or null
 canvas.addEventListener('click',e=>{
   const r=canvas.getBoundingClientRect();
   const cx=(e.clientX-r.left)*canvas.width/r.width;
@@ -8639,6 +8766,23 @@ canvas.addEventListener('click',e=>{
     send({type:'add_keepout_zone', x1:kzCorner.x, y1:kzCorner.y, x2:wp.x, y2:wp.y, name});
     kzCorner = null;
     $('kz-msg').textContent = t('Προσθήκη…'); $('kz-msg').style.color = '#71717a';
+    return;
+  }
+  if($('b-place-room-rect').checked){
+    if(!prrCorner){ prrCorner = wp; draw(); return; }
+    const name = $('prr-name').value.trim();
+    if(!name){
+      $('room-edit-msg').textContent = t('Δώσε πρώτα όνομα δωματίου.');
+      $('room-edit-msg').style.color = '#f87171';
+      prrCorner = null; draw();
+      return;
+    }
+    const hex = $('prr-color').value;
+    send({type:'place_room_rect', x1:prrCorner.x, y1:prrCorner.y, x2:wp.x, y2:wp.y, name,
+          color:[parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)]});
+    prrCorner = null;
+    $('room-edit-msg').textContent = t('Τοποθέτηση…');
+    $('room-edit-msg').style.color = '#71717a';
     return;
   }
   if($('b-place-room').checked){
