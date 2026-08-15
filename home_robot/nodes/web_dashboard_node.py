@@ -5196,8 +5196,9 @@ button{font:inherit;color:inherit}
           background:#0a0a0b;border-radius:8px;touch-action:none;cursor:grab;
           display:block"></canvas>
         <div style="color:#71717a;font-size:11.5px;margin-top:6px">
-          Σύρε για περιστροφή · ροδέλα για ζουμ · πραγματικό υφασμένο mesh (τηλέφωνο),
-          όχι το occupancy grid — μόνο για ματιά, ΔΕΝ το χρησιμοποιεί το AMCL
+          Σύρε για περιστροφή · ροδέλα για ζουμ · κλικ πάνω στο σπίτι στέλνει το ρομπότ εκεί ·
+          πραγματικό υφασμένο mesh (τηλέφωνο), όχι το occupancy grid — το AMCL εντοπίζεται
+          στον 2D χάρτη, εδώ βλέπεις μόνο την ίδια θέση πάνω στην πραγματική όψη
         </div>
       </div>
       <div class="card grow">
@@ -11024,7 +11025,9 @@ import { OrbitControls } from '/vendor/three/addons/controls/OrbitControls.js';
   if (!canvas) return;
   const info = document.getElementById('scan3d-info');
 
-  let renderer, scene, camera, controls, marker, loaded = false, loading = false;
+  let renderer, scene, camera, controls, marker, goalMarker, scanRoot;
+  let loaded = false, loading = false;
+  const raycaster = new THREE.Raycaster();
 
   function ensureScene(){
     if (renderer) return;
@@ -11048,9 +11051,45 @@ import { OrbitControls } from '/vendor/three/addons/controls/OrbitControls.js';
     marker = new THREE.Mesh(cone, new THREE.MeshStandardMaterial({color: 0xf59e0b}));
     marker.visible = false;
     scene.add(marker);
+    // Goal marker: flat ring on the floor, same #ffa040 as the 2D canvas's
+    // click-to-navigate circle (draw()'s goal marker) — same shared `goal`
+    // global, just a different renderer drawing it.
+    const ring = new THREE.TorusGeometry(0.16, 0.02, 8, 24);
+    ring.rotateX(Math.PI / 2);
+    goalMarker = new THREE.Mesh(ring, new THREE.MeshStandardMaterial({color: 0xffa040}));
+    goalMarker.visible = false;
+    scene.add(goalMarker);
+    wireClickToNavigate();
     window.addEventListener('resize', resize);
     resize();
     animate();
+  }
+
+  // Click-to-navigate: tap the mesh to send a Nav2 goal there, mirroring the
+  // 2D canvas's plain single-click-sends behaviour (no confirmation dialog —
+  // see its click handler). Distinguishing a tap from an OrbitControls
+  // drag-to-orbit needs its own check: both start as the same pointerdown on
+  // this canvas, and a native 'click' event still fires after a small drag,
+  // which would fire an unwanted goal mid-rotate.
+  function wireClickToNavigate(){
+    let down = null;
+    canvas.addEventListener('pointerdown', e => { down = [e.clientX, e.clientY]; });
+    canvas.addEventListener('pointerup', e => {
+      const start = down; down = null;
+      if (!start || !loaded || !scanRoot) return;
+      if (Math.hypot(e.clientX - start[0], e.clientY - start[1]) > 6) return; // was a drag/orbit
+      const r = canvas.getBoundingClientRect();
+      const nx = ((e.clientX - r.left) / r.width) * 2 - 1;
+      const ny = -((e.clientY - r.top) / r.height) * 2 + 1;
+      raycaster.setFromCamera({x: nx, y: ny}, camera);
+      const hit = raycaster.intersectObject(scanRoot, true)[0];
+      if (!hit) return;
+      // Inverse of setPose's map->glTF transform: glTF (x,y,z) -> map (x,-z).
+      const wx = hit.point.x, wy = -hit.point.z;
+      goal = {x: wx, y: wy};
+      send({type: 'nav_goal', x: wx, y: wy});
+      draw();
+    });
   }
 
   function resize(){
@@ -11063,6 +11102,13 @@ import { OrbitControls } from '/vendor/three/addons/controls/OrbitControls.js';
 
   function animate(){
     requestAnimationFrame(animate);
+    // Reads the classic script's shared `goal` (same var the 2D canvas's
+    // draw() and click handler use) every frame rather than needing its own
+    // change event — cheap, and stays in sync regardless of which view set it.
+    if (goalMarker){
+      goalMarker.visible = loaded && !!goal;
+      if (goal) goalMarker.position.set(goal.x, 0.03, -goal.y);
+    }
     controls.update();
     renderer.render(scene, camera);
   }
@@ -11086,6 +11132,7 @@ import { OrbitControls } from '/vendor/three/addons/controls/OrbitControls.js';
     new GLTFLoader().load('/maps/scan.glb' + (TOKEN_QS || ''),
       (gltf) => {
         scene.add(gltf.scene);
+        scanRoot = gltf.scene;
         // Frame the camera from the mesh's own measured extent, not a fixed
         // guess — a whole-house scan can be anywhere from one room to 15 m
         // across, and the arm tab's fixed-FOCAL mistake (memory:
