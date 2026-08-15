@@ -3958,9 +3958,13 @@ async def robot_scan_glb(request: Request, t: str = ''):
     path = os.path.join(SRC_CONFIG_DIR, 'robot_scan.glb')
     if not os.path.exists(path):
         return JSONResponse({'error': 'no robot_scan.glb in config/'}, status_code=404)
+    # no-store, not the 24h caching /arm_model.json uses: that one "only
+    # changes when the arm is remodelled" (rare); this file is still being
+    # iterated on live and a stale cached copy is exactly what made a
+    # server-side crop fix look like it hadn't done anything in the browser.
     with open(path, 'rb') as f:
         return Response(f.read(), media_type='model/gltf-binary',
-                        headers={'Cache-Control': 'public, max-age=86400'})
+                        headers={'Cache-Control': 'no-store'})
 
 
 @app.get('/camera.mjpeg')
@@ -4511,9 +4515,12 @@ async def maps_scan_glb(request: Request, t: str = '', map: str = ''):
     path = os.path.join(SRC_MAPS_DIR, name + '.glb')
     if not os.path.exists(path):
         return JSONResponse({'error': f'no 3D scan for {name}'}, status_code=404)
+    # no-store: same reasoning as /robot_scan.glb — these get re-cropped/
+    # regenerated while iterating, and a 24h cache turns a real fix into
+    # "still looks broken" in whatever browser already fetched it once.
     with open(path, 'rb') as f:
         return Response(f.read(), media_type='model/gltf-binary',
-                        headers={'Cache-Control': 'public, max-age=86400'})
+                        headers={'Cache-Control': 'no-store'})
 
 
 @app.get('/rtabmap/saved')

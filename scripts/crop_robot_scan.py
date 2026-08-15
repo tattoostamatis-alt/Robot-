@@ -32,9 +32,17 @@ script, is topologically fragmented into ~1000 tiny disconnected patches —
 the largest was under 4% of the robot's own visible faces, nowhere near
 usable as "the main body."
 
+Even within the clean y > 0.095 region, ~2% of faces are still brighter than
+a normal shiny-black-plastic highlight should be (up to 212/255) — asked
+explicitly to keep ONLY what's black, so --brightness adds a third AND
+condition on top of height+radius. This does poke a few tiny holes in
+genuine specular highlights on the robot's own body, not just leftover
+floor; traded deliberately, since a small dark gap reads far better than
+any light-toned patch on what's supposed to be a black silhouette.
+
 Usage:
     crop_robot_scan.py robot_raw.glb config/robot_scan.glb
-        [--min-height 0.095] [--radius 0.30]
+        [--min-height 0.095] [--radius 0.30] [--brightness 140]
 """
 
 import argparse
@@ -52,6 +60,8 @@ def main():
                      help='drop everything below this local Y (m) — where the floor shows through the base')
     ap.add_argument('--radius', type=float, default=0.30,
                      help='max horizontal distance (m) from the object centre — catches off-axis debris')
+    ap.add_argument('--brightness', type=float, default=140,
+                     help='max mean RGB (0-255) to keep — drops anything not actually dark')
     args = ap.parse_args()
 
     scene = trimesh.load(args.src_glb)
@@ -60,13 +70,16 @@ def main():
     v = mesh.vertices
     cx, cz = np.median(v[:, 0]), np.median(v[:, 2])
     r = np.hypot(v[:, 0] - cx, v[:, 2] - cz)
+    brightness = mesh.visual.to_color().vertex_colors[:, :3].astype(float).mean(axis=1)
 
     face_r_max = r[mesh.faces].max(axis=1)
     face_y_min = v[mesh.faces][:, :, 1].min(axis=1)
-    keep = (face_y_min > args.min_height) & (face_r_max < args.radius)
+    face_bright = brightness[mesh.faces].mean(axis=1)
+    keep = ((face_y_min > args.min_height) & (face_r_max < args.radius)
+            & (face_bright < args.brightness))
 
     if not keep.any():
-        print('nothing left after filtering — check --min-height/--radius', file=sys.stderr)
+        print('nothing left after filtering — check the thresholds', file=sys.stderr)
         return 1
 
     sub = mesh.submesh([keep], append=True)
