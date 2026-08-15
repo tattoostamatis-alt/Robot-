@@ -7121,7 +7121,7 @@ function draw(){
   // >5cm-movement source as the 3D walls view's trail (wallsDraw()) — this
   // was the one map view that didn't render it yet.
   if(robotTrail.length > 1){
-    ctx.strokeStyle = '#38bdf8'; ctx.lineWidth = 2;
+    ctx.strokeStyle = '#38bdf8'; ctx.lineWidth = 3.5;
     ctx.beginPath();
     robotTrail.forEach(([x, y], i) => {
       const p = w2c(x, y);
@@ -10539,7 +10539,7 @@ function wallsDraw(){
   // above) — do NOT add them again here.
   if (robotTrail.length > 1){
     ctx.strokeStyle = '#38bdf8';
-    ctx.lineWidth = 2;
+    ctx.lineWidth = 3.5;
     ctx.beginPath();
     robotTrail.forEach(([x, y], i) => {
       const p = project(toView(centre([x, y, 0.03])));
