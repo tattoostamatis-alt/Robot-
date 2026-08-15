@@ -106,6 +106,12 @@ SRC_MAPS_DIR = (os.path.join(SRC_HOME, 'maps')
                 if os.path.isdir(os.path.join(SRC_HOME, 'maps'))
                 else os.path.join(SHARE, 'maps'))
 NOVNC_DIR = '/usr/share/novnc'
+# Vendored locally (not a CDN) so the "Σάρωμα" 3D-scan view still works with
+# no internet — the one deliberate exception to "no three.js, self-contained
+# page" (see wallsDraw's comment): a photorealistic textured mesh needs a
+# real WebGL scene graph, which the hand-rolled canvas painter's-algorithm
+# renderer used for the walls/arm tabs cannot give it.
+THREE_VENDOR_DIR = os.path.join(SRC_HOME, 'web_static', 'vendor', 'three')
 
 # RTAB-Map keeps ONE live database (house.db) that grows for as long as the
 # 3D map session runs — there is no per-map "save" the way the 2D map/AMCL
@@ -3855,6 +3861,8 @@ app = FastAPI(lifespan=_lifespan)
 # here — the RFB stream it opens is what carries the token.
 if os.path.isdir(NOVNC_DIR):
     app.mount('/novnc', StaticFiles(directory=NOVNC_DIR), name='novnc')
+if os.path.isdir(THREE_VENDOR_DIR):
+    app.mount('/vendor/three', StaticFiles(directory=THREE_VENDOR_DIR), name='three')
 
 
 @app.get('/', response_class=HTMLResponse)
@@ -4465,6 +4473,30 @@ async def maps_walls3d(request: Request, t: str = '', map: str = ''):
     if result is None:
         return JSONResponse({'error': f'could not read {name}.pgm'}, status_code=500)
     return result
+
+
+@app.get('/maps/scan.glb')
+async def maps_scan_glb(request: Request, t: str = '', map: str = ''):
+    """Optional photorealistic textured 3D scan (glTF binary) for the map
+    tab's 'Σάρωμα' view — a phone LiDAR scan (Scaniverse etc.) dropped in as
+    <name>.glb next to that map's .pgm/.yaml, e.g. by scripts/ply_to_map.py's
+    companion export. Not every map has one; 404s cleanly when it doesn't,
+    same as /arm_model.json's missing-file case. Same name resolution/
+    validation as /maps/walls3d (defaults to whatever map Nav2 is using).
+    """
+    if not _authorised(t, request.cookies):
+        return Response('Unauthorized', status_code=401)
+    name = map or (await asyncio.to_thread(ros_node.active_map) if ros_node else None)
+    if not name:
+        return JSONResponse({'error': 'no active map'}, status_code=404)
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,40}', name):
+        return JSONResponse({'error': 'bad request'}, status_code=400)
+    path = os.path.join(SRC_MAPS_DIR, name + '.glb')
+    if not os.path.exists(path):
+        return JSONResponse({'error': f'no 3D scan for {name}'}, status_code=404)
+    with open(path, 'rb') as f:
+        return Response(f.read(), media_type='model/gltf-binary',
+                        headers={'Cache-Control': 'public, max-age=86400'})
 
 
 @app.get('/rtabmap/saved')
@@ -5141,6 +5173,7 @@ button{font:inherit;color:inherit}
       <div class="row" style="margin-bottom:8px">
         <button class="btn pri" id="map-view-2d">🗺️ 2D</button>
         <button class="btn" id="map-view-3d">🏗️ 3D</button>
+        <button class="btn" id="map-view-scan">📸 Σάρωμα</button>
       </div>
       <div id="map-wrap">
         <canvas id="map-canvas"></canvas>
@@ -5155,6 +5188,16 @@ button{font:inherit;color:inherit}
           display:block"></canvas>
         <div style="color:#71717a;font-size:11.5px;margin-top:6px">
           Σύρε για περιστροφή · ροδέλα για ζουμ · από τον καθαρό (τετραγωνισμένο) 2D χάρτη
+        </div>
+      </div>
+      <div class="card" id="map-scan3d-card" style="display:none">
+        <h3>Φωτορεαλιστικό σάρωμα <span class="badge" id="scan3d-info">—</span></h3>
+        <canvas id="scan3d" style="width:100%;height:min(58vh,600px);min-height:260px;
+          background:#0a0a0b;border-radius:8px;touch-action:none;cursor:grab;
+          display:block"></canvas>
+        <div style="color:#71717a;font-size:11.5px;margin-top:6px">
+          Σύρε για περιστροφή · ροδέλα για ζουμ · πραγματικό υφασμένο mesh (τηλέφωνο),
+          όχι το occupancy grid — μόνο για ματιά, ΔΕΝ το χρησιμοποιεί το AMCL
         </div>
       </div>
       <div class="card grow">
@@ -6591,13 +6634,17 @@ function setMapView(view){
   mapView = view;
   $('map-view-2d').classList.toggle('pri', view === '2d');
   $('map-view-3d').classList.toggle('pri', view === '3d');
+  $('map-view-scan').classList.toggle('pri', view === 'scan');
   $('map-wrap').style.display = view === '2d' ? '' : 'none';
   $('map-walls3d-card').style.display = view === '3d' ? '' : 'none';
+  $('map-scan3d-card').style.display = view === 'scan' ? '' : 'none';
   if (view === '2d') resize();
-  else { wallsLoad(); wallsDraw(); }
+  else if (view === '3d') { wallsLoad(); wallsDraw(); }
+  else if (view === 'scan' && window.hrScan3d) window.hrScan3d.activate();
 }
 $('map-view-2d').onclick = () => setMapView('2d');
 $('map-view-3d').onclick = () => setMapView('3d');
+$('map-view-scan').onclick = () => setMapView('scan');
 // NB: the initial showTab() call lives at the bottom of the script — calling it
 // here would touch VNC_APPS before its `const` is initialised (temporal dead
 // zone), which throws and leaves the whole page unwired.
@@ -7205,6 +7252,7 @@ const HANDLERS = {
     draw();
     drawCompass2();
     if (mapView === '3d') wallsDraw();
+    if (window.hrScan3d) window.hrScan3d.setPose(m);
   },
   scan(m){ scan=m; draw(); },
   plan(m){ plan=m.points; draw(); },
@@ -10948,6 +10996,135 @@ applyLang();               // also builds the tabs, so it precedes showTab()
 // requesting /camera.mjpeg if the page happens to load straight onto 'cam'.
 showTab('map');
 resize(); connect();
+</script>
+<script type="importmap">
+{"imports": {"three": "/vendor/three/three.module.min.js"}}
+</script>
+<script type="module">
+// Photorealistic "Σάρωμα" view for the map tab's third button. A separate
+// module script (import needs type="module") from the classic one above —
+// Three.js is the one deliberate exception to "no three.js, self-contained
+// page" (see wallsDraw's comment): a phone LiDAR scan's baked texture needs
+// a real WebGL scene graph, which the hand-rolled canvas painter's-algorithm
+// renderer the walls/arm tabs use has no material system for. Vendored
+// locally under /vendor/three (see THREE_VENDOR_DIR), not a CDN, so this
+// still works with no internet.
+//
+// A module's top-level scope is its own, but it still chains to the page's
+// outer script-scope for name lookup — TOKEN_QS/$/t below are the classic
+// script's `const`/`function`, read live, not copied. This runs after that
+// script (module execution is deferred to after parsing) so they already
+// exist by the time this file's top level runs.
+import * as THREE from 'three';
+import { GLTFLoader } from '/vendor/three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from '/vendor/three/addons/controls/OrbitControls.js';
+
+(function(){
+  const canvas = document.getElementById('scan3d');
+  if (!canvas) return;
+  const info = document.getElementById('scan3d-info');
+
+  let renderer, scene, camera, controls, marker, loaded = false, loading = false;
+
+  function ensureScene(){
+    if (renderer) return;
+    renderer = new THREE.WebGLRenderer({canvas, antialias:true});
+    renderer.setPixelRatio(window.devicePixelRatio || 1);
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0a0a0b);
+    camera = new THREE.PerspectiveCamera(55, 1, 0.05, 100);
+    camera.position.set(4, 3, 4);
+    controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(0, 1, 0);
+    controls.update();
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.2));
+    const sun = new THREE.DirectionalLight(0xfff4e0, 1.0);
+    sun.position.set(3, 6, 2);
+    scene.add(sun);
+    // Robot marker: cone tip along local +X, matching the map's yaw=0-faces-
+    // +X convention (see pose.yaw's use at the laser-pose projection above).
+    const cone = new THREE.ConeGeometry(0.12, 0.30, 12);
+    cone.rotateZ(-Math.PI / 2);
+    marker = new THREE.Mesh(cone, new THREE.MeshStandardMaterial({color: 0xf59e0b}));
+    marker.visible = false;
+    scene.add(marker);
+    window.addEventListener('resize', resize);
+    resize();
+    animate();
+  }
+
+  function resize(){
+    if (!renderer) return;
+    const w = canvas.clientWidth || 300, h = canvas.clientHeight || 300;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  }
+
+  function animate(){
+    requestAnimationFrame(animate);
+    controls.update();
+    renderer.render(scene, camera);
+  }
+
+  // Scaniverse exports standard glTF Y-up: measured against this same scan's
+  // occupancy grid (scripts/ply_to_map.py), glTF (x, y_up, z) equals the map
+  // frame's (x, up, -y) — a -90 deg rotation about X. Rather than rotate the
+  // (large) loaded mesh, only the small marker gets that transform per pose.
+  function setPose(m){
+    if (!marker) return;
+    if (!m){ marker.visible = false; return; }
+    marker.visible = loaded;
+    marker.position.set(m.x, 0.06, -m.y);
+    marker.rotation.y = m.yaw;
+  }
+
+  function load(){
+    if (loading || loaded) return;
+    loading = true;
+    if (info) info.textContent = t('φόρτωση…');
+    new GLTFLoader().load('/maps/scan.glb' + (TOKEN_QS || ''),
+      (gltf) => {
+        scene.add(gltf.scene);
+        // Frame the camera from the mesh's own measured extent, not a fixed
+        // guess — a whole-house scan can be anywhere from one room to 15 m
+        // across, and the arm tab's fixed-FOCAL mistake (memory:
+        // project_robot_arm_3d_model) is exactly the failure mode a
+        // hardcoded camera position falls into here: too close, inside the
+        // walls, or too far to make anything out.
+        const box = new THREE.Box3().setFromObject(gltf.scene);
+        const size = box.getSize(new THREE.Vector3());
+        const centre = box.getCenter(new THREE.Vector3());
+        const radius = Math.max(size.x, size.y, size.z, 1) * 0.9;
+        camera.position.set(centre.x + radius, centre.y + radius * 0.6, centre.z + radius);
+        camera.near = radius / 100;
+        camera.far = radius * 20;
+        camera.updateProjectionMatrix();
+        controls.target.copy(centre);
+        controls.update();
+        loaded = true; loading = false;
+        if (info) info.textContent = t('έτοιμο');
+        setPose(pose || null);
+      },
+      undefined,
+      () => {
+        loading = false;
+        if (info) info.textContent = t('δεν υπάρχει σάρωμα για αυτόν τον χάρτη');
+      });
+  }
+
+  // Named window.hrScan3d, not window.scan3d: an id="scan3d" element already
+  // exists (the canvas above), and browsers auto-expose elements with an id
+  // as same-named globals the instant they're parsed — long before this
+  // module's imports (fetched over the network) let it get this far. A pose
+  // WS message landing in that gap would find the bare canvas element at
+  // window.scan3d and crash calling .setPose on it. Prefixed name sidesteps
+  // the whole class of DOM-legacy-global collision, not just this one.
+  window.hrScan3d = {
+    activate(){ ensureScene(); resize(); load(); },
+    setPose,
+  };
+})();
 </script>
 </body>
 </html>"""
