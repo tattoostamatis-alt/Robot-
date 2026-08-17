@@ -52,10 +52,19 @@ def test_the_bar_can_grow_to_a_second_row():
         'a fixed height clips the wrapped row out of sight'
 
 
-def _tab_count():
-    m = re.search(r'const TABS = \[(.*?)\];', _SRC, re.S)
-    assert m, 'the TABS table is gone'
-    return len(re.findall(r"\['", m.group(1)))
+def _all_tab_ids():
+    m = re.search(r'const ALL_TABS = \[(.*?)\];', _SRC, re.S)
+    assert m, 'the ALL_TABS table is gone'
+    return re.findall(r"\['(\w+)'", m.group(1))
+
+
+def _core_tab_ids():
+    """The curated ids actually rendered into the bar — see CORE_TAB_IDS in
+    web_dashboard_node.py. TABS itself is now `ALL_TABS.filter(...)`, not a
+    literal array, so it can no longer be parsed directly the way ALL_TABS is."""
+    m = re.search(r"const CORE_TAB_IDS = \[(.*?)\];", _SRC, re.S)
+    assert m, 'CORE_TAB_IDS is gone — the curated bar is built some other way now'
+    return re.findall(r"'(\w+)'", m.group(1))
 
 
 # Narrowest a cell may get on a 320pt iPhone SE before the icon and the label
@@ -97,14 +106,17 @@ def test_a_tab_stays_wide_enough_to_read_on_a_phone():
 
 def test_the_bar_does_not_grow_past_a_readable_number_of_rows():
     """Rows are free vertically only up to a point: past four the tab bar owns
-    more of a phone screen than the content does."""
-    n = _tab_count()
+    more of a phone screen than the content does. Counts the curated bar
+    (CORE_TAB_IDS), not every tab the dashboard has — the rest live in
+    Ρυθμίσεις → "Περισσότερα εργαλεία" precisely so the bar does not have to
+    grow with every new tab."""
+    n = len(_core_tab_ids())
     _, basis = _basis()
     per_row = math.floor(100.0 / basis)
     rows = math.ceil(n / per_row)
     assert rows <= 4, (
         f'{n} tabs at {per_row} per row needs {rows} rows — either widen the '
-        'basis or the dashboard has outgrown a flat tab bar')
+        'basis or the bar has outgrown a flat tab bar')
 
 
 def test_long_labels_cannot_widen_a_cell():
@@ -117,21 +129,39 @@ def test_long_labels_cannot_widen_a_cell():
     assert 'white-space:nowrap' in label.replace(' ', '')
 
 
-def test_every_tab_is_still_in_the_bar():
-    """The fix must not have been "show fewer tabs on mobile"."""
-    # Every tab in the table must also have a pane to show, or tapping it blanks
-    # the page — the failure mode a bare count check would not catch.
-    m = re.search(r'const TABS = \[(.*?)\];', _SRC, re.S)
-    ids = re.findall(r"\['(\w+)'", m.group(1))
-    assert len(ids) >= 12, 'tabs were removed rather than made to fit'
-    for tab_id in ids:
+def test_every_tab_still_has_a_reachable_pane():
+    """The 2026-08-02 fix this file is named after was "wrap them all in the
+    bar". A later pass deliberately supersedes that: only CORE_TAB_IDS render
+    into the bar now, the rest moved to Ρυθμίσεις → "Περισσότερα εργαλεία"
+    (MORE_TABS/renderMoreTools in web_dashboard_node.py) so the bar does not
+    read as a cluttered 25-icon wall. What must still hold is the ORIGINAL
+    guarantee this test protects — no tab silently becomes unreachable — just
+    checked against "has a pane, and is in the bar or the more-tools list"
+    instead of "is in the bar". A bare count check would not catch a tab
+    quietly dropped from both.
+    """
+    all_ids = _all_tab_ids()
+    assert len(all_ids) >= 12, 'tabs were removed rather than relocated'
+    for tab_id in all_ids:
         assert f'id="p-{tab_id}"' in _SRC, f'tab {tab_id!r} has no pane'
+    core_ids = _core_tab_ids()
+    assert core_ids, 'the curated bar is empty'
+    assert set(core_ids) <= set(all_ids), \
+        'CORE_TAB_IDS references a tab id that does not exist in ALL_TABS'
+    # MORE_TABS must be everything ALL_TABS minus CORE_TAB_IDS, by construction
+    # — pinning the actual filter expression means a tab dropped from the core
+    # list is provably still reachable, not just probably.
+    assert re.search(
+        r'const MORE_TABS = ALL_TABS\.filter\(\(\[id\]\) => '
+        r'!CORE_TAB_IDS\.includes\(id\)\);', _SRC), \
+        'MORE_TABS is no longer derived from ALL_TABS minus the bar — a tab ' \
+        'moved out of the bar could now be reachable from nowhere'
     assert 'display:none' not in _rule('.tab'), 'tabs are being hidden on mobile'
 
 
 def test_the_active_tab_is_still_marked_on_top():
-    """The desktop marks the active tab on its left edge; mobile on top."""
-    assert 'border-top-color:#3b82f6' in _rule('.tab.active').replace(' ', '')
+    """The desktop marks the active tab with a pill highlight; mobile on top."""
+    assert 'border-top-color:var(--accent)' in _rule('.tab.active').replace(' ', '')
 
 
 # ── the bar has to be inside the part of the screen you can see ─────────────

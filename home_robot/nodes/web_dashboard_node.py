@@ -35,6 +35,7 @@ import sqlite3
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime
@@ -77,7 +78,7 @@ from home_robot.dashboard_i18n import LANGUAGES, as_js_table
 from home_robot.status_query import room_el
 
 import uvicorn
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -296,6 +297,26 @@ def _despeckle_grid(grid: np.ndarray) -> np.ndarray:
     return g
 
 
+def _smooth_map_edges(img: np.ndarray, factor: int = 4, sigma: float = 2.8) -> np.ndarray:
+    """Turn the raster's hard, single-cell pixel staircase into soft,
+    anti-aliased edges — "στρογγυλεμένοι τοίχοι", to match the clean,
+    drawn-floor-plan look of Dreame/Roborock-style room maps instead of a
+    blocky occupancy grid.
+
+    Upscales with nearest-neighbour (so colours stay exact), Gaussian-blurs
+    the corners round, then downsamples back to the original resolution —
+    net effect is anti-aliasing, not blur, since the output size is
+    unchanged. Runs on the fully composited image (walls + tinted rooms) so
+    every boundary — wall/free, room/room, room/unknown — gets the same
+    treatment. Costs ~3x the PNG bytes (blurred edges compress worse than
+    flat colour runs) which is trivial at typical home-map sizes.
+    """
+    h, w = img.shape[:2]
+    up = cv2.resize(img, (w * factor, h * factor), interpolation=cv2.INTER_NEAREST)
+    up = cv2.GaussianBlur(up, (0, 0), sigmaX=sigma)
+    return cv2.resize(up, (w, h), interpolation=cv2.INTER_AREA)
+
+
 def _crop_to_content(img: np.ndarray, grid_flipped: np.ndarray,
                       info, margin_px: int = 12):
     """Crop the grey 'never scanned' padding a SLAM map is usually laid out
@@ -336,6 +357,10 @@ class State:
         self.map_info:  Optional[dict]  = None
         # Room legend + tint state, replayed with the map on connect.
         self.map_rooms: dict = {}
+        # name -> [x, y] map-frame centroid, for the map tab's on-map room
+        # labels (see _room_centers()). Replayed alongside map_rooms so a
+        # label can be placed without waiting on a second round trip.
+        self.map_room_centers: dict = {}
         self.map_tinted: bool = True
         # Keepout zones for the active map, replayed with the map on connect —
         # see home_robot/keepout_files.py.
@@ -1297,6 +1322,7 @@ class DashboardNode(Node):
         # field. Only free cells are tinted: walls stay black or the map stops
         # reading as a floor plan.
         img = self._tint_rooms(img, grid_flipped)
+        img = _smooth_map_edges(img)
         # room_mask.png is pixel-aligned to this FULL, uncropped grid — kept
         # for _room_at_xy() (map-tab click-to-pick-room), which must do the
         # same origin/resolution math _tint_rooms/_room_from_mask do, not the
@@ -1313,6 +1339,11 @@ class DashboardNode(Node):
             'height':     height,
             'resolution': msg.info.resolution,
             'origin':     origin,
+            # Free (drivable) cell count, not the raster's bounding box — the
+            # map tab's stats row wants the m2 actually reachable, and the
+            # bounding box counts unknown/wall area too.
+            'area_m2':    round(float(np.count_nonzero(grid == 0))
+                                * msg.info.resolution ** 2, 1),
         }
         self._state.map_info = info
         # Drives the legend. Stashed on State rather than only broadcast, so
@@ -1321,6 +1352,7 @@ class DashboardNode(Node):
         # "Χρώματα" box over a map that was in fact tinted.
         _, _, names = self._load_room_mask()
         self._state.map_rooms = {n: list(c) for n, c in (names or {}).items()}
+        self._state.map_room_centers = self._room_centers()
         self._state.map_tinted = self._rooms_tinted
         self._state.map_keepout = self._load_keepout_zones()
         self._state.broadcast({
@@ -1328,14 +1360,17 @@ class DashboardNode(Node):
             **info,
             'image': base64.b64encode(self._state.map_png).decode(),
             'rooms': self._state.map_rooms,
+            'centers': self._state.map_room_centers,
             'tinted': self._state.map_tinted,
             'keepout': self._state.map_keepout,
         }, remember=False)   # replayed from map_png on connect, not from latest
 
-    # How strongly the room colour is mixed into the floor. Low on purpose: the
-    # map has to stay readable as a map — obstacles, the plan and the laser are
-    # all drawn over it — so this is a wash, not a fill.
-    ROOM_TINT = 0.38
+    # How strongly the room colour is mixed into the floor. Raised from 0.38
+    # (nearly-white wash) to a bolder fill on request — "μεγάλος χρωματιστός
+    # και όμορφος", to match the saturated Dreame/Roborock-style room blocks.
+    # Kept under 1.0 for the same reason it was low before: obstacles, the
+    # plan and the laser are drawn OVER this and must stay legible.
+    ROOM_TINT = 0.62
 
     def _load_room_mask(self):
         """maps/<active-map>_room_mask.png as BGR + its per-room alpha, cached.
@@ -1426,6 +1461,32 @@ class DashboardNode(Node):
                 best_d, best = d, name
         return best
 
+    def _room_centers(self):
+        """name -> [x, y] map-frame centroid of each room's painted pixels.
+
+        Same mask/colour-match as _room_at_xy, run the other direction (over
+        the whole mask instead of one pixel) so the map tab can print each
+        room's name ON the map — a click-and-hunt-the-legend UI is exactly
+        what "δεν είναι σαφές ποιο δωμάτιο επιλέχθηκε" was about; a name
+        sitting on top of its own coloured blob cannot be ambiguous.
+        """
+        bgr, alpha, names = self._load_room_mask()
+        if bgr is None or not names or self._full_map_info is None:
+            return {}
+        ox, oy, res = self._full_map_info
+        h, _w = bgr.shape[:2]
+        centers = {}
+        for name, rgb in names.items():
+            r, g, b = rgb
+            match = alpha & (bgr[:, :, 2] == r) & (bgr[:, :, 1] == g) & (bgr[:, :, 0] == b)
+            ys, xs = np.nonzero(match)
+            if len(xs) == 0:
+                continue
+            wx = ox + float(xs.mean()) * res
+            wy = oy + (h - 1 - float(ys.mean())) * res
+            centers[name] = [round(wx, 3), round(wy, 3)]
+        return centers
+
     def _save_rooms(self, edits):
         """Rename/recolour rooms from the map tab's editor, for the active map.
 
@@ -1508,7 +1569,9 @@ class DashboardNode(Node):
         else:
             _, _, names = self._load_room_mask()
             self._state.map_rooms = {n: list(c) for n, c in (names or {}).items()}
-            self._state.broadcast({'type': 'map_rooms', 'rooms': self._state.map_rooms})
+            self._state.map_room_centers = self._room_centers()
+            self._state.broadcast({'type': 'map_rooms', 'rooms': self._state.map_rooms,
+                                   'centers': self._state.map_room_centers})
         self.get_logger().info(f'rooms saved on {map_name}: {list(new_colours)}')
         self._state.broadcast({'type': 'room_saved', 'ok': True})
 
@@ -1611,7 +1674,9 @@ class DashboardNode(Node):
         else:
             _, _, names = self._load_room_mask()
             self._state.map_rooms = {n: list(c) for n, c in (names or {}).items()}
-            self._state.broadcast({'type': 'map_rooms', 'rooms': self._state.map_rooms})
+            self._state.map_room_centers = self._room_centers()
+            self._state.broadcast({'type': 'map_rooms', 'rooms': self._state.map_rooms,
+                                   'centers': self._state.map_room_centers})
         self.get_logger().info(f'room placed on {map_name}: {name} ({label_id})')
         self._state.broadcast({'type': 'room_saved', 'ok': True})
 
@@ -1711,7 +1776,9 @@ class DashboardNode(Node):
         else:
             _, _, names = self._load_room_mask()
             self._state.map_rooms = {n: list(c) for n, c in (names or {}).items()}
-            self._state.broadcast({'type': 'map_rooms', 'rooms': self._state.map_rooms})
+            self._state.map_room_centers = self._room_centers()
+            self._state.broadcast({'type': 'map_rooms', 'rooms': self._state.map_rooms,
+                                   'centers': self._state.map_room_centers})
         self.get_logger().info(f'room rect placed on {map_name}: {name}')
         self._state.broadcast({'type': 'room_saved', 'ok': True})
 
@@ -4418,6 +4485,8 @@ async def vnc_view(request: Request, app_name: str, t: str = ''):
 
 MAP_SESSION_SH = os.path.normpath(
     os.path.join(SRC_MAPS_DIR, os.pardir, 'scripts', 'map_session.sh'))
+PLY_TO_MAP_SCRIPT = os.path.normpath(
+    os.path.join(SRC_MAPS_DIR, os.pardir, 'scripts', 'ply_to_map.py'))
 
 NERF_TRAIN_SCRIPT = os.path.normpath(
     os.path.join(SRC_MAPS_DIR, os.pardir, 'scripts', 'train_nerf.py'))
@@ -4639,6 +4708,67 @@ async def maps_scan_glb(request: Request, t: str = '', map: str = ''):
     with open(path, 'rb') as f:
         return Response(f.read(), media_type='model/gltf-binary',
                         headers={'Cache-Control': 'no-store'})
+
+
+@app.post('/maps/upload_scan')
+async def maps_upload_scan(request: Request, t: str = '',
+                           name: str = Form(...),
+                           ply: UploadFile = File(...),
+                           glb: Optional[UploadFile] = File(None)):
+    """Web equivalent of the manual iphone_house flow (scripts/ply_to_map.py
+    run by hand over scp): upload a phone LiDAR scan's PLY export and get a
+    new map out of it, without needing a computer/SSH in between — the phone
+    that took the scan can do this directly. The optional .glb (same app's
+    photorealistic export) is dropped in next to the map for /maps/scan.glb
+    to serve, exactly like the file placed by hand before.
+    """
+    if not _authorised(t, request.cookies):
+        return JSONResponse({'error': 'unauthorized'}, status_code=401)
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,40}', name):
+        return JSONResponse({'error': 'bad name'}, status_code=400)
+    if name in {m['name'] for m in _list_maps()}:
+        return JSONResponse({'error': f'"{name}" already exists'}, status_code=400)
+
+    ply_bytes = await ply.read()
+    glb_bytes = await glb.read() if (glb is not None and glb.filename) else None
+
+    def convert():
+        fd, tmp_ply = tempfile.mkstemp(suffix='.ply')
+        try:
+            with os.fdopen(fd, 'wb') as f:
+                f.write(ply_bytes)
+            dst_yaml = os.path.join(SRC_MAPS_DIR, name + '.yaml')
+            return subprocess.run(
+                [sys.executable, '-u', PLY_TO_MAP_SCRIPT, tmp_ply, dst_yaml],
+                capture_output=True, text=True, timeout=300)
+        finally:
+            try:
+                os.remove(tmp_ply)
+            except OSError:
+                pass
+
+    try:
+        r = await asyncio.to_thread(convert)
+    except subprocess.TimeoutExpired:
+        return JSONResponse(
+            {'error': 'timed out converting the scan (>5 min) — try a smaller export'},
+            status_code=500)
+
+    if r.returncode != 0:
+        # ply_to_map.py only writes its .yaml/.pgm as its very last step, after
+        # all the point-cloud math succeeds — every failure path above that
+        # returns before touching disk, so there is nothing to clean up here.
+        return JSONResponse(
+            {'error': (r.stderr or r.stdout or 'conversion failed').strip()[-800:]},
+            status_code=500)
+
+    if glb_bytes:
+        def write_glb():
+            with open(os.path.join(SRC_MAPS_DIR, name + '.glb'), 'wb') as f:
+                f.write(glb_bytes)
+        await asyncio.to_thread(write_glb)
+
+    return {'ok': True, 'name': name, 'log': r.stdout.strip()[-800:]}
 
 
 @app.get('/rtabmap/saved')
@@ -4883,6 +5013,7 @@ async def ws_endpoint(ws: WebSocket, t: str = ''):
                 **state.map_info,
                 'image': base64.b64encode(state.map_png).decode(),
                 'rooms': state.map_rooms,
+                'centers': state.map_room_centers,
                 'tinted': state.map_tinted,
             }))
         for msg in list(state.latest.values()):
@@ -4983,22 +5114,58 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Home Robot</title>
 <style>
+/* ── Design tokens ──
+   Roborock/Dreame-style light theme. Previously #p-map alone carried its own
+   hand-rolled light palette (see the comment further down, at what is now
+   #p-map's block) while the other ~21 tabs stayed dark; this :root is that
+   palette generalised into variables and applied dashboard-wide, so every
+   tab shares one consistent look instead of the map being the one bright
+   island. --accent/--accent-strong keep the exact blue this dashboard
+   already used everywhere for active/selected state, so the re-theme does
+   not also silently change what "selected" or "primary action" mean. */
+:root{
+  --bg:            #eef0f3;
+  --surface:       #ffffff;
+  --surface-2:     #e2e4e9;
+  --border:        #e4e4e7;
+  --text:          #18181b;
+  --text-dim:      #6b6b74;
+  --text-mute:     #8a8a93;
+  --accent:        #3b82f6;
+  --accent-strong: #1d4ed8;
+  --accent-bg:     #eaf2ff;
+  --danger:        #dc2626;
+  --danger-strong: #b91c1c;
+  --danger-bg:     #fee2e2;
+  --success:       #16a34a;
+  --success-bg:    #dcfce7;
+  --warn:          #d97706;
+  --warn-bg:       #fef3c7;
+  --radius-card:   16px;
+  --radius-btn:    12px;
+  --radius-pill:   999px;
+  --shadow-card:   0 1px 4px rgba(24,24,27,.07);
+  --shadow-elev:   0 2px 14px rgba(24,24,27,.10);
+  --font: -apple-system,BlinkMacSystemFont,'SF Pro Display',Inter,sans-serif;
+  --mono: ui-monospace,Menlo,monospace;
+}
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
-html,body{height:100%;overflow:hidden;background:#141416;color:#e4e4e7;
-  font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display',Inter,sans-serif;font-size:14px}
+html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
+  font-family:var(--font);font-size:14px}
 button{font:inherit;color:inherit}
 /* ── Header ── */
-#hdr{display:flex;align-items:center;gap:10px;padding:0 14px;background:#1c1c20;
-  border-bottom:1px solid #2c2c32;height:48px;flex-shrink:0}
-#dot{width:9px;height:9px;border-radius:50%;background:#444;transition:.3s;flex-shrink:0}
-#dot.on{background:#00e08a;box-shadow:0 0 8px #00e08a}
+#hdr{display:flex;align-items:center;gap:10px;padding:0 14px;background:var(--surface);
+  border-bottom:1px solid var(--border);height:48px;flex-shrink:0;
+  box-shadow:0 1px 4px rgba(24,24,27,.05);position:relative;z-index:1}
+#dot{width:9px;height:9px;border-radius:50%;background:#c2c2c9;transition:.3s;flex-shrink:0}
+#dot.on{background:var(--success);box-shadow:0 0 8px rgba(22,163,74,.45)}
 #title{font-size:15px;font-weight:600;letter-spacing:.2px;white-space:nowrap}
-.badge{background:#17324f;color:#7cccff;padding:3px 11px;border-radius:11px;
-  font-size:11.5px;white-space:nowrap;border:1px solid #24486e;font-weight:600}
+.badge{background:var(--accent-bg);color:#1d6fd6;padding:3px 11px;border-radius:var(--radius-pill);
+  font-size:11.5px;white-space:nowrap;border:1px solid #cfe3fd;font-weight:600}
 #hdr-spacer{margin-left:auto}
-#estop{background:#7f1d1d;border:1px solid #b91c1c;color:#fecaca;padding:7px 16px;
-  border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap}
-#estop.engaged{background:#dc2626;color:#fff;animation:pulse 1s infinite}
+#estop{background:var(--danger);border:1px solid var(--danger-strong);color:#fff;padding:7px 16px;
+  border-radius:var(--radius-btn);font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap}
+#estop.engaged{background:var(--danger-strong);color:#fff;animation:pulse 1s infinite}
 @keyframes pulse{50%{opacity:.55}}
 /* ── Shell ── */
 /* ‼️ dvh, not vh. On iOS Safari 100vh is the height the page WOULD have with
@@ -5009,28 +5176,40 @@ button{font:inherit;color:inherit}
    100dvh tracks the visible area as that bar shows and hides (iOS 15.4+); the
    vh line above stays as the fallback for anything older. */
 #shell{display:flex;height:calc(100vh - 48px);height:calc(100dvh - 48px)}
-#tabs{width:150px;background:#1a1a1e;border-right:1px solid #2c2c32;
-  padding:8px 0;flex-shrink:0;overflow-y:auto}
-.tab{display:flex;align-items:center;gap:9px;padding:10px 14px;cursor:pointer;
-  font-size:13px;color:#9b9ba3;border-left:3px solid transparent;user-select:none}
-.tab:hover{background:#212127;color:#d4d4d8}
-.tab.active{background:#212127;color:#fff;border-left-color:#3b82f6}
+#tabs{width:150px;background:var(--surface);border-right:1px solid var(--border);
+  padding:8px;flex-shrink:0;overflow-y:auto;display:flex;flex-direction:column;gap:2px}
+.tab{display:flex;align-items:center;gap:9px;padding:10px 12px;cursor:pointer;
+  font-size:13px;color:var(--text-dim);border-radius:var(--radius-btn);user-select:none}
+.tab:hover{background:var(--bg);color:var(--text)}
+.tab.active{background:var(--accent-bg);color:var(--accent-strong);font-weight:600}
 .tab .ic{font-size:16px;width:20px;text-align:center}
-#panes{flex:1;position:relative;overflow:hidden}
+/* ── "More tools" list, inside Ρυθμίσεις ──
+   The bottom/side nav only shows the 7 tabs used day-to-day; everything else
+   (RViz, MoveIt, Gazebo, point cloud, sensor fusion, logs, ...) still has a
+   real pane, just reached from here instead of a 25-icon bar. Row list, not
+   more tab icons, because there is no per-row width limit to fight here. */
+.mt-row{display:flex;align-items:center;gap:11px;padding:11px 4px;
+  cursor:pointer;border-top:1px solid var(--border);color:var(--text);
+  font-size:13.5px;user-select:none}
+.mt-row:first-child{border-top:none}
+.mt-row:hover{background:var(--bg)}
+.mt-row .ic{font-size:17px;width:22px;text-align:center;flex:0 0 auto}
+.mt-row .mt-chev{margin-left:auto;color:var(--text-mute);font-size:15px}
+#panes{flex:1;position:relative;overflow:hidden;background:var(--bg)}
 .pane{position:absolute;inset:0;display:none;padding:10px;overflow:auto}
 .pane.active{display:flex;flex-direction:column;gap:10px}
-/* A soft inner highlight and a real shadow give the cards depth instead of
-   reading as flat rectangles on a flat background. */
-.card{background:linear-gradient(#1f1f24,#1a1a1e);border:1px solid #2f2f37;
-  border-radius:14px;padding:13px 15px;
-  box-shadow:0 1px 0 rgba(255,255,255,.03) inset,0 2px 10px rgba(0,0,0,.35)}
-.card h3{font-size:11.5px;font-weight:700;color:#9a9aa4;text-transform:uppercase;
+/* Flat white card, a hairline border and a soft shadow — the same recipe the
+   map tab's stat card already used — instead of the old dark gradient tile. */
+.card{background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius-card);padding:14px 16px;
+  box-shadow:var(--shadow-card)}
+.card h3{font-size:11.5px;font-weight:700;color:var(--text-dim);text-transform:uppercase;
   letter-spacing:.9px;margin-bottom:11px;cursor:pointer;position:relative;
   padding-right:18px;user-select:none}
 /* The chevron is the only affordance that a card folds. It rotates rather than
    swapping glyphs so the state is obvious mid-animation. */
 .card>h3::after{content:'\2304';position:absolute;right:0;top:-2px;
-  color:#5a5a66;font-size:15px;transition:transform .15s}
+  color:#b6b6bf;font-size:15px;transition:transform .15s}
 .card.collapsed>h3::after{transform:rotate(-90deg)}
 .card.collapsed>h3{margin-bottom:0}
 .card.collapsed>*:not(h3){display:none!important}
@@ -5056,33 +5235,33 @@ button{font:inherit;color:inherit}
 /* Drag bar under a viewer. Native CSS resize is pointer-only and most of the
    use here is a phone, so this is a real handle with touch events. */
 .grip{height:16px;margin:-2px 0 7px;border-radius:8px;cursor:ns-resize;
-  background:#232329;border:1px solid #2f2f37;display:flex;
+  background:var(--bg);border:1px solid var(--border);display:flex;
   align-items:center;justify-content:center;flex:0 0 auto;touch-action:none}
-.grip::after{content:'';width:34px;height:3px;border-radius:2px;background:#4a4a56}
-.grip:active{background:#2c2c34}
-.grip:active::after{background:#67c4ff}
+.grip::after{content:'';width:34px;height:3px;border-radius:2px;background:#c7c7cc}
+.grip:active{background:var(--surface-2)}
+.grip:active::after{background:var(--accent)}
 .row{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
-.btn{background:linear-gradient(#2e2e36,#26262d);border:1px solid #3d3d48;
-  color:#d9d9de;padding:8px 15px;border-radius:10px;cursor:pointer;font-size:13px;
-  user-select:none;white-space:nowrap;transition:background .12s,border-color .12s}
-.btn:hover{background:linear-gradient(#35353e,#2b2b33);border-color:#4a4a57}
+.btn{background:var(--surface);border:1px solid var(--border);
+  color:var(--text);padding:8px 15px;border-radius:var(--radius-btn);cursor:pointer;font-size:13px;
+  user-select:none;white-space:nowrap;transition:background .12s,border-color .12s;
+  box-shadow:0 1px 2px rgba(24,24,27,.04)}
+.btn:hover{background:var(--bg);border-color:#d4d4d8}
 .btn:active{transform:translateY(1px)}
 .btn:disabled{opacity:.45;cursor:default}
-.btn:hover{background:#33333c}
-.btn:active{background:#3d3d47}
-.btn.pri{background:#1d4ed8;border-color:#2563eb;color:#fff}
-.btn.warn{background:#7c2d12;border-color:#9a3412;color:#fed7aa}
+.btn.pri{background:var(--accent-strong);border-color:var(--accent-strong);color:#fff;box-shadow:none}
+.btn.pri:hover{background:#1e40af}
+.btn.warn{background:var(--warn-bg);border-color:#fde68a;color:#92400e}
 /* Flash the row a click-to-pick landed on, so the eye finds it in a list
    sorted by name rather than by map position. Fade-out only (transition on
    the base rule), instant on entry (transition:none on .picked itself). */
 #room-edit>[data-room]{transition:background-color 1.3s;border-radius:8px}
-#room-edit>[data-room].picked{background-color:#166534;transition:none}
+#room-edit>[data-room].picked{background-color:var(--success-bg);transition:none}
 .grid2{display:grid;grid-template-columns:auto 1fr;gap:5px 14px;font-size:13px}
-.k{color:#71717a}.v{font-family:ui-monospace,Menlo,monospace;text-align:right;color:#d4d4d8}
-.pill{display:inline-block;padding:2px 9px;border-radius:9px;font-size:11px;
-  background:#27272e;color:#a1a1aa}
-.pill.ok{background:#052e1a;color:#4ade80}
-.pill.bad{background:#450a0a;color:#f87171}
+.k{color:var(--text-dim)}.v{font-family:var(--mono);text-align:right;color:var(--text)}
+.pill{display:inline-block;padding:2px 10px;border-radius:var(--radius-pill);font-size:11px;
+  background:var(--bg);color:var(--text-dim)}
+.pill.ok{background:var(--success-bg);color:#15803d}
+.pill.bad{background:var(--danger-bg);color:var(--danger-strong)}
 /* ── Safety tab: one row per clearance ──
    ‼️ sf- prefixed, NOT .srow/.slab. `.srow` is already the map tab's speed
    sliders (a 96px/1fr/74px grid, right above); reusing the name put every
@@ -5092,77 +5271,118 @@ button{font:inherit;color:inherit}
    The value sits on the label's line (right-aligned, monospace) so a column of
    numbers is scannable; the slider gets the full width underneath, because on
    a phone a slider sharing a line with text is too short to aim. */
-.sfrow{padding:11px 0;border-top:1px solid #27272e}
+.sfrow{padding:11px 0;border-top:1px solid var(--border)}
 .sfrow:first-of-type{border-top:none}
 .sfrow.off{opacity:.45}
 .sflab{display:flex;justify-content:space-between;align-items:baseline;gap:10px;
-  font-size:12.5px;color:#e4e4e7}
-.sfval{font-family:ui-monospace,Menlo,monospace;color:#7cccff;font-size:12px;
+  font-size:12.5px;color:var(--text)}
+.sfval{font-family:var(--mono);color:var(--accent-strong);font-size:12px;
   white-space:nowrap;flex:0 0 auto}
 .sfrow input[type=range]{width:100%;margin:9px 0 0;-webkit-appearance:none;
-  appearance:none;height:6px;border-radius:4px;background:#3f3f46;outline:none}
+  appearance:none;height:6px;border-radius:4px;background:var(--surface-2);outline:none}
 .sfrow input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;
-  appearance:none;width:20px;height:20px;border-radius:50%;background:#3b82f6;
-  cursor:pointer;border:2px solid #18181b}
+  appearance:none;width:20px;height:20px;border-radius:50%;background:var(--accent);
+  cursor:pointer;border:2px solid #fff;box-shadow:0 1px 3px rgba(24,24,27,.3)}
 .sfrow input[type=range]::-moz-range-thumb{width:20px;height:20px;
-  border-radius:50%;background:#3b82f6;cursor:pointer;border:2px solid #18181b}
+  border-radius:50%;background:var(--accent);cursor:pointer;border:2px solid #fff;
+  box-shadow:0 1px 3px rgba(24,24,27,.3)}
 .sfrow input[type=color]{width:52px;height:30px;margin:8px 0 0;padding:0;
-  border:1px solid #3f3f46;border-radius:6px;background:none;cursor:pointer}
-.sfhelp{font-size:11.5px;color:#71717a;line-height:1.6;margin-top:6px}
-.sfwarn{font-size:11.5px;color:#fbbf24;line-height:1.6;margin-top:6px;display:none}
+  border:1px solid var(--border);border-radius:6px;background:none;cursor:pointer}
+.sfhelp{font-size:11.5px;color:var(--text-dim);line-height:1.6;margin-top:6px}
+.sfwarn{font-size:11.5px;color:#92400e;line-height:1.6;margin-top:6px;display:none}
 .sfrow.warned .sfwarn{display:block}
 .sftog{display:flex;align-items:center;gap:9px;cursor:pointer;user-select:none}
+/* ── Room colour swatches — a curated palette next to the raw <input
+   type=color>, so picking a room colour is "tap a nice dot" instead of
+   fighting the OS colour wheel for something distinct from the room next
+   door. The raw picker stays for anyone who wants an exact custom colour. */
+.swatch-row{display:flex;flex-wrap:wrap;gap:5px;align-items:center}
+.swatch{width:20px;height:20px;border-radius:50%;cursor:pointer;flex:0 0 auto;
+  border:2px solid transparent;box-sizing:border-box;transition:transform .08s}
+.swatch:hover{transform:scale(1.15)}
+.swatch.sel{border-color:var(--text)}
+/* ── Map tab: a few bespoke pieces (stat row, view/rotate toolbar) beyond
+   plain .card — modelled on the Dreame/Roborock map screens (isometric card,
+   stat row, segmented Full/Rooms/Zones control, room names printed on their
+   own coloured patch). Used to be the ONE light corner of an otherwise dark
+   dashboard; now every tab shares the same :root palette, so this block is
+   just #p-map's own extra widgets, not a theme boundary anymore. */
+#p-map{background:var(--bg)}
+#p-map .ml-stats{display:flex;align-items:center;background:var(--surface);
+  border-radius:var(--radius-card);padding:13px 6px;box-shadow:var(--shadow-card)}
+#p-map .ml-stat{flex:1;text-align:center;min-width:0}
+#p-map .ml-val{font-size:18px;font-weight:700;color:var(--text);line-height:1.2;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#p-map .ml-lbl{font-size:10.5px;color:var(--text-mute);margin-top:1px}
+#p-map .ml-sep{width:1px;height:26px;background:var(--border);flex:0 0 auto}
+#p-map .ml-toolbar{background:var(--surface-2);border-radius:14px;padding:4px;
+  display:flex;gap:2px}
+#p-map .ml-toolbar .btn{flex:1;background:transparent;border:none;
+  color:var(--text-dim);border-radius:11px;font-weight:600;box-shadow:none;
+  padding:9px 8px}
+#p-map .ml-toolbar .btn.pri{background:var(--surface);color:var(--text);
+  box-shadow:0 1px 3px rgba(24,24,27,.14)}
+#p-map .ml-toolbar .btn:hover{background:rgba(255,255,255,.55)}
+#p-map .ml-toolbar .btn.pri:hover{background:var(--surface)}
+#p-map #map-rotate-row{background:var(--surface-2);border-radius:14px;padding:4px}
+#p-map #map-rotate-row .btn{background:transparent;border:none;
+  color:var(--text-dim);border-radius:11px;box-shadow:none}
+#p-map #map-rotate-row .btn:hover{background:rgba(255,255,255,.6)}
+#p-map #map-rotate-row #map-rot-reset{color:var(--text);font-weight:700}
 /* ── System tab: bars, temperatures, disks ── */
 .mrow{display:grid;grid-template-columns:64px 1fr auto;gap:10px;align-items:center;
   margin-bottom:9px;font-size:12.5px}
-.mrow .lbl{color:#71717a}
-.mrow .val{font-family:ui-monospace,Menlo,monospace;color:#d4d4d8;text-align:right;
+.mrow .lbl{color:var(--text-dim)}
+.mrow .val{font-family:var(--mono);color:var(--text);text-align:right;
   white-space:nowrap;font-size:12px}
-.bar{height:8px;background:#27272e;border-radius:5px;overflow:hidden}
-.bar>i{display:block;height:100%;border-radius:5px;background:#3b82f6;
+.bar{height:8px;background:var(--surface-2);border-radius:5px;overflow:hidden}
+.bar>i{display:block;height:100%;border-radius:5px;background:var(--accent);
   transition:width .35s ease,background .35s ease}
-.bar>i.warn{background:#f59e0b}
-.bar>i.bad{background:#ef4444}
+.bar>i.warn{background:var(--warn)}
+.bar>i.bad{background:var(--danger)}
 /* One cell per core. Fixed 7px columns so 16 threads fit a phone without
    wrapping into something that looks like a second CPU. */
 .cores{display:flex;gap:2px;margin:2px 0 11px}
-.cores>i{flex:1;min-width:3px;height:14px;background:#27272e;border-radius:2px;
+.cores>i{flex:1;min-width:3px;height:14px;background:var(--surface-2);border-radius:2px;
   position:relative;overflow:hidden}
-.cores>i>b{position:absolute;bottom:0;left:0;right:0;background:#3b82f6;
+.cores>i>b{position:absolute;bottom:0;left:0;right:0;background:var(--accent);
   transition:height .35s ease}
 .tempgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:8px}
-.tcell{background:#232329;border:1px solid #2c2c32;border-radius:9px;padding:8px 10px}
-.tcell .tn{color:#71717a;font-size:11px;display:flex;gap:5px;align-items:center}
-.tcell .tv{font-family:ui-monospace,Menlo,monospace;font-size:17px;color:#e4e4e7;
+.tcell{background:var(--bg);border:1px solid var(--border);border-radius:9px;padding:8px 10px}
+.tcell .tn{color:var(--text-dim);font-size:11px;display:flex;gap:5px;align-items:center}
+.tcell .tv{font-family:var(--mono);font-size:17px;color:var(--text);
   margin-top:3px}
-.tcell.warn{border-color:#7c2d12}.tcell.warn .tv{color:#fbbf24}
-.tcell.bad{border-color:#7f1d1d}.tcell.bad .tv{color:#f87171}
+.tcell.warn{border-color:#fbbf24}.tcell.warn .tv{color:#92400e}
+.tcell.bad{border-color:#f87171}.tcell.bad .tv{color:var(--danger-strong)}
 /* ── fall alert banner ── */
-#fall-bar{display:flex;gap:11px;align-items:center;background:#450a0a;
-  border:1px solid #b91c1c;color:#fecaca;border-radius:11px;padding:11px 14px;
+#fall-bar{display:flex;gap:11px;align-items:center;background:var(--danger-bg);
+  border:1px solid #fca5a5;color:#991b1b;border-radius:11px;padding:11px 14px;
   margin-bottom:10px;animation:fallpulse 1.6s ease-in-out infinite}
-@keyframes fallpulse{0%,100%{border-color:#b91c1c}50%{border-color:#f87171}}
+@keyframes fallpulse{0%,100%{border-color:#fca5a5}50%{border-color:var(--danger)}}
 /* Respect the OS setting — a pulsing red bar is exactly the kind of motion
    people turn animations off for. */
 @media (prefers-reduced-motion: reduce){#fall-bar{animation:none}}
 /* ── speed sliders (map tab) ── */
-.speedbox{margin-top:11px;padding-top:11px;border-top:1px solid #2c2c32}
+.speedbox{margin-top:11px;padding-top:11px;border-top:1px solid var(--border)}
 .srow{display:grid;grid-template-columns:96px 1fr 74px;gap:10px;align-items:center;
   margin-bottom:8px;font-size:12.5px}
-.srow .lbl{color:#a1a1aa}
-.srow .val{font-family:ui-monospace,Menlo,monospace;color:#d4d4d8;text-align:right;
+.srow .lbl{color:var(--text-dim)}
+.srow .val{font-family:var(--mono);color:var(--text);text-align:right;
   font-size:12px}
 .srow input[type=range]{-webkit-appearance:none;appearance:none;height:6px;
-  border-radius:4px;background:#3f3f46;outline:none}
+  border-radius:4px;background:var(--surface-2);outline:none}
 .srow input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;
-  width:20px;height:20px;border-radius:50%;background:#3b82f6;cursor:pointer;
-  border:2px solid #18181b}
+  width:20px;height:20px;border-radius:50%;background:var(--accent);cursor:pointer;
+  border:2px solid #fff;box-shadow:0 1px 3px rgba(24,24,27,.3)}
 .srow input[type=range]::-moz-range-thumb{width:20px;height:20px;border-radius:50%;
-  background:#3b82f6;cursor:pointer;border:2px solid #18181b}
-.pill.warn{background:#422006;color:#fbbf24}
+  background:var(--accent);cursor:pointer;border:2px solid #fff;
+  box-shadow:0 1px 3px rgba(24,24,27,.3)}
+.pill.warn{background:var(--warn-bg);color:#92400e}
 /* ── Map ── */
-#map-wrap{position:relative;background:#0c0c0e;border:1px solid #2c2c32;
-  border-radius:12px;overflow:hidden;cursor:crosshair;flex:1;min-height:200px}
+#map-wrap{position:relative;background:var(--surface-2);border:1px solid var(--border);
+  border-radius:18px;overflow:hidden;cursor:crosshair;flex:1;
+  min-height:min(62vh,560px);box-shadow:var(--shadow-card)}
+#map-wrap .ovl{background:rgba(255,255,255,.88);color:#52525b}
 #map-canvas{width:100%;height:100%;display:block;touch-action:none}
 /* ‼️ Square, and capped. The costmap is a 60x60 grid of a 3x3 m window, so
    flex:1 stretched it across a 1200x450 pane: every cell became a ~20x7 px
@@ -5170,9 +5390,10 @@ button{font:inherit;color:inherit}
    thing was far bigger than it needed to be to be legible. Sizing by HEIGHT
    with aspect-ratio (width:auto) keeps it square through the drag grip too,
    which pins an explicit height and would otherwise squash it again. */
-#cost-wrap{position:relative;background:#0c0c0e;border:1px solid #2c2c32;
+#cost-wrap{position:relative;background:#0c0c0e;border:1px solid var(--border);
   border-radius:12px;overflow:hidden;flex:0 0 auto;align-self:center;
-  aspect-ratio:1;height:min(58vh,440px);width:auto;max-width:100%;min-height:200px}
+  aspect-ratio:1;height:min(58vh,440px);width:auto;max-width:100%;min-height:200px;
+  box-shadow:var(--shadow-card)}
 #cost-canvas{width:100%;height:100%;display:block;
   /* 60x60 cells blown up to a phone screen: keep the cells as crisp squares
      rather than letting the browser smear them into a watercolour. */
@@ -5182,10 +5403,10 @@ button{font:inherit;color:inherit}
 /* ── Camera ── */
 #cam{width:100%;height:100%;object-fit:contain;display:block;background:#0c0c0e}
 #cam-wrap{position:relative;flex:1;min-height:200px;background:#0c0c0e;
-  border:1px solid #2c2c32;border-radius:12px;overflow:hidden}
+  border:1px solid var(--border);border-radius:12px;overflow:hidden;box-shadow:var(--shadow-card)}
 /* ── VNC ── */
-.vnc-host{flex:1;position:relative;background:#0c0c0e;border:1px solid #2c2c32;
-  border-radius:12px;overflow:hidden;min-height:240px}
+.vnc-host{flex:1;position:relative;background:#0c0c0e;border:1px solid var(--border);
+  border-radius:12px;overflow:hidden;min-height:240px;box-shadow:var(--shadow-card)}
 .vnc-host iframe{width:100%;height:100%;border:0;display:block}
 /* Fullscreen. Measured 2026-08-08 in WebKit: RViz runs 1600x900, so on a
    390pt portrait phone the 16:9 image letterboxes to 374x210 and fills only
@@ -5213,36 +5434,51 @@ button{font:inherit;color:inherit}
   max-height:45%;overflow:auto}
 .vnc-msg{position:absolute;inset:0;display:flex;flex-direction:column;
   align-items:center;justify-content:center;gap:14px;text-align:center;padding:20px;
-  color:#a1a1aa;font-size:13px;line-height:1.6}
+  color:var(--text-dim);font-size:13px;line-height:1.6}
 /* ── Drive pad ── */
 #dpad{display:grid;grid-template-columns:repeat(3,50px);grid-template-rows:repeat(3,50px);gap:5px}
-.dbtn{background:#2a2a31;border:1px solid #3a3a44;border-radius:9px;display:flex;
-  align-items:center;justify-content:center;cursor:pointer;font-size:19px;
-  user-select:none;-webkit-user-select:none;touch-action:none}
-.dbtn:active{background:#3d3d47}
+.dbtn{background:var(--surface);border:1px solid var(--border);border-radius:9px;display:flex;
+  align-items:center;justify-content:center;cursor:pointer;font-size:19px;color:var(--text);
+  user-select:none;-webkit-user-select:none;touch-action:none;box-shadow:var(--shadow-card)}
+.dbtn:active{background:var(--bg)}
 /* Keyboard driving has no :active, so a held key gets its own lit state —
    without it there is no feedback that the arrow key was even received. */
-.dbtn.lit{background:#1d4ed8;border-color:#3b82f6;color:#fff}
-.dbtn.ghost{background:transparent;border:none;pointer-events:none}
-#bstop{background:#7f1d1d;border-color:#b91c1c;font-size:12px;font-weight:700;color:#fecaca}
+.dbtn.lit{background:var(--accent-strong);border-color:var(--accent);color:#fff}
+.dbtn.ghost{background:transparent;border:none;pointer-events:none;box-shadow:none}
+#bstop{background:var(--danger-bg);border-color:#fca5a5;font-size:12px;font-weight:700;color:var(--danger-strong)}
+/* ── Drive pad overlaid on the live camera feed (FPV driving) — same
+   startDrive()/stopDrive() as the map tab's #dpad, just glassy buttons
+   floating over the video instead of opaque tiles in a card. */
+#cam-dpad{position:absolute;left:12px;bottom:12px;z-index:3;display:grid;
+  grid-template-columns:repeat(3,46px);grid-template-rows:repeat(3,46px);gap:6px}
+.cdbtn{background:rgba(24,24,27,.45);border:1px solid rgba(255,255,255,.28);
+  border-radius:50%;display:flex;align-items:center;justify-content:center;
+  color:#fff;font-size:18px;cursor:pointer;user-select:none;
+  -webkit-user-select:none;touch-action:none;backdrop-filter:blur(3px);
+  -webkit-backdrop-filter:blur(3px);transition:background .1s}
+.cdbtn:active{background:rgba(59,130,246,.6);border-color:#93c5fd}
+.cdbtn.ghost{background:transparent;border:none;pointer-events:none}
+.cdbtn.stop{background:rgba(127,29,29,.55);border-color:rgba(248,113,113,.65);font-size:14px}
+.cdbtn.stop:active{background:rgba(185,28,28,.8)}
+.cdbtn.lit{background:rgba(59,130,246,.75);border-color:#93c5fd}
 /* ── Arm ── */
 .joint{display:grid;grid-template-columns:74px 1fr 62px;gap:11px;align-items:center;
   margin-bottom:9px}
-.joint label{font-size:13px;color:#a1a1aa}
-.joint input[type=range]{width:100%;accent-color:#3b82f6}
-.joint .val{font-family:ui-monospace,Menlo,monospace;font-size:12px;text-align:right;color:#d4d4d8}
+.joint label{font-size:13px;color:var(--text-dim)}
+.joint input[type=range]{width:100%;accent-color:var(--accent)}
+.joint .val{font-family:var(--mono);font-size:12px;text-align:right;color:var(--text)}
 .joint.off{opacity:.45}
 /* ── Chat ── */
 #chat{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:8px;min-height:150px}
 .msg{max-width:78%;padding:8px 12px;border-radius:13px;font-size:13.5px;line-height:1.45;
   white-space:pre-wrap;word-break:break-word}
-.msg.user{align-self:flex-end;background:#1d4ed8;color:#fff;border-bottom-right-radius:4px}
-.msg.robot{align-self:flex-start;background:#27272e;border-bottom-left-radius:4px}
-.msg.wake{align-self:center;background:transparent;color:#6b6b73;font-size:11px;padding:2px}
+.msg.user{align-self:flex-end;background:var(--accent-strong);color:#fff;border-bottom-right-radius:4px}
+.msg.robot{align-self:flex-start;background:var(--surface-2);color:var(--text);border-bottom-left-radius:4px}
+.msg.wake{align-self:center;background:transparent;color:var(--text-mute);font-size:11px;padding:2px}
 #chat-in{display:flex;gap:8px}
-#chat-in input{flex:1;background:#27272e;border:1px solid #3a3a44;color:#e4e4e7;
+#chat-in input{flex:1;background:var(--surface);border:1px solid var(--border);color:var(--text);
   padding:10px 13px;border-radius:9px;font-size:14px;outline:none}
-#chat-in input:focus{border-color:#3b82f6}
+#chat-in input:focus{border-color:var(--accent)}
 /* ── Mobile ── */
 @media(max-width:760px){
   #shell{flex-direction:column-reverse}
@@ -5270,18 +5506,23 @@ button{font:inherit;color:inherit}
      Past this the basis cannot shrink further and the dashboard needs real
      navigation instead of a flat bar. */
   /* The home indicator sits over the last row on a notched iPhone; without the
-     inset the bottom row's labels are half-covered by it. */
-  #tabs{width:100%;height:auto;display:flex;flex-wrap:wrap;padding:0;
-    border-right:none;border-top:1px solid #2c2c32;
+     inset the bottom row's labels are half-covered by it.
+     ‼️ flex-direction:row is an explicit reset, not decoration: the desktop
+     #tabs rule above now sets flex-direction:column (a vertical sidebar of
+     pill-highlighted rows), and without resetting it here every mobile tab
+     stacked into its own single-column "row" instead of wrapping 7-per-row —
+     found by screenshotting this breakpoint after the desktop rule changed. */
+  #tabs{width:100%;height:auto;display:flex;flex-direction:row;flex-wrap:wrap;
+    padding:0;gap:0;border-right:none;border-top:1px solid var(--border);
     padding-bottom:env(safe-area-inset-bottom,0px)}
   .tab{flex:0 0 14.28%;flex-direction:column;gap:2px;padding:6px 2px;
-    font-size:9.5px;border-left:none;border-top:3px solid transparent;
-    justify-content:center;text-align:center;min-width:0}
+    font-size:9.5px;border-radius:0;border-top:3px solid transparent;
+    justify-content:center;text-align:center;min-width:0;background:transparent!important}
   /* Long labels (Costmap, Σπίτι 3D) must shrink, not widen the cell and
      push the row back into overflow. */
   .tab>span:last-child{overflow:hidden;text-overflow:ellipsis;
     white-space:nowrap;max-width:100%}
-  .tab.active{border-left-color:transparent;border-top-color:#3b82f6}
+  .tab.active{color:var(--accent-strong);border-top-color:var(--accent)}
   #title{display:none}
   .pane{padding:8px}
 }
@@ -5312,9 +5553,22 @@ button{font:inherit;color:inherit}
     </div>
 
     <section class="pane active" id="p-map">
-      <div class="row" style="margin-bottom:8px">
+      <div class="ml-stats">
+        <div class="ml-stat"><div class="ml-val" id="ml-area">—</div><div class="ml-lbl">m² χάρτης</div></div>
+        <div class="ml-sep"></div>
+        <div class="ml-stat"><div class="ml-val" id="ml-rooms">—</div><div class="ml-lbl">δωμάτια</div></div>
+        <div class="ml-sep"></div>
+        <div class="ml-stat"><div class="ml-val" id="ml-curroom">—</div><div class="ml-lbl">τρέχον δωμάτιο</div></div>
+      </div>
+      <div class="row ml-toolbar">
         <button class="btn pri" id="map-view-2d">🗺️ 2D</button>
         <button class="btn" id="map-view-scan">📸 Σάρωμα</button>
+      </div>
+      <div class="row" id="map-rotate-row" style="gap:4px;justify-content:center">
+        <button class="btn" id="map-rot-ccw" title="Περιστροφή αριστερά" style="padding:8px 12px">⟲</button>
+        <button class="btn" id="map-rot-reset" title="Επαναφορά" style="padding:8px 10px;
+          font-family:ui-monospace,Menlo,monospace;font-size:12px;min-width:38px">0°</button>
+        <button class="btn" id="map-rot-cw" title="Περιστροφή δεξιά" style="padding:8px 12px">⟳</button>
       </div>
       <div id="map-wrap">
         <canvas id="map-canvas"></canvas>
@@ -5325,11 +5579,39 @@ button{font:inherit;color:inherit}
         <canvas id="scan3d" style="width:100%;height:min(58vh,600px);min-height:260px;
           background:#0a0a0b;border-radius:8px;touch-action:none;cursor:grab;
           display:block"></canvas>
-        <div style="color:#71717a;font-size:11.5px;margin-top:6px">
+        <div style="color:var(--text-dim);font-size:11.5px;margin-top:6px">
           Σύρε για περιστροφή · ροδέλα για ζουμ · κλικ πάνω στο σπίτι στέλνει το ρομπότ εκεί ·
           πραγματικό υφασμένο mesh (τηλέφωνο), όχι το occupancy grid — το AMCL εντοπίζεται
           στον 2D χάρτη, εδώ βλέπεις μόνο την ίδια θέση πάνω στην πραγματική όψη
         </div>
+      </div>
+      <div class="card" id="map-scan3d-upload-card" style="display:none">
+        <h3>⬆️ Ανέβασμα σάρωσης 3D</h3>
+        <div style="color:var(--text-dim);font-size:11.5px;margin-bottom:8px">
+          Σάρωσε το σπίτι με το κινητό (π.χ. 3D Scanner App / Scaniverse) και ανέβασε εδώ
+          το εξαγόμενο PLY — γίνεται αυτόματα νέος χάρτης. Πρόσθεσε και το GLB της ίδιας
+          σάρωσης (προαιρετικό) για το φωτορεαλιστικό «Σάρωμα» από πάνω.
+        </div>
+        <input id="scan-upload-name" placeholder="όνομα νέου χάρτη"
+               style="width:100%;background:var(--bg);border:1px solid var(--border);
+                      color:var(--text);border-radius:8px;padding:8px 10px;margin-bottom:8px">
+        <div class="row" style="gap:12px;flex-wrap:wrap">
+          <label style="flex:1;min-width:140px;font-size:11.5px;color:var(--text-dim)">
+            PLY (σάρωση)
+            <input id="scan-upload-ply" type="file" accept=".ply"
+                   style="display:block;margin-top:4px;width:100%">
+          </label>
+          <label style="flex:1;min-width:140px;font-size:11.5px;color:var(--text-dim)">
+            GLB (προαιρετικό)
+            <input id="scan-upload-glb" type="file" accept=".glb"
+                   style="display:block;margin-top:4px;width:100%">
+          </label>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button class="btn pri" id="b-scan-upload">⬆️ Μετατροπή σε χάρτη</button>
+        </div>
+        <div id="scan-upload-msg" style="color:var(--text-dim);font-size:11.5px;margin-top:8px;
+                                          white-space:pre-wrap"></div>
       </div>
       <div class="card grow">
         <h3>Χάρτες <span class="badge" id="map-active">—</span></h3>
@@ -5337,28 +5619,28 @@ button{font:inherit;color:inherit}
         <div class="row" style="margin-top:10px">
           <button class="btn pri" id="b-map-new">🆕 Νέος χάρτης (SLAM)</button>
           <input id="map-save-name" placeholder="όνομα χάρτη"
-                 style="flex:1;min-width:120px;background:#18181b;border:1px solid #27272a;
-                        color:#e4e4e7;border-radius:8px;padding:8px 10px">
+                 style="flex:1;min-width:120px;background:var(--bg);border:1px solid var(--border);
+                        color:var(--text);border-radius:8px;padding:8px 10px">
           <button class="btn" id="b-map-save">💾 Αποθήκευση</button>
         </div>
-        <div id="map-msg" style="color:#71717a;font-size:11.5px;margin-top:8px"></div>
+        <div id="map-msg" style="color:var(--text-dim);font-size:11.5px;margin-top:8px"></div>
         <div id="map-straighten" style="display:none;margin-top:12px;padding-top:12px;
-                                        border-top:1px solid #27272a">
-          <div style="font-size:12.5px;color:#a1a1aa;margin-bottom:8px">
+                                        border-top:1px solid var(--border)">
+          <div style="font-size:12.5px;color:var(--text-dim);margin-bottom:8px">
             🧹 Καθαρή εκδοχή — ισιώνει τα σκαλοπάτια των τοίχων. <b>Μόνο εμφάνιση</b> μέχρι
             να διαλέξεις: μπορεί να μετατοπίσει τοίχους λίγα εκατοστά ή να αφαιρέσει ένα
             πραγματικό εμπόδιο που έμοιαζε με θόρυβο σάρωσης — σύγκρινε οπτικά πριν διαλέξεις.
           </div>
           <div class="row" style="gap:12px">
             <div style="flex:1;text-align:center;min-width:0">
-              <div style="font-size:11px;color:#71717a;margin-bottom:4px">Πρωτότυπο</div>
+              <div style="font-size:11px;color:var(--text-dim);margin-bottom:4px">Πρωτότυπο</div>
               <img id="map-straighten-orig" style="max-width:100%;border-radius:6px;
-                                                    border:1px solid #27272a">
+                                                    border:1px solid var(--border)">
             </div>
             <div style="flex:1;text-align:center;min-width:0">
-              <div style="font-size:11px;color:#71717a;margin-bottom:4px">Ισιωμένο</div>
+              <div style="font-size:11px;color:var(--text-dim);margin-bottom:4px">Ισιωμένο</div>
               <img id="map-straighten-clean" style="max-width:100%;border-radius:6px;
-                                                     border:1px solid #27272a">
+                                                     border:1px solid var(--border)">
             </div>
           </div>
           <div class="row" style="margin-top:10px">
@@ -5369,7 +5651,7 @@ button{font:inherit;color:inherit}
       </div>
       <div class="card">
         <h3>Δωμάτια
-          <label style="float:right;font-size:11.5px;color:#a1a1aa;font-weight:400;
+          <label style="float:right;font-size:11.5px;color:var(--text-dim);font-weight:400;
             cursor:pointer;user-select:none">
             <input type="checkbox" id="b-tint" checked style="vertical-align:-2px">
             Χρώματα
@@ -5391,8 +5673,8 @@ button{font:inherit;color:inherit}
           <input type="color" id="pr-color" value="#cc44ff"
             style="width:34px;height:30px;padding:0;border:none;background:none;flex:0 0 auto">
           <input type="text" id="pr-name" placeholder="π.χ. κρεβατοκάμαρα"
-            style="flex:1;min-width:100px;background:#232329;border:1px solid #2c2c32;
-            border-radius:8px;color:#e4e4e7;padding:6px 9px;font-size:12.5px">
+            style="flex:1;min-width:100px;background:var(--bg);border:1px solid var(--border);
+            border-radius:8px;color:var(--text);padding:6px 9px;font-size:12.5px">
         </div>
         <label style="display:flex;align-items:center;gap:9px;font-size:12.5px;
           cursor:pointer;user-select:none;margin-top:6px">
@@ -5403,13 +5685,13 @@ button{font:inherit;color:inherit}
           <input type="color" id="prr-color" value="#cc44ff"
             style="width:34px;height:30px;padding:0;border:none;background:none;flex:0 0 auto">
           <input type="text" id="prr-name" placeholder="π.χ. κρεβατοκάμαρα"
-            style="flex:1;min-width:100px;background:#232329;border:1px solid #2c2c32;
-            border-radius:8px;color:#e4e4e7;padding:6px 9px;font-size:12.5px">
+            style="flex:1;min-width:100px;background:var(--bg);border:1px solid var(--border);
+            border-radius:8px;color:var(--text);padding:6px 9px;font-size:12.5px">
         </div>
         <div id="room-edit" style="margin-top:10px"></div>
         <div class="row" style="margin-top:8px" id="room-edit-row">
           <button class="btn" id="b-room-save">💾 Αποθήκευση ονομάτων/χρωμάτων</button>
-          <span id="room-edit-msg" style="font-size:11.5px;color:#71717a"></span>
+          <span id="room-edit-msg" style="font-size:11.5px;color:var(--text-dim)"></span>
         </div>
         <div class="speedbox" style="margin-top:10px">
           <label style="display:flex;align-items:center;gap:9px;font-size:12.5px;
@@ -5419,17 +5701,17 @@ button{font:inherit;color:inherit}
           </label>
           <div class="row" id="kz-add-row" style="margin-top:6px;gap:8px;display:none">
             <input type="text" id="kz-name" placeholder="π.χ. χαλάκι σκύλου"
-              style="flex:1;min-width:100px;background:#232329;border:1px solid #2c2c32;
-              border-radius:8px;color:#e4e4e7;padding:6px 9px;font-size:12.5px">
+              style="flex:1;min-width:100px;background:var(--bg);border:1px solid var(--border);
+              border-radius:8px;color:var(--text);padding:6px 9px;font-size:12.5px">
           </div>
           <div class="row" id="kz-list" style="margin-top:8px;flex-direction:column;
             align-items:stretch;gap:4px"></div>
           <div class="row" style="margin-top:8px">
             <button class="btn warn" id="kz-on">🚫 Ενεργοποίηση ζωνών</button>
             <button class="btn" id="kz-off">✅ Απενεργοποίηση</button>
-            <span id="kz-msg" style="font-size:11.5px;color:#71717a"></span>
+            <span id="kz-msg" style="font-size:11.5px;color:var(--text-dim)"></span>
           </div>
-          <p style="font-size:11px;color:#71717a;margin-top:6px;line-height:1.5">
+          <p style="font-size:11px;color:var(--text-dim);margin-top:6px;line-height:1.5">
             Χρειάζεται επανεκκίνηση (~90s) για να πιάσει η αλλαγή — το Nav2 διαβάζει
             τις ζώνες μόνο στην εκκίνηση.
           </p>
@@ -5440,22 +5722,22 @@ button{font:inherit;color:inherit}
             <input type="checkbox" id="b-slipmap">
             <span>🩹 Πού γλιστράει <span class="badge" id="sm-badge">—</span></span>
           </label>
-          <div id="sm-msg" style="font-size:11.5px;color:#71717a;margin-top:8px;
+          <div id="sm-msg" style="font-size:11.5px;color:var(--text-dim);margin-top:8px;
             line-height:1.6">Δείχνει τα σημεία του σπιτιού όπου το AMCL χρειάστηκε να διορθώσει περισσότερο τη θέση — δηλαδή εκεί που η οδομετρία χάνει έδαφος. Μαζεύεται με τον καιρό και επιβιώνει σε restart. Ένα φωτεινό σημείο σε ένα χαλί είναι πρόβλημα που φτιάχνεται· παντού λίγο, είναι βαθμονόμηση.</div>
         </div>
         <div class="speedbox">
           <div class="row">
-            <span style="font-size:12.5px;color:#a1a1aa">🔎 Πήγαινε να δεις</span>
+            <span style="font-size:12.5px;color:var(--text-dim)">🔎 Πήγαινε να δεις</span>
             <select id="ck-room" class="btn" style="padding:6px 9px"></select>
             <input id="ck-q" placeholder="π.χ. είναι κλειστό το παράθυρο;"
-              style="flex:1;min-width:140px;background:#232329;border:1px solid #2c2c32;
-              border-radius:8px;color:#e4e4e7;padding:7px 10px;font-size:12.5px"
+              style="flex:1;min-width:140px;background:var(--bg);border:1px solid var(--border);
+              border-radius:8px;color:var(--text);padding:7px 10px;font-size:12.5px"
               autocomplete="off">
             <button class="btn pri" id="ck-go">Έλεγξε</button>
             <button class="btn" id="ck-stop">✕</button>
             <button class="btn" id="sort-go" title="Μαζεύει αντικείμενα με τον βραχίονα">🧺 Μάζεψε</button>
           </div>
-          <div id="ck-msg" style="font-size:11.5px;color:#71717a;margin-top:6px"></div>
+          <div id="ck-msg" style="font-size:11.5px;color:var(--text-dim);margin-top:6px"></div>
         </div>
       </div>
       <div class="card">
@@ -5491,10 +5773,10 @@ button{font:inherit;color:inherit}
             <button class="btn" id="sp-slow">🐢 Αργά</button>
             <button class="btn" id="sp-def">Προεπιλογή</button>
             <button class="btn" id="sp-fast">🐇 Γρήγορα</button>
-            <span id="sp-note" style="font-size:11px;color:#71717a"></span>
+            <span id="sp-note" style="font-size:11px;color:var(--text-dim)"></span>
           </div>
         </div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           ⌨️ Και από πληκτρολόγιο: βελάκια ή WASD (κράτα πατημένο), space = στοπ. Αφήνοντας το πλήκτρο σταματά· αν χαθεί το tab ή το δίκτυο, η βάση σταματά μόνη της σε 0.25s.
         </p>
       </div>
@@ -5511,6 +5793,11 @@ button{font:inherit;color:inherit}
         <div class="ovl" id="cam-why" style="top:auto;bottom:8px;left:10px;
              right:10px;display:none;background:rgba(120,53,15,.85);
              color:#fbbf24;font-size:11.5px;line-height:1.5"></div>
+        <div id="cam-dpad">
+          <div class="cdbtn ghost"></div><div class="cdbtn" id="cam-bf">▲</div><div class="cdbtn ghost"></div>
+          <div class="cdbtn" id="cam-bl">◄</div><div class="cdbtn stop" id="cam-bstop">■</div><div class="cdbtn" id="cam-br">►</div>
+          <div class="cdbtn ghost"></div><div class="cdbtn" id="cam-bb">▼</div><div class="cdbtn ghost"></div>
+        </div>
       </div>
       <div class="card">
         <h3>Ανίχνευση <span class="badge" id="vis-count">—</span></h3>
@@ -5519,7 +5806,7 @@ button{font:inherit;color:inherit}
           <button class="btn" id="b-follow">👣 Ακολούθησέ με</button>
           <button class="btn warn" id="b-follow-stop">■ Σταμάτα να ακολουθείς</button>
         </div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           Τα πράσινα πλαίσια είναι άνθρωποι, τα πορτοκαλί αντικείμενα· ο κίτρινος σκελετός είναι 17 σημεία COCO. ‼️ Χρειάζονται τα perception nodes — ξεκίνα με «robot max use_perception:=true», αλλιώς η εικόνα μένει καθαρή και ο μετρητής στο 0. Το «Ακολούθησέ με» σταματά μόνο του μετά από 30 δευτερόλεπτα.
         </p>
       </div>
@@ -5533,17 +5820,17 @@ button{font:inherit;color:inherit}
           <button class="btn" id="b-apriltag-toggle">AprilTag</button>
           <span class="pill" id="apriltag-pill">—</span>
         </div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           Σβηστά γλιτώνουν CPU όταν δεν τα χρειάζεσαι (pose+χειρονομίες ~25%, AprilTag ~29% σε αυτό το μηχάνημα). Το AprilTag χρειάζεται για επαναδιόρθωση θέσης στο σαλόνι μετά από μεγάλο drift.
         </p>
       </div>
       <div class="card">
         <h3>Τι βλέπει</h3>
-        <div id="objects" style="font-size:13px;color:#a1a1aa;line-height:1.6">—</div>
+        <div id="objects" style="font-size:13px;color:var(--text-dim);line-height:1.6">—</div>
       </div>
       <div class="card">
         <h3>Κατάσταση περιβάλλοντος</h3>
-        <div id="situation" style="font-size:12.5px;color:#a1a1aa;line-height:1.6">—</div>
+        <div id="situation" style="font-size:12.5px;color:var(--text-dim);line-height:1.6">—</div>
       </div>
     </section>
 
@@ -5565,7 +5852,7 @@ button{font:inherit;color:inherit}
         <canvas id="arm3d" style="width:100%;height:min(52vh,560px);min-height:260px;
           background:#0a0a0b;border-radius:8px;touch-action:none;cursor:grab;
           display:block"></canvas>
-        <div style="color:#71717a;font-size:11.5px;margin-top:6px">
+        <div style="color:var(--text-dim);font-size:11.5px;margin-top:6px">
           Σύρε για περιστροφή · ροδέλα για ζουμ · κινείται με τις αρθρώσεις από κάτω
         </div>
       </div>
@@ -5581,7 +5868,7 @@ button{font:inherit;color:inherit}
           <input type="range" id="armspeed" min="0.5" max="1.5" step="0.05" value="1.0">
           <span class="val" id="armspeed-v">100%</span>
         </div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           Η ταχύτητα ρυθμίζει ΚΑΙ το χειριστήριο (jog) ΚΑΙ πόσο απότομα ξεκινούν
           οι κινήσεις από εδώ — όχι το ανώτατο όριο του σερβοκινητήρα, που δεν
           έχει μετρηθεί ασφαλές να ανέβει. Τα όρια των αρθρώσεων δεν μπορούν
@@ -5610,14 +5897,14 @@ button{font:inherit;color:inherit}
           <span class="k">Σκληρότητα</span><span class="v" id="tc-hard">—</span>
           <span class="k">Βάρος</span><span class="v" id="tc-weight">—</span>
         </div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           Ο βραχίονας στέλνει ΦΟΡΤΙΟ ανά άρθρωση δίπλα σε κάθε γωνία, και μέχρι
           τώρα δεν το διάβαζε κανείς. Η επαφή είναι ΣΚΑΛΟΠΑΤΙ πάνω από το
           φορτίο που κουβαλά κινούμενος στον αέρα· η σκληρότητα είναι φορτίο
           ανά χιλιοστό διαδρομής· το βάρος είναι η διαφορά στον ώμο με κλειστή
           και ανοιχτή δαγκάνα.
         </p>
-        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:8px;line-height:1.6">
           ‼️ Οι τιμές είναι ΑΚΑΤΕΡΓΑΣΤΕΣ μονάδες σερβοκινητήρα, όχι γραμμάρια.
           Συγκρίνονται μεταξύ τους και με τίποτα άλλο — γι' αυτό λέει «βαρύ»
           και όχι «180 γραμμάρια». Η μέτρηση είναι ΠΑΘΗΤΙΚΗ: δεν δίνει ποτέ
@@ -5632,7 +5919,7 @@ button{font:inherit;color:inherit}
           <button class="btn" id="b-arm-init">⚡ Επαναφορά ροπής</button>
           <button class="btn pri" id="b-arm-moveit">🎯 Άνοιγμα MoveIt</button>
         </div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           ‼️ Στον ώμο το «πάνω» είναι η ΑΡΝΗΤΙΚΗ φορά. Τα όρια είναι τα μετρημένα
           στο χέρι (31/07), όχι του κατασκευαστή. Η χαλάρωση κόβει τη ροπή —
           κράτα τον βραχίονα πριν την πατήσεις.
@@ -5662,7 +5949,7 @@ button{font:inherit;color:inherit}
           <button class="btn pri" id="b-dock">🔌 Στη βάση</button>
           <button class="btn" id="b-undock">✕ Άκυρο docking</button>
         </div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           ‼️ Δεν εμφανίζεται μπαταρία: το σασί τρέφεται από powerbank και τα πεδία
           φόρτισης του OI δίνουν σκουπίδια. Αν το «Σύνδεση» ξεπεράσει τα ~3s, η
           βάση κοιμάται — τότε κάθε πρόβλημα πλοήγησης είναι ψεύτικο.
@@ -5676,7 +5963,7 @@ button{font:inherit;color:inherit}
            and needs discovering. Two buttons are obvious and work on a phone. -->
       <div class="row" style="justify-content:center;gap:8px;flex:0 0 auto">
         <button class="btn" id="b-cost-smaller" title="μικρότερο">−</button>
-        <span style="font-size:11.5px;color:#71717a;min-width:74px;text-align:center"
+        <span style="font-size:11.5px;color:var(--text-dim);min-width:74px;text-align:center"
               id="cost-size">—</span>
         <button class="btn" id="b-cost-bigger" title="μεγαλύτερο">+</button>
       </div>
@@ -5687,7 +5974,7 @@ button{font:inherit;color:inherit}
       <div class="card">
         <h3>Υπόμνημα</h3>
         <div class="row" id="cost-legend" style="flex-wrap:wrap;gap:14px"></div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           Αυτό είναι ό,τι ΒΛΕΠΕΙ ο planner, όχι ο χάρτης. Το μπλε γύρω από τους τοίχους είναι το inflation — αν δύο μπλε ζώνες ενωθούν σε μια πόρτα, το ρομπότ δεν περνά, ακόμη κι αν το άνοιγμα φαίνεται καθαρό στον χάρτη. Τα ροζ σημεία είναι εμπόδια που έβαλε η ΑΝΙΧΝΕΥΣΗ (άνθρωποι παίρνουν μεγαλύτερο περιθώριο), όχι το lidar.
         </p>
       </div>
@@ -5705,14 +5992,14 @@ button{font:inherit;color:inherit}
           <button class="btn pri" id="b-nerf-go">⏺ Ξεκίνα καταγραφή</button>
           <button class="btn warn" id="b-nerf-stop">■ Σταμάτα</button>
         </div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           Καταγράφει εικόνες μαζί με τις ΜΕΤΡΗΜΕΝΕΣ πόζες της κάμερας από το TF — γι' αυτό δεν χρειάζεται COLMAP, που είναι το αργό και εύθραυστο μισό κάθε NeRF. Οδήγησε αργά γύρω από τον χώρο κοιτώντας τον από πολλές γωνίες. Κρατά καρέ μόνο όταν η κάμερα έχει όντως μετακινηθεί (12cm ή 8°), αλλιώς 30 πανομοιότυπες λήψεις τον δευτερόλεπτο δεν διδάσκουν τίποτα.
         </p>
       </div>
       <div class="card">
         <h3>Χάρτης κάλυψης</h3>
         <canvas id="nf-map" width="280" height="280" style="width:100%;max-width:280px;border-radius:8px;background:#18181b"></canvas>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           Κάθε πράσινη κουκκίδα είναι μια θέση απ' όπου κρατήθηκε καρέ (πάνοψη, x/y). Η πορτοκαλί είναι η πιο πρόσφατη. Βοηθά να δεις ΕΝ ΚΙΝΗΣΕΙ αν καλύπτεις όλο το δωμάτιο πριν πατήσεις «Σταμάτα». Καθαρίζει αυτόματα όταν ξεκινά νέα καταγραφή.
         </p>
       </div>
@@ -5727,11 +6014,11 @@ button{font:inherit;color:inherit}
           <button class="btn pri" id="b-nerf-train-go">▶ Ξεκίνα εκπαίδευση</button>
           <button class="btn warn" id="b-nerf-train-stop">■ Σταμάτα</button>
         </div>
-        <p id="nt-error" style="display:none;font-size:11.5px;color:#f87171;margin-top:10px;
+        <p id="nt-error" style="display:none;font-size:11.5px;color:#dc2626;margin-top:10px;
            line-height:1.6;white-space:pre-wrap"></p>
         <button class="btn" id="b-nerf-stop-perception"
                 style="display:none;margin-top:8px">Σταμάτα αντίληψη και ξαναδοκίμασε</button>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           ‼️ ΔΕΝ μπορεί να μοιραστεί το iGPU με το perception. Με το object_detector και το pose_node ενεργά, η εκπαίδευση ΡΙΧΝΕΙ την ουρά του ROCm (memory aperture violation) — δεν είναι έλλειψη μνήμης, μετρήθηκαν 5.9GB ελεύθερα. Το «Σταμάτα αντίληψη» σβήνει ΜΟΝΟ τα 3 nodes που χρησιμοποιούν το iGPU (object_detector, pose_node, open_vocab_detector) — το ρομπότ συνεχίζει να οδηγεί/εντοπίζεται κανονικά, απλά τυφλώνεται μέχρι το επόμενο «robot max». Μετρημένη ταχύτητα: ~310ms/βήμα, άρα ένα δωμάτιο θέλει 45 λεπτά έως 2 ώρες. Αποθηκεύει checkpoint κάθε 200 βήματα — «Σταμάτα» και ξανά «Ξεκίνα» συνεχίζει από εκεί, δεν ξαναρχίζει από την αρχή.
         </p>
       </div>
@@ -5753,19 +6040,19 @@ button{font:inherit;color:inherit}
         </div>
         <div class="row" style="margin-top:12px">
           <button class="btn pri" id="b-pt-go">👉 Πήγαινε εκεί</button>
-          <span id="pt-msg" style="font-size:11.5px;color:#71717a"></span>
+          <span id="pt-msg" style="font-size:11.5px;color:var(--text-dim)"></span>
         </div>
       </div>
       <div class="card">
         <h3>Πώς δουλεύει</h3>
-        <p style="font-size:11.5px;color:#71717a;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);line-height:1.6">
           Τεντώνεις το χέρι και δείχνεις στο ΠΑΤΩΜΑ. Το ρομπότ παίρνει τον ώμο και
           τον καρπό σου από τον σκελετό (pose_node), τα ανεβάζει σε 3D με το βάθος
           της D435, και προεκτείνει τη γραμμή ώσπου να συναντήσει το δάπεδο.
           Ο κύκλος γεμίζει καθώς μαζεύονται καρέ που συμφωνούν· γίνεται πράσινος
           όταν κλειδώσει.
         </p>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           ‼️ ΔΕΝ οδηγεί μόνο του. Το να δείξεις κάτι γίνεται πολύ εύκολα κατά λάθος
           — απλώνοντας το χέρι για μια κούπα γράφεις την ίδια γεωμετρία — οπότε
           χρειάζεται ρητή επιβεβαίωση: αυτό το κουμπί ή «πήγαινε εκεί» με τη φωνή.
@@ -5776,19 +6063,19 @@ button{font:inherit;color:inherit}
         <h3>Τι κάνει η κάθε χειρονομία <span class="badge" id="gb-badge">—</span></h3>
         <label style="display:flex;align-items:center;gap:9px;font-size:12.5px;
           cursor:pointer;user-select:none;padding:9px 11px;border-radius:10px;
-          background:#232329;border:1px solid #33333d">
+          background:var(--bg);border:1px solid var(--border)">
           <input type="checkbox" id="gb-motion">
           <span>Να επιτρέπονται χειρονομίες που ΚΙΝΟΥΝ το ρομπότ</span>
         </label>
         <div id="gb-list" style="margin-top:12px"></div>
-        <div id="gb-msg" style="color:#71717a;font-size:11.5px;margin-top:8px"></div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <div id="gb-msg" style="color:var(--text-dim);font-size:11.5px;margin-top:8px"></div>
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           ‼️ Οι χειρονομίες που ΣΤΑΜΑΤΟΥΝ δουλεύουν πάντα, ακόμη κι όταν ο
           διακόπτης είναι κλειστός — το αντίθετο θα ήταν η χειρότερη δυνατή
           συμπεριφορά. Όσες ΞΕΚΙΝΟΥΝ κίνηση θέλουν διπλάσιο κράτημα, γιατί ένα
           λάθος «έλα εδώ» στέλνει μηχάνημα πάνω σε άνθρωπο.
         </p>
-        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:8px;line-height:1.6">
           Οι στάσεις σώματος διαβάζονται από απόσταση· τα δάχτυλα θέλουν
           κοντινή απόσταση και <code>use_hand_gestures:=true</code>.
         </p>
@@ -5811,24 +6098,24 @@ button{font:inherit;color:inherit}
         <h3>Πρόσθεσε άτομο</h3>
         <div class="row">
           <input id="pp-name" placeholder="όνομα"
-            style="flex:1;min-width:120px;background:#232329;border:1px solid #33333d;
-            border-radius:9px;color:#e4e4e7;padding:8px 11px;font-size:12.5px"
+            style="flex:1;min-width:120px;background:var(--bg);border:1px solid var(--border);
+            border-radius:9px;color:var(--text);padding:8px 11px;font-size:12.5px"
             autocomplete="off">
           <button class="btn pri" id="b-pp-add">➕ Πρόσθεσε</button>
         </div>
-        <div id="pp-msg" style="font-size:11.5px;color:#71717a;margin-top:8px"></div>
+        <div id="pp-msg" style="font-size:11.5px;color:var(--text-dim);margin-top:8px"></div>
       </div>
 
       <div class="card grow">
         <h3>Γνωστά άτομα <span class="badge" id="pp-count">—</span></h3>
         <div id="pp-list"></div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:12px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:12px;line-height:1.6">
           Τρία σήματα, το καθένα τυφλό αλλού. Το ΠΡΟΣΩΠΟ δουλεύει σιωπηλά και
           από απόσταση, αλλά όχι στο σκοτάδι ή από πίσω. Η ΦΩΝΗ δουλεύει στο
           σκοτάδι και πίσω από γωνίες, αλλά μόνο όσο κάποιος μιλάει. Το ΥΨΟΣ
           υπάρχει πάντα.
         </p>
-        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:8px;line-height:1.6">
           ‼️ Το ύψος ΔΕΝ αναγνωρίζει από μόνο του — δύο ενήλικες διαφέρουν
           συχνά λίγα εκατοστά. Χρησιμεύει για να ΑΠΟΚΛΕΙΕΙ: «όποιος κι αν
           είναι, δεν είναι το παιδί». Μετριέται από το πάτωμα του χάρτη, οπότε
@@ -5843,26 +6130,26 @@ button{font:inherit;color:inherit}
         <h3>Ψάξε ό,τι θέλεις <span class="badge" id="vc-badge">—</span></h3>
         <div class="row">
           <input id="vc-q" placeholder="π.χ. κλειδιά, γυαλιά, φορτιστής"
-            style="flex:1;min-width:150px;background:#232329;border:1px solid #2c2c32;
-            border-radius:8px;color:#e4e4e7;padding:7px 10px;font-size:12.5px"
+            style="flex:1;min-width:150px;background:var(--bg);border:1px solid var(--border);
+            border-radius:8px;color:var(--text);padding:7px 10px;font-size:12.5px"
             autocomplete="off">
           <button class="btn pri" id="b-vc-go">🔎 Ψάξε</button>
           <button class="btn" id="b-vc-stop" title="Ελευθερώνει το iGPU">■</button>
         </div>
         <div class="row" style="margin-top:8px;flex-wrap:wrap;gap:6px" id="vc-chips"></div>
-        <div id="vc-msg" style="font-size:11.5px;color:#71717a;margin-top:9px"></div>
+        <div id="vc-msg" style="font-size:11.5px;color:var(--text-dim);margin-top:9px"></div>
       </div>
       <div class="card">
         <h3>Τι βλέπει <span class="badge" id="vc-count">—</span></h3>
         <div id="vc-hits" style="font-size:12.5px;line-height:1.7">
-          <span style="color:#71717a">Δεν ψάχνει τίποτα.</span>
+          <span style="color:var(--text-dim)">Δεν ψάχνει τίποτα.</span>
         </div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:12px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:12px;line-height:1.6">
           Το κανονικό YOLO ξέρει 80 σταθερές κατηγορίες — κούπες, καρέκλες,
           βιβλία. «Κλειδιά», «φορτιστής», «πορτοφόλι» ΔΕΝ υπάρχουν σε αυτές.
           Το YOLO-World παίρνει τη λίστα ως κείμενο, οπότε ψάχνει ό,τι του πεις.
         </p>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           ‼️ Ξεκινά ΜΟΝΟ όταν ζητήσεις κάτι και σβήνει μόνο του μετά από 90
           δευτερόλεπτα. Ένας δεύτερος ανιχνευτής που τρέχει συνέχεια στο ίδιο
           iGPU είναι ακριβώς το πρόβλημα φόρτου που έχει ξαναχτυπήσει εδώ.
@@ -5878,7 +6165,7 @@ button{font:inherit;color:inherit}
            built in JS from a table. -->
       <div class="card" style="margin-bottom:9px">
         <h3>Ρυθμίσεις μικροφώνου <span class="badge" id="mic-badge">—</span></h3>
-        <div style="margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid #27272e">
+        <div style="margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid var(--border)">
           <div class="sflab" style="margin-bottom:2px">Λέξη-αφύπνιση
             <span class="badge" id="wm-badge">—</span></div>
           <select id="wake-model" class="btn"
@@ -5933,7 +6220,7 @@ button{font:inherit;color:inherit}
           <button class="btn warn" id="b-mic-reset">↺ Επαναφορά προεπιλογών</button>
           <button class="btn" id="b-mic-power">🔌 Power-cycle μικροφώνου</button>
         </div>
-        <div id="mic-msg" style="font-size:11.5px;color:#71717a;margin-top:9px"></div>
+        <div id="mic-msg" style="font-size:11.5px;color:var(--text-dim);margin-top:9px"></div>
       </div>
       <div class="card" style="margin-bottom:9px">
         <h3>Δαχτυλίδι LED <span class="badge" id="led-badge">—</span></h3>
@@ -5973,14 +6260,14 @@ button{font:inherit;color:inherit}
             <span class="k">Ανίχνευση ομιλίας (υλικό)</span><span class="v" id="sd-vad">—</span>
           </div>
         </div>
-        <div id="sd-cands" style="font-size:11.5px;color:#a1a1aa;margin-top:10px;
+        <div id="sd-cands" style="font-size:11.5px;color:var(--text-dim);margin-top:10px;
           line-height:1.6"></div>
         <div class="row" style="margin-top:12px;align-items:center">
           <button class="btn pri" id="b-listen">🔊 Άκου το μικρόφωνο</button>
           <button class="btn" id="b-listen-stop">■ Σταμάτα</button>
-          <span id="listen-msg" style="font-size:11.5px;color:#71717a"></span>
+          <span id="listen-msg" style="font-size:11.5px;color:var(--text-dim)"></span>
         </div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:8px;line-height:1.6">
           ΖΩΝΤΑΝΟΣ ήχος από το δωμάτιο όπου βρίσκεται το ρομπότ — ακούς ό,τι
           ακούει. Ίδιο κανάλι με το «Έι ρομπότ», καθαρισμένο από τον XVF3800.
           Ξεκινά μόνο όταν το πατήσεις και κόβεται μόλις κλείσεις το tab.
@@ -5990,18 +6277,18 @@ button{font:inherit;color:inherit}
         <h3>Αυτόνομη κίνηση <span class="badge" id="dr-badge">—</span></h3>
         <label style="display:flex;align-items:center;gap:9px;font-size:12.5px;
           cursor:pointer;user-select:none;padding:9px 11px;border-radius:10px;
-          background:#232329;border:1px solid #33333d">
+          background:var(--bg);border:1px solid var(--border)">
           <input type="checkbox" id="dr-rotate">
           <span>Να στρίβει προς όποιον μιλάει (μετά το «Έι ρομπότ»)</span>
         </label>
-        <div id="dr-msg" style="color:#71717a;font-size:11.5px;margin-top:8px"></div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <div id="dr-msg" style="color:var(--text-dim);font-size:11.5px;margin-top:8px"></div>
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           ‼️ Κλειστό από προεπιλογή. Ανοιχτό, το ρομπότ γυρίζει τη βάση του μόλις
           ακούσει το wake word — ΠΡΙΝ πει κανείς εντολή και χωρίς να ρωτήσει.
           Επειδή το «Έι ρομπότ» πιάνεται και μέσα από κουβέντες που δεν του
           απευθύνονται, αυτό φαινόταν σαν να «φεύγει» μόνο του.
         </p>
-        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:8px;line-height:1.6">
           Ο φωτεινός δακτύλιος δείχνει ΠΑΝΤΑ την κατεύθυνση της φωνής, ακόμη κι
           όταν ο διακόπτης είναι κλειστός. Η ρύθμιση θυμάται μετά από
           <code>robot max</code>.
@@ -6016,15 +6303,15 @@ button{font:inherit;color:inherit}
         </div>
         <div class="row" style="margin-top:11px">
           <button class="btn pri" id="b-ec-probe">📡 Μέτρησε τον χώρο</button>
-          <span id="ec-msg" style="font-size:11.5px;color:#71717a"></span>
+          <span id="ec-msg" style="font-size:11.5px;color:var(--text-dim)"></span>
         </div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           Το ρομπότ βγάζει ένα σύντομο τσίρπισμα και ακούει την απάντηση του
           δωματίου. Το XVF3800 έχει ακύρωση ηχούς ακριβώς για να ακούει ΕΝΩ
           μιλάει — γι' αυτό γίνεται. Ένας γυμνός διάδρομος αντηχεί· ένα σαλόνι
           με καναπέδες όχι.
         </p>
-        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:8px;line-height:1.6">
           ‼️ Αυτό που εμπιστεύεσαι είναι η ΑΛΛΑΓΗ, όχι οι απόλυτοι αριθμοί. Το
           ηχείο, το μικρόφωνο και το ίδιο το σώμα του ρομπότ μπαίνουν το ίδιο
           σε δύο μετρήσεις από το ίδιο σημείο και αλληλοαναιρούνται. Δεν τρέχει
@@ -6035,9 +6322,9 @@ button{font:inherit;color:inherit}
       <div class="card" style="margin-bottom:9px">
         <h3>Από πού ακούγονται <span class="badge" id="am-badge">—</span></h3>
         <div id="am-last" style="font-size:12.5px;line-height:1.7;
-          color:#e4e4e7;margin-bottom:9px"></div>
+          color:var(--text-dim);margin-bottom:9px"></div>
         <div id="am-list" style="font-size:12.5px;line-height:1.7"></div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           Το μικρόφωνο δίνει ΚΑΤΕΥΘΥΝΣΗ, όχι θέση. Μία γωνία από ένα σημείο
           είναι ακτίνα, όχι σημείο — γι' αυτό η θέση εμφανίζεται μόνο αφού
           ακουστεί ο ίδιος ήχος από ΔΥΟ διαφορετικά σημεία. Το δωμάτιο όμως
@@ -6048,15 +6335,15 @@ button{font:inherit;color:inherit}
       <div class="card">
         <h3>Ιστορικό ήχων</h3>
         <div id="sd-feed" style="font-size:12.5px;line-height:1.75">
-          <span style="color:#71717a">Τίποτα ακόμη.</span>
+          <span style="color:var(--text-dim)">Τίποτα ακόμη.</span>
         </div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:12px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:12px;line-height:1.6">
           Το YAMNet αναγνωρίζει 521 ήχους· εδώ κρατάμε τους δώδεκα που αφορούν
           ένα σπίτι: κουδούνι, σπασμένο γυαλί, συναγερμός, μωρό που κλαίει,
           νερό που τρέχει, κάτι που έπεσε. Η ΟΜΙΛΙΑ δεν αναγγέλλεται ποτέ —
           είναι ο πιο συχνός ήχος σε ένα σπίτι και τον χειρίζεται ήδη η φωνή.
         </p>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           ‼️ ΔΕΝ ανοίγει το μικρόφωνο. Διαβάζει το <code>/mic/audio</code> που
           δημοσιεύει ο κόμβος wake word — δεύτερο ALSA stream στην ίδια συσκευή
           θα τσακωνόταν με το «Έι ρομπότ». Θέλει
@@ -6069,20 +6356,20 @@ button{font:inherit;color:inherit}
     <section class="pane" id="p-obs">
       <div class="card" style="margin-bottom:9px">
         <h3>Τι πρόσεξε <span class="badge" id="ob-badge">—</span></h3>
-        <div id="ob-feed" style="font-size:12.5px;line-height:1.7;color:#e4e4e7">
-          <span style="color:#71717a">Καμία παρατήρηση ακόμη.</span>
+        <div id="ob-feed" style="font-size:12.5px;line-height:1.7;color:var(--text)">
+          <span style="color:var(--text-dim)">Καμία παρατήρηση ακόμη.</span>
         </div>
       </div>
       <div class="card">
         <h3>Πώς μαθαίνει</h3>
-        <p style="font-size:11.5px;color:#71717a;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);line-height:1.6">
           Το ρομπότ χτίζει μόνο του μια βάση αναφοράς: πού «ζει» κανονικά κάθε
           αντικείμενο. Ένα αντικείμενο μετράει ως μόνιμο μόνο αφού το δει στο ίδιο
           σημείο σε ΞΕΧΩΡΙΣΤΕΣ επισκέψεις, με απόσταση μεταξύ τους — αλλιώς μια
           παρατεταμένη ματιά σε ένα δωμάτιο θα γινόταν «κανονικότητα» και όλα μετά
           θα έμοιαζαν μετακινημένα.
         </p>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           Σε καινούριο χάρτη θα σιωπά για μέρες. Αυτό είναι το σωστό: δεν ξέρει
           ακόμη τι σημαίνει «κανονικά». Μιλάει ΜΟΝΟ όταν υπάρχει άνθρωπος μπροστά
           του, το πολύ 4 φορές την ώρα, ποτέ 23:00–08:00, και ποτέ την ίδια
@@ -6096,12 +6383,12 @@ button{font:inherit;color:inherit}
       <div class="card" style="margin-bottom:9px">
         <h3>Πού είναι τα πράγματα <span class="badge" id="om-badge">—</span></h3>
         <div id="om-list" style="font-size:12.5px;line-height:1.75">
-          <span style="color:#71717a">Τίποτα γνωστό ακόμη.</span>
+          <span style="color:var(--text-dim)">Τίποτα γνωστό ακόμη.</span>
         </div>
       </div>
       <div class="card">
         <h3>Πώς δουλεύει</h3>
-        <p style="font-size:11.5px;color:#71717a;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);line-height:1.6">
           Το ρομπότ θυμάται πού είδε τελευταία κάθε αντικείμενο, από την κάμερα —
           η ίδια μνήμη που χρησιμοποιεί το «φέρε μου το Χ». Ένα αντικείμενο
           μπαίνει εδώ μόνο αφού επιβεβαιωθεί σε αρκετές ξεχωριστές παρατηρήσεις,
@@ -6116,19 +6403,19 @@ button{font:inherit;color:inherit}
         <h3>Ρώτα τη μνήμη <span class="badge" id="tl-count">—</span></h3>
         <div class="row">
           <input id="tl-q" placeholder="π.χ. τι έγινε σήμερα το πρωί;"
-            style="flex:1;min-width:150px;background:#232329;border:1px solid #2c2c32;
-            border-radius:8px;color:#e4e4e7;padding:7px 10px;font-size:12.5px"
+            style="flex:1;min-width:150px;background:var(--bg);border:1px solid var(--border);
+            border-radius:8px;color:var(--text);padding:7px 10px;font-size:12.5px"
             autocomplete="off">
           <button class="btn pri" id="b-tl-ask">Ρώτα</button>
         </div>
         <div class="row" style="margin-top:8px;flex-wrap:wrap;gap:6px" id="tl-chips"></div>
-        <div id="tl-answer" style="font-size:12.5px;color:#a1a1aa;margin-top:10px;
+        <div id="tl-answer" style="font-size:12.5px;color:var(--text-dim);margin-top:10px;
           line-height:1.6"></div>
       </div>
       <div class="card">
         <h3>Χρονολόγιο</h3>
         <div id="tl-feed" style="font-size:12.5px;line-height:1.75">
-          <span style="color:#71717a">Άδειο.</span>
+          <span style="color:var(--text-dim)">Άδειο.</span>
         </div>
       </div>
     </section>
@@ -6148,7 +6435,7 @@ button{font:inherit;color:inherit}
             <span class="k">Συχνότητα</span><span class="v" id="i-hz">—</span>
           </div>
         </div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:12px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:12px;line-height:1.6">
           ‼️ ΣΧΕΤΙΚΗ πυξίδα, όχι Βορράς. Το firmware στέλνει GAME_ROTATION_VECTOR — σύντηξη γυροσκοπίου και επιταχυνσιομέτρου χωρίς το μαγνητόμετρο, επίτηδες: μέσα στο σπίτι οι κινητήρες DC της Roomba και τα μέταλλα διέλυαν την απόλυτη γωνία, ο EKF γύριζε και το AMCL δεν κρατούσε σύγκλιση. Το 0° είναι τυχαία κατεύθυνση σε κάθε boot. Για πλοήγηση δεν χρειάζεται αληθινός Βορράς — μόνο σταθερή σχετική γωνία, και το AMCL διορθώνει τη μικρή απόκλιση με scan matching.
         </p>
       </div>
@@ -6173,14 +6460,14 @@ button{font:inherit;color:inherit}
           </select>
           <button class="btn" id="b-cp-clear">✕ Καθάρισε</button>
         </div>
-        <div id="cp-msg" style="font-size:11.5px;color:#71717a;margin-top:8px"></div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <div id="cp-msg" style="font-size:11.5px;color:var(--text-dim);margin-top:8px"></div>
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           Η πυξίδα ΔΕΝ βγαίνει από μαγνητόμετρο — βγαίνει από τον ΧΑΡΤΗ. Ο χάρτης
           δεν γυρίζει ποτέ και το AMCL διορθώνει τη γωνία πάνω σε αληθινούς
           τοίχους, οπότε μέσα στο σπίτι είναι πολύ σταθερότερο από κάθε
           μαγνητόμετρο δίπλα σε μοτέρ σκούπας.
         </p>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           Λείπει μόνο ΕΝΑ νούμερο: προς τα πού είναι ο Βορράς μέσα στον χάρτη.
           Γύρνα το ρομπότ να κοιτάει Βορρά και πάτα το κουμπί — μία φορά για κάθε
           χάρτη. Αν ξέρεις ότι κοιτάει άλλη κατεύθυνση, διάλεξέ την από τη λίστα.
@@ -6194,13 +6481,13 @@ button{font:inherit;color:inherit}
           <span class="k">Επιτάχυνση X/Y/Z</span><span class="v" id="i-acc">—</span>
           <span class="k">Quaternion w/x/y/z</span><span class="v" id="i-quat">—</span>
         </div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           Το BNO085 μπορεί να δώσει και μαγνητόμετρο, γραμμική επιτάχυνση, βαρύτητα, βήματα και ταξινόμηση κίνησης — κανένα δεν είναι ενεργό. Το firmware ενεργοποιεί μόνο δύο reports (γωνία και γυροσκόπιο), γιατί όταν ζητούνται πολλά μαζί το I2C ρίχνει σιωπηλά μερικά — έτσι είχε «πεθάνει» το γυροσκόπιο. Η επιτάχυνση στέλνεται ως σταθερό 0.
         </p>
       </div>
       <div class="card">
         <h3>Θέση στο ρομπότ</h3>
-        <p style="font-size:11.5px;color:#71717a;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);line-height:1.6">
           BNO085 σε ESP32 (CH340) στο /dev/imu, τοποθετημένο ανάποδα· nRESET στο GPIO18 ώστε να επανέρχεται μόνο του όταν κολλήσει το πρωτόκολλο. Τροφοδοτεί τον EKF μαζί με το odometry.
         </p>
       </div>
@@ -6217,13 +6504,13 @@ button{font:inherit;color:inherit}
         <h3>Ποιος λέει τι <span class="badge" id="fz-badge">—</span></h3>
         <canvas id="fz-chart" width="720" height="200"
                 style="width:100%;height:200px;display:block;background:#0c0c0e;
-                       border:1px solid #2c2c32;border-radius:10px"></canvas>
+                       border:1px solid var(--border);border-radius:10px"></canvas>
         <div class="row" style="gap:14px;flex-wrap:wrap;margin-top:9px;
-                                font-size:11.5px;color:#a1a1aa">
+                                font-size:11.5px;color:var(--text-dim)">
           <span><b style="color:#fbbf24">╌</b> Τροχοί</span>
           <span><b style="color:#38bdf8">┈</b> IMU</span>
           <span><b style="color:#4ade80">━</b> EKF (αποτέλεσμα)</span>
-          <span style="color:#71717a">60 δευτερόλεπτα</span>
+          <span style="color:var(--text-dim)">60 δευτερόλεπτα</span>
         </div>
         <div class="grid2" style="margin-top:12px">
           <span class="k">Τροχοί − EKF</span><span class="v" id="fz-dw">—</span>
@@ -6232,7 +6519,7 @@ button{font:inherit;color:inherit}
         <div class="row" style="margin-top:10px">
           <button class="btn pri" id="b-fz-reset">⟲ Μηδένισε τη σύγκριση</button>
         </div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           Οι τρεις γωνίες ΔΕΝ έχουν κοινό μηδέν — το BNO085 ξεκινά από όπου κοιτούσε στο boot, οι τροχοί από όπου άναψε η βάση. Το κουμπί τις ευθυγραμμίζει εδώ και τώρα, οπότε ό,τι ανοίγει μετά είναι πραγματική απόκλιση. Οδήγησε ένα γύρο και γύρνα στο ίδιο σημείο: η γραμμή που δεν επιστρέφει στο μηδέν είναι ο αισθητήρας που λέει ψέματα. Οι τροχοί ανοίγουν πάντα σε χαλί και σε στροφές — γι' αυτό ο EKF παίρνει γωνία μόνο από το IMU (config/ekf.yaml).
         </p>
       </div>
@@ -6244,10 +6531,10 @@ button{font:inherit;color:inherit}
           <span class="k">Γωνία από το μηδένισμα</span><span class="v" id="fz-corryaw">—</span>
           <span class="k">Μέγιστο</span><span class="v" id="fz-corrmax">—</span>
         </div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           Πόσο χρειάστηκε να ΞΑΝΑΒΑΛΕΙ το AMCL το ρομπότ πάνω στους τοίχους από τη στιγμή που άνοιξες την καρτέλα — δηλαδή το λάθος που μάζεψε η σύντηξη μόνη της, όσο κοιτούσες. Στον χάρτη δεν φαίνεται ποτέ: εκεί το ρομπότ δείχνει πάντα σωστά τοποθετημένο, επειδή ακριβώς αυτή η διόρθωση το κρατά εκεί. Λίγα εκατοστά ανά διαδρομή είναι φυσιολογικά· δεκάδες σημαίνουν ότι η οδομετρία γλιστράει και το AMCL μπαλώνει.
         </p>
-        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:8px;line-height:1.6">
           ‼️ ΔΙΑΦΟΡΑ, όχι απόλυτη τιμή. Το ωμό <code>map→odom</code> περιέχει και το πού έτυχε να είναι η αρχή του <code>odom</code> στο boot: μετρήθηκε 366 cm και 123° σε ρομπότ που εντόπιζε τέλεια — απλώς είχε οδηγήσει από τότε που άναψε. Το κουμπί «Μηδένισε» ξαναπιάνει το σημείο αναφοράς.
         </p>
       </div>
@@ -6261,7 +6548,7 @@ button{font:inherit;color:inherit}
           <span class="k">Στροφή — γυροσκόπιο</span><span class="v" id="fz-wzi">—</span>
           <span class="k">Στροφή — EKF</span><span class="v" id="fz-wze">—</span>
         </div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           Οι τροχοί λένε πόσο ΖΗΤΗΘΗΚΕ να γυρίσει, το γυροσκόπιο πόσο γύρισε ΠΡΑΓΜΑΤΙΚΑ. Όταν οι δύο αριθμοί διαφέρουν σταθερά, η βάση γλιστράει ή έχει κολλήσει σε κάτι. Κάτω από ~0.31 rad/s η 879 δεν στρίβει καθόλου: θα δεις εντολή στροφής στους τροχούς και μηδέν στο γυροσκόπιο, και αυτό είναι το γνωστό κατώφλι, όχι βλάβη.
         </p>
       </div>
@@ -6273,10 +6560,10 @@ button{font:inherit;color:inherit}
           <span class="k">IMU <code>/imu/data</code></span><span class="v" id="fz-h-imu">—</span>
           <span class="k">EKF <code>/odometry/filtered</code></span><span class="v" id="fz-h-ekf">—</span>
         </div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           ‼️ Νεκρή πηγή είναι ΣΙΩΠΗΛΗ, όχι λάθος: ο EKF συνεχίζει να δημοσιεύει την τελευταία καλή γωνία και όλα δείχνουν υγιή. Μόνο η συχνότητα και η ηλικία δείγματος το δείχνουν — γι' αυτό μετριούνται εδώ χωριστά από τις τιμές.
         </p>
-        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:8px;line-height:1.6">
           Φυσιολογικές τιμές, μετρημένες σε φρέσκο `robot max`: τροχοί ~20 Hz, IMU ~110 Hz, EKF ~30 Hz. ‼️ Το IMU μετρήθηκε κάποτε στα 6 Hz και πέρασε για φυσιολογικό — ήταν υποβαθμισμένη ροή που κανείς δεν είχε προσέξει. Αν το δεις κάτω από 40, δεν είναι «αργό», είναι χαλασμένο.
         </p>
       </div>
@@ -6287,10 +6574,10 @@ button{font:inherit;color:inherit}
           <span class="k">EKF γωνία ±</span><span class="v" id="fz-cov-ekf">—</span>
           <span class="k">AMCL θέση ± / γωνία ±</span><span class="v" id="fz-cov-amcl">—</span>
         </div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           Πόσο σίγουρος δηλώνει ο καθένας ότι είναι, σε εκατοστά και μοίρες (τυπική απόκλιση, όχι το ωμό covariance). Το AMCL φουσκώνει όταν χάνει τον εντοπισμό και ξαναμαζεύει μόλις κλειδώσει σε τοίχους — μια τιμή που μεγαλώνει και δεν ξαναμαζεύει είναι το «οι κόκκινες γραμμές έφυγαν» πριν το δεις στον χάρτη.
         </p>
-        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:8px;line-height:1.6">
           ‼️ Η ΘΕΣΗ του EKF δεν εμφανίζεται επίτηδες. Ο EKF δουλεύει στο <code>odom</code>, όπου καμία απόλυτη μέτρηση δεν τον διορθώνει, οπότε η αβεβαιότητα θέσης του μεγαλώνει για πάντα — μετρήθηκε στα ±2607 km σε ρομπότ που εντόπιζε μια χαρά. Δεν είναι βλάβη, είναι ο ορισμός του frame. Η γωνία του παραμένει φραγμένη (το IMU τη διορθώνει), και για τη θέση ο μόνος αριθμός με νόημα είναι του AMCL.
         </p>
       </div>
@@ -6299,29 +6586,29 @@ button{font:inherit;color:inherit}
         <h3>LiDAR εναντίον κάμερας <span class="badge" id="fp-badge">—</span></h3>
         <label style="display:flex;align-items:center;gap:9px;font-size:12.5px;
           cursor:pointer;user-select:none;padding:9px 11px;border-radius:10px;
-          background:#232329;border:1px solid #33333d">
+          background:var(--bg);border:1px solid var(--border)">
           <input type="checkbox" id="fp-on">
           <span>Σύγκρινε με το βάθος της D435 (ανάβει το νέφος σημείων)</span>
         </label>
         <canvas id="fp-canvas" width="440" height="440"
                 style="display:block;margin:12px auto 0;width:min(100%,420px);
                        aspect-ratio:1;height:auto;background:#0c0c0e;
-                       border:1px solid #2c2c32;border-radius:12px"></canvas>
+                       border:1px solid var(--border);border-radius:12px"></canvas>
         <div class="grid2" style="margin-top:12px">
           <span class="k">Συμφωνία</span><span class="v" id="fp-agree">—</span>
           <span class="k">Βλέπει μόνο η κάμερα</span><span class="v" id="fp-camonly">—</span>
           <span class="k">Πλησιέστερο κρυφό εμπόδιο</span><span class="v" id="fp-near">—</span>
         </div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
-          Κάτοψη γύρω από το ρομπότ, 4 μέτρα ακτίνα, μύτη προς τα πάνω. <b style="color:#e4e4e7">Λευκό</b> = το lidar, <b style="color:#38bdf8">γαλάζιο</b> = η κάμερα, <b style="color:#f87171">κόκκινο</b> = εκεί που η κάμερα βλέπει εμπόδιο ΠΙΟ ΚΟΝΤΑ από το lidar.
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
+          Κάτοψη γύρω από το ρομπότ, 4 μέτρα ακτίνα, μύτη προς τα πάνω. <b style="color:var(--text-dim)">Λευκό</b> = το lidar (μέσα στο σκούρο διάγραμμα), <b style="color:#38bdf8">γαλάζιο</b> = η κάμερα, <b style="color:#f87171">κόκκινο</b> = εκεί που η κάμερα βλέπει εμπόδιο ΠΙΟ ΚΟΝΤΑ από το lidar.
         </p>
-        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:8px;line-height:1.6">
           Τα κόκκινα είναι ο λόγος που υπάρχει αυτή η κάρτα: το C1 κόβει μία οριζόντια φέτα στα 60.6 cm, οπότε ένα τραπέζι, ένα σκαλί, ένα σκυμμένο κεφάλι ή μια γάτα ζουν ακριβώς στο κενό του. Η κάμερα κοιτάει από τα 53.6 cm και τα πιάνει, αλλά μόνο μπροστά — τα ~87° του κώνου της. Έξω από αυτόν υπάρχει μόνο λευκό, και αυτό είναι σωστό, όχι διαφωνία.
         </p>
-        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:8px;line-height:1.6">
           Πολύ κοντά ο κώνος στενεύει μόνος του: το βάθος βγαίνει από δύο φακούς και σε απόσταση μισού μέτρου τα άκρα του καρέ δεν τα βλέπουν και οι δύο, οπότε εκεί δεν υπάρχει μέτρηση. Μετρήθηκε 36° μπροστά σε εμπόδιο στα 40 cm. Δεν είναι βλάβη — κάνε ένα βήμα πίσω και ο κώνος ανοίγει.
         </p>
-        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:8px;line-height:1.6">
           Το πάτωμα κόβεται επίτηδες κάτω από <span id="fp-zmin">6</span> cm και το ταβάνι πάνω από <span id="fp-zmax">140</span> cm: χωρίς αυτό η κάμερα «βλέπει» το χαλί μισό μέτρο μπροστά και τα πάντα γίνονται κόκκινα.
         </p>
       </div>
@@ -6331,7 +6618,7 @@ button{font:inherit;color:inherit}
     <section class="pane" id="p-llm">
       <div class="card" style="margin-bottom:9px">
         <h3>Ποιος μιλάει <span class="badge" id="sp-badge">—</span></h3>
-        <div id="sp-detail" style="font-size:11.5px;color:#71717a;line-height:1.55">
+        <div id="sp-detail" style="font-size:11.5px;color:var(--text-dim);line-height:1.55">
           Θέλει use_diarization (ποιος), DoA (από πού), use_face_detection (ποιον βλέπω). Ό,τι λείπει παραλείπεται.
         </div>
       </div>
@@ -6341,17 +6628,17 @@ button{font:inherit;color:inherit}
           <button class="btn" id="be-gemini">🌩️ Gemini (cloud)</button>
           <button class="btn" id="be-lemonade">🧠 Qwen3.5 (NPU)</button>
         </div>
-        <div id="be-msg" style="font-size:11.5px;color:#71717a;margin-top:8px;
+        <div id="be-msg" style="font-size:11.5px;color:var(--text-dim);margin-top:8px;
           line-height:1.55"></div>
         <!-- Today's cloud allowance. Hidden while the local model answers —
              Qwen has no quota, and a leftover counter would be a lie. -->
         <div id="q-box" style="display:none;margin-top:10px">
           <div style="display:flex;justify-content:space-between;
             align-items:baseline;font-size:12px;margin-bottom:5px">
-            <span style="color:#a1a1aa">Ερωτήσεις σήμερα</span>
+            <span style="color:var(--text-dim)">Ερωτήσεις σήμερα</span>
             <span id="q-left" style="font-weight:600">—</span>
           </div>
-          <div style="height:6px;border-radius:3px;background:#27272a;
+          <div style="height:6px;border-radius:3px;background:var(--surface-2);
             overflow:hidden">
             <div id="q-bar" style="height:100%;width:0;border-radius:3px;
               background:#34d399;transition:width .4s"></div>
@@ -6378,7 +6665,7 @@ button{font:inherit;color:inherit}
       <div class="card" style="margin-bottom:9px">
         <h3>Αυτοδιάγνωση <span class="badge" id="dg-badge">—</span></h3>
         <div id="dg-list" style="font-size:12.5px;line-height:1.65"></div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           Ελέγχει τους ΓΝΩΣΤΟΥΣ τρόπους που χαλάει αυτό το ρομπότ — αυτούς που
           έχουν ήδη κοστίσει χρόνο. Σχεδόν όλοι είναι ΣΙΩΠΗΛΟΙ: ο κόμβος ζει,
           το topic υπάρχει, και μόνο η συμπεριφορά είναι λάθος. Κενή λίστα
@@ -6396,31 +6683,31 @@ button{font:inherit;color:inherit}
           <button class="btn" data-pw="eco">🍃 Ήπιο</button>
           <button class="btn" data-pw="flat">📏 Πολύ σταθερό</button>
         </div>
-        <div id="pw-msg" style="font-size:11.5px;color:#71717a;margin-top:10px"></div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <div id="pw-msg" style="font-size:11.5px;color:var(--text-dim);margin-top:10px"></div>
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           Για όταν το mini PC τρέχει από την powerstation (Anker SOLIX C300 DC). Αυτή δεν έχει inverter — τροφοδοτεί το PC μέσω USB-C Power Delivery. Μια πηγή PD δεν ενοχλείται από το πόσο ρεύμα τραβάς, αλλά από το πόσο απότομα αλλάζει: ένα σκαλοπάτι φορτίου ρίχνει την προστασία της θύρας ή προκαλεί επαναδιαπραγμάτευση PD, και η επαναδιαπραγμάτευση κόβει τη γραμμή αρκετά ώστε το PC να σβήσει ακαριαία.
         </p>
-        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:8px;line-height:1.6">
           Τα προφίλ πειράζουν τέσσερα πράγματα, όλα για να μειώσουν το άλμα: στενεύουν τη ζώνη συχνότητας της CPU, κλείνουν το boost, βάζουν τον επεξεργαστή σε λειτουργία εξοικονόμησης, και — μόνο στο «πολύ σταθερό» — κόβουν το ψηλότερο σκαλί της iGPU. Γι' αυτό το «πολύ σταθερό» κοστίζει σε ταχύτητα γραφικών· το «ήπιο» τα αφήνει ήσυχα.
         </p>
-        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:8px;line-height:1.6">
           Μετρημένο εδώ σε πραγματικά Watt (αισθητήρας PPT του επεξεργαστή), με ριπές φορτίου σε όλους τους πυρήνες: <b>κανονικό</b> 21.5 W μέσος όρος και διακύμανση 30.0 W, από 7 ως 37· <b>ήπιο</b> 11.9 και 12.1· <b>πολύ σταθερό</b> 10.5 και 11.1. Η διακύμανση πέφτει κατά 63% και η μέση κατανάλωση στο μισό — εδώ δεν πληρώνεις τίποτα για τη σταθερότητα.
         </p>
-        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:8px;line-height:1.6">
           ✅ Επιβιώνει σε restart: η επιλογή αποθηκεύεται και ξαναμπαίνει μόνη της σε κάθε boot. Στην πρίζα γύρνα το σε «κανονικό» — δεν χρειάζεται.
         </p>
       </div>
       <div class="card">
         <h3>Ξεκόλλα αισθητήρα <span class="badge" id="usb-badge">—</span></h3>
         <div class="row" style="flex-wrap:wrap;gap:8px" id="usb-buttons"></div>
-        <div id="usb-msg" style="font-size:11.5px;color:#71717a;margin-top:10px"></div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <div id="usb-msg" style="font-size:11.5px;color:var(--text-dim);margin-top:10px"></div>
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           Κόβει το ρεύμα στη θύρα USB της συσκευής για δύο δευτερόλεπτα και το ξαναδίνει — ό,τι ακριβώς κάνει το να την βγάλεις και να την ξαναβάλεις, χωρίς να σηκωθεί κανείς. Για αισθητήρα που κόλλησε και δεν ξεκολλάει με restart του κόμβου.
         </p>
-        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:8px;line-height:1.6">
           ‼️ Ο ΟΔΗΓΟΣ ΔΕΝ ΕΠΑΝΕΚΚΙΝΕΙ ΜΟΝΟΣ ΤΟΥ. Η συσκευή θα ξαναεμφανιστεί στο σύστημα, αλλά ο κόμβος που την είχε ανοιχτή κρατά πεθαμένο handle — θέλει και δικό του restart. Η κάμερα είναι η εξαίρεση: ο camera_watchdog την ξαναπιάνει μόνος του.
         </p>
-        <p style="font-size:11.5px;color:#71717a;margin-top:8px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:8px;line-height:1.6">
           Η «σκούπα» κόβει το ρεύμα στη σειριακή της βάσης. Αν το ρομπότ κινείται, οι τροχοί συνεχίζουν με την τελευταία εντολή ώσπου να πιάσει το watchdog των 0.25 δευτερολέπτων — μην το πατήσεις εν κινήσει.
         </p>
       </div>
@@ -6435,7 +6722,7 @@ button{font:inherit;color:inherit}
       <div class="card grow">
         <h3>Κόμβοι ROS (<span id="s-nodecount">0</span>)</h3>
         <div id="s-nodes" style="font-family:ui-monospace,Menlo,monospace;font-size:11.5px;
-          color:#a1a1aa;line-height:1.75;columns:2;column-gap:20px">—</div>
+          color:var(--text-dim);line-height:1.75;columns:2;column-gap:20px">—</div>
       </div>
     </section>
 
@@ -6447,7 +6734,7 @@ button{font:inherit;color:inherit}
         </h3>
         <canvas id="cloud-canvas" style="flex:1;width:100%;min-height:0;
           background:#0a0a0b;border-radius:8px;touch-action:none;cursor:grab"></canvas>
-        <div style="color:#71717a;font-size:11.5px;margin-top:6px">
+        <div style="color:var(--text-dim);font-size:11.5px;margin-top:6px">
           Σύρε για περιστροφή · ροδέλα ή τσίμπημα για ζουμ
         </div>
       </div>
@@ -6455,9 +6742,14 @@ button{font:inherit;color:inherit}
 
     <section class="pane" id="p-set">
       <div class="card">
+        <h3>Περισσότερα εργαλεία</h3>
+        <div id="more-tools-list"></div>
+      </div>
+
+      <div class="card">
         <h3>Γλώσσα</h3>
         <div class="row" id="lang-buttons"></div>
-        <div style="color:#71717a;font-size:11.5px;margin-top:8px">
+        <div style="color:var(--text-dim);font-size:11.5px;margin-top:8px">
           Αλλάζει μόνο αυτή τη σελίδα. Το ρομπότ συνεχίζει να μιλά ελληνικά.
         </div>
       </div>
@@ -6472,12 +6764,12 @@ button{font:inherit;color:inherit}
         <div id="sn-wifi"></div>
         <div class="row" style="margin-top:9px">
           <input id="sn-pass" type="password" placeholder="κωδικός δικτύου"
-            style="flex:1;min-width:130px;background:#232329;border:1px solid #33333d;
-            border-radius:9px;color:#e4e4e7;padding:8px 11px;font-size:12.5px"
+            style="flex:1;min-width:130px;background:var(--bg);border:1px solid var(--border);
+            border-radius:9px;color:var(--text);padding:8px 11px;font-size:12.5px"
             autocomplete="off">
           <button class="btn" id="b-sn-scan">🔄 Σάρωση</button>
         </div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:9px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:9px;line-height:1.6">
           ‼️ Ο κωδικός ταξιδεύει μέσα από αυτή τη σελίδα. Το token του πίνακα
           είναι αδύναμο και ακούει σε ΟΛΟ το τοπικό δίκτυο — σύνδεσε νέο WiFi
           από εδώ μόνο αν εμπιστεύεσαι όποιον είναι στο ίδιο δίκτυο.
@@ -6505,17 +6797,17 @@ button{font:inherit;color:inherit}
           <button class="btn warn" id="b-sys-reboot">↻ Επανεκκίνηση</button>
           <button class="btn warn" id="b-sys-off">⏻ Τερματισμός</button>
         </div>
-        <div id="sn-msg" style="font-size:11.5px;color:#71717a;margin-top:9px"></div>
+        <div id="sn-msg" style="font-size:11.5px;color:var(--text-dim);margin-top:9px"></div>
       </div>
 
       <div class="card" style="margin-bottom:9px">
         <h3>Κλειδί πρόσβασης <span class="badge" id="tk-badge">—</span></h3>
         <div id="tk-out" style="font-size:12px;line-height:1.6;
-          word-break:break-all;color:#a1a1aa"></div>
+          word-break:break-all;color:var(--text-dim)"></div>
         <div class="row" style="margin-top:10px">
           <button class="btn warn" id="b-tk-new">🔑 Νέο κλειδί</button>
         </div>
-        <p style="font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6">
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
           Ο πίνακας ακούει σε ΟΛΟ το τοπικό δίκτυο και δίνει κάμερα, μικρόφωνο,
           χειριστήριο και χάρτη του σπιτιού. Το κλειδί είναι το μόνο που τον
           προστατεύει. Το νέο ισχύει μετά από επανεκκίνηση — η τρέχουσα καρτέλα
@@ -6687,6 +6979,18 @@ const LASER_X = 0.00, LASER_YAW_OFFSET = Math.PI;
 // ── state ──────────────────────────────────────────────────────────────────
 let ws=null, mapInfo=null, mapImg=null, pose=null, scan=null, goal=null, plan=null;
 let roomsData={};
+let roomCenters={};   // name -> [x,y] map-frame centroid, for on-map room labels
+let roomBadgeHits=[]; // [{name,x,y,r}] screen-space hit targets, rebuilt every draw()
+let selectedRoomName=null;   // tapped a numbered badge — highlight only, no robot command
+function updateMapStats(){
+  const n = Object.keys(roomsData).length;
+  $('ml-rooms').textContent = n || '—';
+}
+// Transient marker for "🖱️ Κλικ επιλέγει δωμάτιο": which room a map click
+// landed in was only ever shown by scrolling a distant card and flashing a
+// row there — easy to miss, and disconnected from where you actually
+// clicked. This anchors the answer to the click point itself.
+let pickedMarker=null;   // {x, y, name} in map metres, name=null while awaiting the reply
 let kzData={};   // keepout zones for the active map, see keepout_files.py
 let nfPoints=[], nfLastFrames=0;   // NeRF capture coverage — kept frame x,y as they arrive
 let robotTrail=[];   // where the robot has driven this session — (x,y) in map metres
@@ -6702,7 +7006,10 @@ const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => (
   {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 // ── tabs ───────────────────────────────────────────────────────────────────
-const TABS = [
+// Every tab this dashboard has, in one table — id/icon/label. Split below
+// into TABS (the curated bar) and MORE_TABS (reached from Ρυθμίσεις) so both
+// stay in sync with a single source instead of two hand-maintained lists.
+const ALL_TABS = [
   ['map',    '🗺️', 'Χάρτης'],
   ['cam',    '📷', 'Κάμερα'],
   ['cloud',  '🧿', '3D'],
@@ -6731,6 +7038,14 @@ const TABS = [
   ['log',    '📜', 'Log'],
   ['set',    '⚙️', 'Ρύθμιση'],
 ];
+// The 25-icon bar wrapped to three rows and read as cluttered/amateur — the
+// opposite of the clean Roborock/Dreame look this pass is going for. Down to
+// the tabs actually used day-to-day; everything else still has a full pane,
+// just one tap further via Ρυθμίσεις → "Περισσότερα εργαλεία" (MORE_TABS/
+// renderMoreTools below), not removed.
+const CORE_TAB_IDS = ['map', 'cam', 'arm', 'base', 'llm', 'sys', 'safe', 'set'];
+const TABS      = ALL_TABS.filter(([id]) => CORE_TAB_IDS.includes(id));
+const MORE_TABS = ALL_TABS.filter(([id]) => !CORE_TAB_IDS.includes(id));
 // Rebuilt on every language change; the labels come from the same t() as the
 // rest of the page. Preserves which tab is active across the rebuild.
 function renderTabs(){
@@ -6744,6 +7059,21 @@ function renderTabs(){
     b.innerHTML = `<span class="ic">${icon}</span><span>${t(label)}</span>`;
     b.onclick = () => showTab(id);
     tabNav.appendChild(b);
+  });
+}
+// The "Περισσότερα εργαλεία" list inside Ρυθμίσεις — same idea as renderTabs,
+// rebuilt on language change so labels stay translated.
+function renderMoreTools(){
+  const list = $('more-tools-list');
+  if(!list) return;
+  list.innerHTML = '';
+  MORE_TABS.forEach(([id, icon, label]) => {
+    const r = document.createElement('div');
+    r.className = 'mt-row';
+    r.dataset.pane = id;
+    r.innerHTML = `<span class="ic">${icon}</span><span>${t(label)}</span><span class="mt-chev">›</span>`;
+    r.onclick = () => showTab(id);
+    list.appendChild(r);
   });
 }
 function showTab(id){
@@ -6778,7 +7108,9 @@ function setMapView(view){
   $('map-view-2d').classList.toggle('pri', view === '2d');
   $('map-view-scan').classList.toggle('pri', view === 'scan');
   $('map-wrap').style.display = view === '2d' ? '' : 'none';
+  $('map-rotate-row').style.display = view === '2d' ? '' : 'none';
   $('map-scan3d-card').style.display = view === 'scan' ? '' : 'none';
+  $('map-scan3d-upload-card').style.display = view === 'scan' ? '' : 'none';
   if (view === '2d') resize();
   else if (view === 'scan' && window.hrScan3d) window.hrScan3d.activate();
 }
@@ -6859,7 +7191,7 @@ function renderVnc(app, mode, detail){
     box.innerHTML =
       `<div style="font-size:34px">${mode === 'starting' ? '⏳' : '🖥️'}</div>` +
       `<div><b>${meta.title}</b><br>${detail || ''}</div>` +
-      `<div style="max-width:440px;font-size:12px;color:#71717a">${t(meta.note)}</div>`;
+      `<div style="max-width:440px;font-size:12px;color:var(--text-dim)">${t(meta.note)}</div>`;
     if (mode !== 'starting'){
       const b = document.createElement('button');
       b.className = 'btn pri';
@@ -7015,10 +7347,10 @@ function rtabControls(){
   card.appendChild(row);
   const saveMsg = document.createElement('p');
   saveMsg.id = 'rt-save-msg';
-  saveMsg.style.cssText = 'font-size:11.5px;color:#71717a;margin:8px 0 0';
+  saveMsg.style.cssText = 'font-size:11.5px;color:var(--text-dim);margin:8px 0 0';
   card.appendChild(saveMsg);
   const p = document.createElement('p');
-  p.style.cssText = 'font-size:11.5px;color:#71717a;margin-top:10px;line-height:1.6';
+  p.style.cssText = 'font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6';
   p.textContent = t('Ο χάρτης αποθηκεύεται μόνος του στο ~/.home_robot/rtabmap/house.db. Για εξαγωγή σε .ply/.obj χρησιμόποιησε File → Export στο ίδιο το RTAB-Map παραπάνω. ‼️ Το «Νέος χάρτης» ξεκινά καθαρή συνεδρία — ό,τι έχεις χαρτογραφήσει ως τώρα μένει στη βάση αλλά βγαίνει από τον τρέχοντα χάρτη. Το «💾 Αποθήκευση» παίρνει ένα στιγμιότυπο του μέχρι τώρα χάρτη σε ξεχωριστό αρχείο, χωρίς να διακόψει τη χαρτογράφηση.');
   card.appendChild(p);
 
@@ -7027,7 +7359,7 @@ function rtabControls(){
   savedH.textContent = t('Αποθηκευμένοι χάρτες');
   card.appendChild(savedH);
   const savedHint = document.createElement('p');
-  savedHint.style.cssText = 'font-size:11.5px;color:#71717a;margin:2px 0 8px';
+  savedHint.style.cssText = 'font-size:11.5px;color:var(--text-dim);margin:2px 0 8px';
   savedHint.textContent = t('«Προβολή» χτίζει αυτόματα το συναρμολογημένο 3D cloud '
                            + 'σε νέα καρτέλα (~15s) — η πρόοδος φαίνεται live.');
   card.appendChild(savedHint);
@@ -7068,12 +7400,12 @@ async function rtabSavedRefresh(){
     for (const s of d.snapshots){
       const row = document.createElement('div');
       row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:6px 0;'
-                        + 'border-bottom:1px solid #27272a';
+                        + 'border-bottom:1px solid var(--border)';
       const when = new Date(s.mtime * 1000).toLocaleString('el-GR');
       const label = document.createElement('span');
       label.style.flex = '1';
       label.innerHTML = `<b>${s.name}</b>`
-        + `<span style="color:#71717a;font-size:11.5px"> · ${when} · ${s.mb} MB</span>`;
+        + `<span style="color:var(--text-dim);font-size:11.5px"> · ${when} · ${s.mb} MB</span>`;
       row.appendChild(label);
       const viewBtn = document.createElement('button');
       viewBtn.className = 'btn';
@@ -7188,30 +7520,114 @@ function scale(){ return mapInfo ? Math.min(canvas.width/mapInfo.width, canvas.h
 function offX(){  return mapInfo ? (canvas.width  - mapInfo.width  * scale()) / 2 : 0; }
 function offY(){  return mapInfo ? (canvas.height - mapInfo.height * scale()) / 2 : 0; }
 
+// View-only rotation of the 2D map (does not touch the underlying map data —
+// world coordinates, room polygons, AMCL etc. are all untouched, this just
+// spins what's drawn on screen). Persisted like the Σάρωμα camera framing
+// (hr_scan3d_camera) so it survives a reload.
+const MAP_ROT_KEY = 'hr_map_rotation';
+let mapViewRotation = 0;
+try {
+  const saved = parseFloat(localStorage.getItem(MAP_ROT_KEY));
+  if(!isNaN(saved)) mapViewRotation = saved;
+} catch(e){}
+function rotatePt(x, y, ang){
+  const cx0 = canvas.width/2, cy0 = canvas.height/2;
+  const dx = x-cx0, dy = y-cy0;
+  const c = Math.cos(ang), s = Math.sin(ang);
+  return { x: cx0 + dx*c - dy*s, y: cy0 + dx*s + dy*c };
+}
+
 function w2c(wx, wy){
   if(!mapInfo) return {x:0,y:0};
   const s=scale();
-  return {
-    x: offX() + (wx - mapInfo.origin[0]) / mapInfo.resolution * s,
-    y: offY() + (mapInfo.height - (wy - mapInfo.origin[1]) / mapInfo.resolution) * s,
-  };
+  const ux = offX() + (wx - mapInfo.origin[0]) / mapInfo.resolution * s;
+  const uy = offY() + (mapInfo.height - (wy - mapInfo.origin[1]) / mapInfo.resolution) * s;
+  return mapViewRotation ? rotatePt(ux, uy, mapViewRotation) : {x:ux, y:uy};
 }
 function c2w(cx, cy){
   if(!mapInfo) return null;
   const s=scale();
+  const p = mapViewRotation ? rotatePt(cx, cy, -mapViewRotation) : {x:cx, y:cy};
   return {
-    x: mapInfo.origin[0] + (cx - offX()) / s * mapInfo.resolution,
-    y: mapInfo.origin[1] + (mapInfo.height - (cy - offY()) / s) * mapInfo.resolution,
+    x: mapInfo.origin[0] + (p.x - offX()) / s * mapInfo.resolution,
+    y: mapInfo.origin[1] + (mapInfo.height - (p.y - offY()) / s) * mapInfo.resolution,
   };
 }
+function setMapRotation(rad){
+  mapViewRotation = ((rad % (2*Math.PI)) + 2*Math.PI) % (2*Math.PI);
+  try { localStorage.setItem(MAP_ROT_KEY, mapViewRotation); } catch(e){}
+  const deg = Math.round(mapViewRotation * 180 / Math.PI);
+  $('map-rot-reset').textContent = deg + '°';
+  draw();
+}
+$('map-rot-ccw').onclick = () => setMapRotation(mapViewRotation - Math.PI/12);
+$('map-rot-cw').onclick = () => setMapRotation(mapViewRotation + Math.PI/12);
+$('map-rot-reset').onclick = () => setMapRotation(0);
+setMapRotation(mapViewRotation);
 
 function draw(){
   ctx.clearRect(0,0,canvas.width,canvas.height);
-  ctx.fillStyle='#0c0c0e';
+  ctx.fillStyle='#f4f4f5';
   ctx.fillRect(0,0,canvas.width,canvas.height);
   if(!mapImg||!mapInfo) return;
   const s=scale(), ox=offX(), oy=offY();
+  ctx.save();
+  if(mapViewRotation){
+    ctx.translate(canvas.width/2, canvas.height/2);
+    ctx.rotate(mapViewRotation);
+    ctx.translate(-canvas.width/2, -canvas.height/2);
+  }
   ctx.drawImage(mapImg, ox, oy, mapInfo.width*s, mapInfo.height*s);
+  ctx.restore();
+
+  // Room badges: a numbered coloured circle at each room's centroid (see
+  // _room_centers() server-side), Dreame/Roborock-style, with the name in a
+  // pill just below it — the point of drawing the name AT the room instead
+  // of only in a legend list is that which room is which is never a lookup.
+  // The badge is also a click target (see roomBadgeHits below): tapping it
+  // selects that room, independent of whatever click-mode checkbox is on.
+  // Tied to the ΧΡΩΜΑΤΑ toggle like the tint itself — a badge with no colour
+  // under it would be a non-sequitur.
+  roomBadgeHits = [];
+  if($('b-tint').checked){
+    const sortedNames = Object.keys(roomCenters).sort();
+    ctx.textBaseline = 'middle';
+    sortedNames.forEach((name, i) => {
+      const wc = roomCenters[name];
+      const p = w2c(wc[0], wc[1]);
+      const rgb = roomsData[name] || [161,161,170];
+      const num = i + 1;
+
+      // the numbered badge
+      const R = 15;
+      const by0 = p.y - 12;
+      ctx.beginPath(); ctx.arc(p.x, by0, R, 0, Math.PI*2);
+      ctx.fillStyle = `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+      ctx.fill();
+      ctx.lineWidth = selectedRoomName === name ? 3 : 1.5;
+      ctx.strokeStyle = selectedRoomName === name ? '#ffffff' : 'rgba(0,0,0,.35)';
+      ctx.stroke();
+      ctx.font = '700 14px system-ui, sans-serif';
+      ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
+      ctx.fillText(String(num), p.x, by0 + 1);
+      roomBadgeHits.push({name, x: p.x, y: by0, r: R});
+
+      // the name pill, just below
+      ctx.font = '600 12px system-ui, sans-serif';
+      const tw = ctx.measureText(name).width;
+      const padX = 8, padY = 4;
+      const bw = padX*2 + tw, bh = padY*2 + 13;
+      const bx = p.x - bw/2, byy = by0 + R + 6;
+      ctx.fillStyle = 'rgba(12,12,14,.72)';
+      ctx.beginPath();
+      if(ctx.roundRect) ctx.roundRect(bx, byy, bw, bh, bh/2); else ctx.rect(bx, byy, bw, bh);
+      ctx.fill();
+      ctx.fillStyle = '#f4f4f5';
+      ctx.fillText(name, p.x, byy + bh/2);
+    });
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+  }
 
   // Where the odometry loses ground. Drawn UNDER everything else: it is
   // history, not something happening now, and it must never be mistaken for an
@@ -7322,12 +7738,33 @@ function draw(){
     const rp=w2c(pose.x,pose.y);
     ctx.save();
     ctx.translate(rp.x,rp.y);
-    ctx.rotate(-pose.yaw);
+    ctx.rotate(-pose.yaw + mapViewRotation);
     ctx.fillStyle='#00e08a'; ctx.strokeStyle='#003'; ctx.lineWidth=1;
     ctx.beginPath();
     ctx.moveTo(17,0); ctx.lineTo(-9,10); ctx.lineTo(-5,0); ctx.lineTo(-9,-10);
     ctx.closePath(); ctx.fill(); ctx.stroke();
     ctx.restore();
+  }
+
+  // "🖱️ Κλικ επιλέγει δωμάτιο" feedback — anchored to the actual click
+  // point, not just a flash in the room-edit card below (which can be
+  // scrolled out of view, easy to miss). See pickedMarker's declaration.
+  if(pickedMarker){
+    const p = w2c(pickedMarker.x, pickedMarker.y);
+    ctx.fillStyle = '#f472b6'; ctx.strokeStyle = '#1a1a1e'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(p.x, p.y, 7, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+    const label = pickedMarker.name === null ? '…' : pickedMarker.name;
+    ctx.font = '600 13px system-ui, sans-serif';
+    const tw = ctx.measureText(label).width;
+    const padX = 8, padY = 5, bh = padY*2 + 14, by = p.y - 15 - bh;
+    const bx = p.x - tw/2 - padX, bw = tw + padX*2;
+    ctx.fillStyle = 'rgba(24,24,27,.92)'; ctx.strokeStyle = '#f472b6'; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    if(ctx.roundRect) ctx.roundRect(bx, by, bw, bh, 6); else ctx.rect(bx, by, bw, bh);
+    ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#f4f4f5'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(label, p.x, by + bh/2);
+    ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
   }
 }
 
@@ -7368,13 +7805,19 @@ const HANDLERS = {
     mapInfo={width:m.width,height:m.height,resolution:m.resolution,origin:m.origin};
     const i=new Image(); i.onload=()=>{mapImg=i;draw();}; i.src='data:image/png;base64,'+m.image;
     if (m.rooms) { roomsData=m.rooms; roomLegend(m.rooms); renderRoomEditor(m.rooms); }
+    if (m.centers) roomCenters=m.centers;
     if (m.tinted !== undefined) $('b-tint').checked = m.tinted;
     if (m.keepout) { kzData=m.keepout; renderKeepoutList(kzData); }
+    if (m.area_m2 != null) $('ml-area').textContent = m.area_m2;
+    updateMapStats();
   },
-  map_rooms(m){ roomsData=m.rooms||{}; roomLegend(roomsData); renderRoomEditor(roomsData); },
+  map_rooms(m){
+    roomsData=m.rooms||{}; roomCenters=m.centers||{};
+    roomLegend(roomsData); renderRoomEditor(roomsData); updateMapStats(); draw();
+  },
   room_saved(m){
     $('room-edit-msg').textContent = m.ok ? t('Αποθηκεύτηκε.') : (m.error || t('Αποτυχία.'));
-    $('room-edit-msg').style.color = m.ok ? '#4ade80' : '#f87171';
+    $('room-edit-msg').style.color = m.ok ? '#16a34a' : '#dc2626';
     // place_room reuses this message: clear the name on success so the next
     // click starts a fresh room instead of re-painting the same one.
     if(m.ok && $('b-place-room').checked) $('pr-name').value = '';
@@ -7382,19 +7825,24 @@ const HANDLERS = {
   keepout_zones(m){ kzData=m.zones||{}; renderKeepoutList(kzData); draw(); },
   keepout_saved(m){
     $('kz-msg').textContent = m.ok ? t('Αποθηκεύτηκε.') : (m.error || t('Αποτυχία.'));
-    $('kz-msg').style.color = m.ok ? '#4ade80' : '#f87171';
+    $('kz-msg').style.color = m.ok ? '#16a34a' : '#dc2626';
     if(m.ok && $('b-kz-add').checked) $('kz-name').value = '';
   },
   keepout_activated(m){
     $('kz-msg').textContent = m.ok
       ? t('Επανεκκίνηση… η σελίδα θα ξανασυνδεθεί μόνη της.')
       : (m.error || t('Αποτυχία.'));
-    $('kz-msg').style.color = m.ok ? '#4ade80' : '#f87171';
+    $('kz-msg').style.color = m.ok ? '#16a34a' : '#dc2626';
   },
   room_picked(m){
+    if(pickedMarker){
+      pickedMarker.name = m.name || t('(κανένα δωμάτιο εδώ)');
+      draw();
+      setTimeout(()=>{ pickedMarker=null; draw(); }, 2200);
+    }
     if(!m.name){
       $('room-edit-msg').textContent = t('Δεν βρέθηκε δωμάτιο εκεί.');
-      $('room-edit-msg').style.color = '#71717a';
+      $('room-edit-msg').style.color = 'var(--text-dim)';
       return;
     }
     const row = Array.from(document.querySelectorAll('#room-edit [data-room]'))
@@ -7429,6 +7877,7 @@ const HANDLERS = {
   },
   room(m){
     $('room-badge').textContent = m.name||'—';
+    $('ml-curroom').textContent = m.name||'—';
   },
   objects(m){ $('objects').textContent = m.text || '—'; },
   situation(m){ $('situation').textContent = m.text || '—'; },
@@ -7901,7 +8350,7 @@ function renderToken(m){
   $('tk-out').innerHTML =
     '<div style="color:#f59e0b;margin-bottom:6px">'
     + esc(t('Κράτησέ το τώρα — μετά την επανεκκίνηση χρειάζεται:')) + '</div>'
-    + '<div style="background:#232329;border:1px solid #33333d;border-radius:9px;'
+    + '<div style="background:var(--bg);border:1px solid var(--border);border-radius:9px;'
     + 'padding:9px 11px;font-family:monospace;font-size:11.5px">'
     + esc(url) + '</div>';
 }
@@ -7923,15 +8372,15 @@ function renderSysNet(m){
   const nets = m.wifi || [];
   $('sn-wifi').innerHTML = nets.length ? nets.map(n => `
     <div class="row" style="justify-content:space-between;padding:5px 0;
-      border-bottom:1px solid #232329">
-      <span style="${n.active ? 'color:#4ade80;font-weight:600' : ''}">
+      border-bottom:1px solid var(--border)">
+      <span style="${n.active ? 'color:#16a34a;font-weight:600' : ''}">
         ${n.secure ? '🔒' : '🔓'} ${esc(n.ssid)}</span>
       <span style="display:flex;gap:9px;align-items:center">
-        <span style="color:#71717a">${bars(n.signal)} ${n.signal}%</span>
+        <span style="color:var(--text-dim)">${bars(n.signal)} ${n.signal}%</span>
         ${n.active ? '' : `<button class="btn sn-join" data-ssid="${esc(n.ssid)}"
            style="font-size:11px;padding:4px 9px">${esc(t('Σύνδεση'))}</button>`}
       </span></div>`).join('')
-    : '<span style="color:#71717a">' + esc(t('Πάτα σάρωση.')) + '</span>';
+    : '<span style="color:var(--text-dim)">' + esc(t('Πάτα σάρωση.')) + '</span>';
 
   for(const b of document.querySelectorAll('.sn-join')){
     b.onclick = () => {
@@ -7946,15 +8395,15 @@ function renderSysNet(m){
   const bt = m.bt || [];
   $('sb-list').innerHTML = bt.length ? bt.map(d => `
     <div class="row" style="justify-content:space-between;padding:5px 0;
-      border-bottom:1px solid #232329">
-      <span style="${d.connected ? 'color:#4ade80;font-weight:600' : ''}">
+      border-bottom:1px solid var(--border)">
+      <span style="${d.connected ? 'color:#16a34a;font-weight:600' : ''}">
         ${esc(d.name)}</span>
       <button class="btn sb-act" data-mac="${esc(d.mac)}"
         data-act="${d.connected ? 'disconnect' : 'connect'}"
         style="font-size:11px;padding:4px 9px">
         ${esc(d.connected ? t('Αποσύνδεση') : t('Σύνδεση'))}</button>
     </div>`).join('')
-    : '<span style="color:#71717a">' + esc(t('Καμία συσκευή.')) + '</span>';
+    : '<span style="color:var(--text-dim)">' + esc(t('Καμία συσκευή.')) + '</span>';
 
   for(const b of document.querySelectorAll('.sb-act')){
     b.onclick = () => { send({type:'sys_bt', action:b.dataset.act,
@@ -7984,7 +8433,7 @@ function renderEcho(m){
   $('ec-dist').textContent = (l && l.distance) ? l.distance.toFixed(1) + ' m' : '—';
   const v = m.verdict;
   $('ec-verdict').innerHTML = v
-    ? `<span style="color:${v.changed ? '#f59e0b' : '#4ade80'}">${esc(v.why)}</span>`
+    ? `<span style="color:${v.changed ? '#b45309' : '#16a34a'}">${esc(v.why)}</span>`
     : '—';
 }
 
@@ -7995,16 +8444,16 @@ function renderAcoustic(m){
 
   const last = m.last;
   $('am-last').innerHTML = last
-    ? `<div style="padding:8px 10px;border-radius:9px;background:#232329;
-         border:1px solid #2f2f37">🔊 ${esc(last.greek || last.event)}
-         ${last.room_el ? '<span style="color:#4ade80"> '
+    ? `<div style="padding:8px 10px;border-radius:9px;background:var(--bg);
+         border:1px solid var(--border)">🔊 ${esc(last.greek || last.event)}
+         ${last.room_el ? '<span style="color:#16a34a"> '
            + esc(last.room_el) + '</span>'
-           : '<span style="color:#71717a"> ' + Math.round(last.angle)
+           : '<span style="color:var(--text-dim)"> ' + Math.round(last.angle)
              + '°</span>'}</div>`
     : '';
 
   if(!sounds.length){
-    $('am-list').innerHTML = '<span style="color:#71717a">'
+    $('am-list').innerHTML = '<span style="color:var(--text-dim)">'
       + esc(t('Τίποτα ακόμη.')) + '</span>';
     return;
   }
@@ -8012,11 +8461,11 @@ function renderAcoustic(m){
     const spot = s.spots && s.spots[0];
     // No spot yet is the honest state, not a failure — say why.
     const where = spot
-      ? `<span style="color:#4ade80">${spot.x.toFixed(1)}, ${spot.y.toFixed(1)} m</span>`
-        + (s.room ? ` <span style="color:#71717a">· ${esc(s.room)}</span>` : '')
-      : `<span style="color:#71717a">${esc(t('θέλει δεύτερο σημείο'))}</span>`;
+      ? `<span style="color:#16a34a">${spot.x.toFixed(1)}, ${spot.y.toFixed(1)} m</span>`
+        + (s.room ? ` <span style="color:var(--text-dim)">· ${esc(s.room)}</span>` : '')
+      : `<span style="color:var(--text-dim)">${esc(t('θέλει δεύτερο σημείο'))}</span>`;
     return `<div style="display:flex;justify-content:space-between;gap:10px;
-      padding:6px 0;border-bottom:1px solid #232329">
+      padding:6px 0;border-bottom:1px solid var(--border)">
       <span>${esc(s.greek || s.event)}
         <span style="color:#52525b">×${s.heard}</span></span>
       <span style="text-align:right">${where}</span></div>`;
@@ -8184,20 +8633,20 @@ function renderPeople(m){
   const list = m.people || [];
   $('pp-count').textContent = list.length + ' ' + t('άτομα');
   if(!list.length){
-    $('pp-list').innerHTML = '<span style="color:#71717a">'
+    $('pp-list').innerHTML = '<span style="color:var(--text-dim)">'
       + esc(t('Κανένα άτομο ακόμη. Γράψε ένα όνομα παραπάνω.')) + '</span>';
     return;
   }
-  const tick = ok => ok ? '<span style="color:#4ade80">✓</span>'
-                        : '<span style="color:#52525b">—</span>';
+  const tick = ok => ok ? '<span style="color:#16a34a">✓</span>'
+                        : '<span style="color:var(--text-mute)">—</span>';
   $('pp-list').innerHTML = list.map(p => `
     <div style="padding:10px 11px;margin-bottom:8px;border-radius:11px;
-      background:${p.name===here?'#16281c':'#232329'};
-      border:1px solid ${p.name===here?'#2f6b41':'#2f2f37'}">
+      background:${p.name===here?'var(--success-bg)':'var(--bg)'};
+      border:1px solid ${p.name===here?'#86efac':'var(--border)'}">
       <div class="row" style="justify-content:space-between">
         <span style="font-size:13.5px;font-weight:600;
-          ${p.name===here?'color:#7ee2a0':''}">${esc(p.name)}</span>
-        <span style="font-size:11px;color:#71717a">
+          ${p.name===here?'color:#15803d':''}">${esc(p.name)}</span>
+        <span style="font-size:11px;color:var(--text-dim)">
           ${p.complete ? esc(t('πλήρες')) : esc(t('ελλιπές'))}</span>
       </div>
       <div class="grid2" style="margin-top:7px;font-size:12px">
@@ -8318,13 +8767,13 @@ function gbBuild(rows, labels, names, bodySet){
         title="${esc(g)}">${GESTURE_ICONS[g]||'✋'}</div>
       <div style="flex:1;min-width:0">
         <div class="gb-name" style="font-size:12.5px">${esc(names[g] || g)}</div>
-        <div style="font-size:10.5px;color:#71717a;margin-top:1px">
+        <div style="font-size:10.5px;color:var(--text-dim);margin-top:1px">
           ${bodySet.indexOf(g)>=0 ? esc(t('στάση σώματος')) : esc(t('δάχτυλα'))}
           <span class="gb-risk"></span>
         </div>
-        <div class="gb-bar" style="height:3px;border-radius:2px;background:#2c2c34;
+        <div class="gb-bar" style="height:3px;border-radius:2px;background:var(--surface-2);
           margin-top:6px;display:none">
-          <div style="height:3px;border-radius:2px;background:#4ade80;width:0%"></div>
+          <div style="height:3px;border-radius:2px;background:#16a34a;width:0%"></div>
         </div>
       </div>
       <select data-gesture="${esc(g)}" class="btn gb-sel"
@@ -8347,10 +8796,10 @@ function gbUpdate(rows, src, holding, progress){
     const live = (g === holding);
     const risky = SAFE_ACTIONS.indexOf(cur) < 0;
 
-    row.style.background = live ? '#16281c' : '#232329';
-    row.style.border = '1px solid ' + (live ? '#2f6b41' : '#2f2f37');
+    row.style.background = live ? 'var(--success-bg)' : 'var(--bg)';
+    row.style.border = '1px solid ' + (live ? '#86efac' : 'var(--border)');
     const name = row.querySelector('.gb-name');
-    name.style.color = live ? '#7ee2a0' : '#d4d4d8';
+    name.style.color = live ? '#15803d' : 'var(--text)';
     name.style.fontWeight = live ? '600' : '';
     row.querySelector('.gb-risk').innerHTML =
       risky ? ' · <span style="color:#f59e0b">' + esc(t('κινεί')) + '</span>' : '';
@@ -8369,7 +8818,7 @@ function gbUpdate(rows, src, holding, progress){
 }
 
 // ── self-diagnosis ─────────────────────────────────────────────────────────
-const DG_COLOR = {critical:'#ef4444', warning:'#f59e0b', info:'#71717a'};
+const DG_COLOR = {critical:'#dc2626', warning:'#b45309', info:'var(--text-dim)'};
 
 function renderDiagnostics(m){
   const f = m.findings || [];
@@ -8378,16 +8827,16 @@ function renderDiagnostics(m){
     : (crit ? crit + ' ' + t('σοβαρά') : f.length + ' ' + t('προειδοποιήσεις'));
   const el = $('dg-list');
   if(!f.length){
-    el.innerHTML = '<span style="color:#4ade80">'
+    el.innerHTML = '<span style="color:#16a34a">'
       + esc(t('Κανένα γνωστό πρόβλημα.')) + '</span>';
     return;
   }
   el.innerHTML = f.map(x=>`
-    <div style="padding:8px 0;border-bottom:1px solid #232329">
-      <div style="color:${DG_COLOR[x.severity]||'#a1a1aa'};font-weight:600">
+    <div style="padding:8px 0;border-bottom:1px solid var(--border)">
+      <div style="color:${DG_COLOR[x.severity]||'var(--text-dim)'};font-weight:600">
         ${esc(x.title)}</div>
-      <div style="color:#a1a1aa;margin-top:3px">${esc(x.detail)}</div>
-      <div style="color:#60a5fa;margin-top:4px">→ ${esc(x.fix)}</div>
+      <div style="color:var(--text-dim);margin-top:3px">${esc(x.detail)}</div>
+      <div style="color:#2563eb;margin-top:4px">→ ${esc(x.fix)}</div>
     </div>`).join('');
 }
 
@@ -8479,7 +8928,7 @@ function drawCompass2(){
   const g=c.getContext('2d'), S=c.width, R=S/2-16;
   g.clearRect(0,0,S,S);
   g.beginPath(); g.arc(S/2,S/2,R,0,Math.PI*2);
-  g.strokeStyle='#2c2c32'; g.lineWidth=2; g.stroke();
+  g.strokeStyle='#e2e4e9'; g.lineWidth=2; g.stroke();
 
   const haveYaw = pose && typeof pose.yaw === 'number';
   const ready = haveYaw && compassOffset !== null;
@@ -8521,7 +8970,7 @@ function drawCompass2(){
   // The robot always points up — it is the world that rotates around it.
   g.beginPath();
   g.moveTo(S/2, S/2-R+26); g.lineTo(S/2-9, S/2+14); g.lineTo(S/2+9, S/2+14);
-  g.closePath(); g.fillStyle='#e4e4e7'; g.fill();
+  g.closePath(); g.fillStyle='#18181b'; g.fill();
 }
 
 // ── pointing gestures ──────────────────────────────────────────────────────
@@ -8536,7 +8985,7 @@ function drawPointRing(){
 
   // Track.
   g.beginPath(); g.arc(S/2,S/2,R,0,Math.PI*2);
-  g.strokeStyle='#2c2c32'; g.lineWidth=9; g.stroke();
+  g.strokeStyle='#e2e4e9'; g.lineWidth=9; g.stroke();
 
   const locked = !!(m.confirmed);
   const prog = locked ? 1 : (m.progress || 0);
@@ -8577,20 +9026,20 @@ function renderVocab(m){
   $('vc-count').textContent = active ? hits.length + ' ' + t('ευρήματα') : '—';
   const el = $('vc-hits');
   if(!active){
-    el.innerHTML = '<span style="color:#71717a">'+esc(t('Δεν ψάχνει τίποτα.'))+'</span>';
+    el.innerHTML = '<span style="color:var(--text-dim)">'+esc(t('Δεν ψάχνει τίποτα.'))+'</span>';
     return;
   }
   if(!hits.length){
-    el.innerHTML = '<span style="color:#71717a">'+esc(t('Δεν το βλέπω.'))+'</span>';
+    el.innerHTML = '<span style="color:var(--text-dim)">'+esc(t('Δεν το βλέπω.'))+'</span>';
     return;
   }
   el.innerHTML = hits.map(h=>{
     // Distance is null whenever depth was unavailable — show a dash rather
     // than 0 m, which would read as "right at the camera".
     const d = (h.z==null) ? '—' : h.z.toFixed(2)+' m';
-    return `<div style="padding:6px 0;border-bottom:1px solid #232329">
-      <span style="color:#4ade80">${esc(h.label)}</span>
-      <span style="color:#71717a"> ${(h.conf*100).toFixed(0)}% · ${esc(d)}</span></div>`;
+    return `<div style="padding:6px 0;border-bottom:1px solid var(--border)">
+      <span style="color:#16a34a">${esc(h.label)}</span>
+      <span style="color:var(--text-dim)"> ${(h.conf*100).toFixed(0)}% · ${esc(d)}</span></div>`;
   }).join('');
 }
 
@@ -8612,12 +9061,12 @@ function renderSound(m){
   const feed = (m.feed||[]).slice().reverse();
   const el = $('sd-feed');
   if(!feed.length){
-    el.innerHTML = '<span style="color:#71717a">'+esc(t('Τίποτα ακόμη.'))+'</span>';
+    el.innerHTML = '<span style="color:var(--text-dim)">'+esc(t('Τίποτα ακόμη.'))+'</span>';
   } else {
     el.innerHTML = feed.map(e=>{
       const tm = new Date((e.ts||0)*1000).toLocaleTimeString('el-GR',
         {hour:'2-digit',minute:'2-digit',second:'2-digit'});
-      return `<div style="padding:6px 0;border-bottom:1px solid #232329">
+      return `<div style="padding:6px 0;border-bottom:1px solid var(--border)">
         <span style="color:#52525b;font-variant-numeric:tabular-nums">${esc(tm)}</span>
         &nbsp;${esc(e.text||'')}</div>`;
     }).join('');
@@ -8630,7 +9079,7 @@ function drawCompass(angle){
   const g=c.getContext('2d'), S=c.width, R=S/2-10;
   g.clearRect(0,0,S,S);
   g.beginPath(); g.arc(S/2,S/2,R,0,Math.PI*2);
-  g.strokeStyle='#2c2c32'; g.lineWidth=2; g.stroke();
+  g.strokeStyle='#e2e4e9'; g.lineWidth=2; g.stroke();
   // Nose of the robot, so the wedge is read relative to something.
   g.beginPath(); g.moveTo(S/2,S/2-R); g.lineTo(S/2,S/2-R+9);
   g.strokeStyle='#52525b'; g.lineWidth=3; g.stroke();
@@ -8655,13 +9104,13 @@ function renderObservations(m){
     ? m.learned+' '+t('γνωστά αντικείμενα') : '—';
   const el = $('ob-feed');
   if(!feed.length){
-    el.innerHTML = '<span style="color:#71717a">'+esc(t('Καμία παρατήρηση ακόμη.'))+'</span>';
+    el.innerHTML = '<span style="color:var(--text-dim)">'+esc(t('Καμία παρατήρηση ακόμη.'))+'</span>';
     return;
   }
   el.innerHTML = feed.map(o=>{
     const t = new Date((o.ts||0)*1000).toLocaleTimeString('el-GR',
       {hour:'2-digit',minute:'2-digit'});
-    return `<div style="padding:7px 0;border-bottom:1px solid #232329">
+    return `<div style="padding:7px 0;border-bottom:1px solid var(--border)">
       <span style="color:#52525b;font-variant-numeric:tabular-nums">${t}</span>
       &nbsp;${esc(o.text||'')}</div>`;
   }).join('');
@@ -8674,16 +9123,16 @@ function renderObjectMemory(m){
     ? items.length + ' ' + t('αντικείμενα') : '—';
   const el = $('om-list');
   if(!items.length){
-    el.innerHTML = '<span style="color:#71717a">'
+    el.innerHTML = '<span style="color:var(--text-dim)">'
       + esc(t('Τίποτα γνωστό ακόμη.')) + '</span>';
     return;
   }
   el.innerHTML = items.map(o=>{
     const when = o.last_seen ? new Date(o.last_seen*1000)
       .toLocaleTimeString('el-GR', {hour:'2-digit', minute:'2-digit'}) : '';
-    const room = o.room_el ? `<span style="color:#4ade80">${esc(o.room_el)}</span>`
-      : `<span style="color:#71717a">${esc(t('άγνωστο δωμάτιο'))}</span>`;
-    return `<div style="padding:7px 0;border-bottom:1px solid #232329;
+    const room = o.room_el ? `<span style="color:#16a34a">${esc(o.room_el)}</span>`
+      : `<span style="color:var(--text-dim)">${esc(t('άγνωστο δωμάτιο'))}</span>`;
+    return `<div style="padding:7px 0;border-bottom:1px solid var(--border);
       display:flex;justify-content:space-between;gap:10px">
       <span><span style="font-weight:600">${esc(o.label||'')}</span>
         &nbsp;${room}</span>
@@ -8701,11 +9150,11 @@ function renderTimeline(m){
   const ev = (m.events||[]).slice().reverse();
   const el = $('tl-feed');
   if(!ev.length){
-    el.innerHTML='<span style="color:#71717a">'+esc(t('Άδειο.'))+'</span>'; return;
+    el.innerHTML='<span style="color:var(--text-dim)">'+esc(t('Άδειο.'))+'</span>'; return;
   }
   el.innerHTML = ev.map(e=>{
-    const who = e.who ? `<span style="color:#a78bfa">${esc(e.who)}</span> ` : '';
-    return `<div style="padding:6px 0;border-bottom:1px solid #232329">
+    const who = e.who ? `<span style="color:#7c3aed">${esc(e.who)}</span> ` : '';
+    return `<div style="padding:6px 0;border-bottom:1px solid var(--border)">
       <span style="color:#52525b;font-variant-numeric:tabular-nums">${esc(e.clock||'')}</span>
       &nbsp;${TL_ICON[e.kind]||'•'}&nbsp;${who}${esc(e.text||'')}</div>`;
   }).join('');
@@ -8764,18 +9213,34 @@ CLICK_MODE_BOXES.forEach(id => $(id).addEventListener('change', () => {
   if($(id).checked) CLICK_MODE_BOXES.filter(o => o !== id).forEach(o => $(o).checked = false);
   syncClickModeRows();
 }));
+// Tapping a room's numbered badge selects it (white ring) — pure UI
+// highlight, no robot command, independent of the click-mode checkboxes
+// below (goal/add-room/zone-corner). Tap the same badge again to clear it.
+function selectRoom(name){
+  selectedRoomName = (selectedRoomName === name) ? null : name;
+  draw();
+  const row = Array.from(document.querySelectorAll('#room-edit [data-room]'))
+    .find(el => el.dataset.room === name);
+  if(row && selectedRoomName){
+    row.scrollIntoView({behavior:'smooth', block:'nearest'});
+    row.classList.add('picked');
+    setTimeout(()=>row.classList.remove('picked'), 1500);
+  }
+}
 let kzCorner = null;    // first click of a 2-click keepout rectangle, or null
 canvas.addEventListener('click',e=>{
   const r=canvas.getBoundingClientRect();
   const cx=(e.clientX-r.left)*canvas.width/r.width;
   const cy=(e.clientY-r.top)*canvas.height/r.height;
+  const badge = roomBadgeHits.find(b => Math.hypot(b.x-cx, b.y-cy) <= b.r);
+  if(badge){ selectRoom(badge.name); return; }
   const wp=c2w(cx,cy); if(!wp) return;
   if($('b-kz-add').checked){
     if(!kzCorner){ kzCorner = wp; draw(); return; }
     const name = $('kz-name').value.trim() || ('zone_' + (Object.keys(kzData).length + 1));
     send({type:'add_keepout_zone', x1:kzCorner.x, y1:kzCorner.y, x2:wp.x, y2:wp.y, name});
     kzCorner = null;
-    $('kz-msg').textContent = t('Προσθήκη…'); $('kz-msg').style.color = '#71717a';
+    $('kz-msg').textContent = t('Προσθήκη…'); $('kz-msg').style.color = 'var(--text-dim)';
     return;
   }
   if($('b-place-room-rect').checked) return;   // handled by the pointerdown/move/up drag below
@@ -8783,17 +9248,19 @@ canvas.addEventListener('click',e=>{
     const name = $('pr-name').value.trim();
     if(!name){
       $('room-edit-msg').textContent = t('Δώσε πρώτα όνομα δωματίου.');
-      $('room-edit-msg').style.color = '#f87171';
+      $('room-edit-msg').style.color = '#dc2626';
       return;
     }
     const hex = $('pr-color').value;
     send({type:'place_room', x:wp.x, y:wp.y, name,
           color:[parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)]});
     $('room-edit-msg').textContent = t('Τοποθέτηση…');
-    $('room-edit-msg').style.color = '#71717a';
+    $('room-edit-msg').style.color = 'var(--text-dim)';
     return;
   }
   if($('b-pick-room').checked){
+    pickedMarker = {x: wp.x, y: wp.y, name: null};
+    draw();
     send({type:'pick_room',x:wp.x,y:wp.y});
     return;
   }
@@ -8832,7 +9299,7 @@ canvas.addEventListener('pointerup', () => {
   const name = $('prr-name').value.trim();
   if(!name){
     $('room-edit-msg').textContent = t('Δώσε πρώτα όνομα δωματίου.');
-    $('room-edit-msg').style.color = '#f87171';
+    $('room-edit-msg').style.color = '#dc2626';
     draw();
     return;
   }
@@ -8842,7 +9309,7 @@ canvas.addEventListener('pointerup', () => {
         x2:Math.max(...xs), y2:Math.max(...ys), name,
         color:[parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)]});
   $('room-edit-msg').textContent = t('Τοποθέτηση…');
-  $('room-edit-msg').style.color = '#71717a';
+  $('room-edit-msg').style.color = 'var(--text-dim)';
   draw();
 });
 
@@ -8855,6 +9322,56 @@ ROOMS.forEach(name=>{
   rdiv.appendChild(b);
 });
 
+// ── room colour swatches ─────────────────────────────────────────────────
+// A curated, mutually-distinct palette next to the raw <input type=color>:
+// picking a room colour becomes "tap a nice dot" instead of fighting the OS
+// colour wheel to land on something that doesn't look like the room next
+// door. The raw picker is kept for anyone who wants an exact custom colour.
+const ROOM_PALETTE = [
+  '#ef4444','#f97316','#eab308','#84cc16','#22c55e','#14b8a6',
+  '#06b6d4','#3b82f6','#6366f1','#a855f7','#ec4899','#78716c',
+];
+function swatchRowHtml(hex){
+  const norm = (hex||'').toLowerCase();
+  return '<div class="swatch-row">' + ROOM_PALETTE.map(p =>
+    '<span class="swatch' + (p===norm?' sel':'') + '" data-hex="' + p + '" ' +
+    'style="background:' + p + '"></span>'
+  ).join('') + '</div>';
+}
+// Delegated so it survives innerHTML rebuilds (renderRoomEditor() replaces
+// #room-edit's contents every time the room list changes). Looks up the
+// colour input by selector from whatever [data-room] row (or, for the
+// static add-room pickers, the container itself) the clicked dot is in,
+// rather than assuming a fixed DOM position next to the swatch row.
+function wireSwatches(containerEl, colorSelector){
+  function syncSel(input){
+    const scope = input.closest('[data-room]') || containerEl;
+    const row = scope.querySelector('.swatch-row');
+    if (!row) return;
+    const hex = input.value.toLowerCase();
+    row.querySelectorAll('.swatch').forEach(s => s.classList.toggle('sel', s.dataset.hex === hex));
+  }
+  containerEl.addEventListener('click', e => {
+    const sw = e.target.closest('.swatch');
+    if (!sw) return;
+    const scope = sw.closest('[data-room]') || containerEl;
+    const input = scope.querySelector(colorSelector);
+    if (!input) return;
+    input.value = sw.dataset.hex;
+    input.dispatchEvent(new Event('input', {bubbles:true}));
+    syncSel(input);
+  });
+  // Also catches the native colour wheel (or any other change to the
+  // input), so a custom pick correctly clears a stale swatch ring.
+  containerEl.addEventListener('input', e => {
+    if (e.target.matches(colorSelector)) syncSel(e.target);
+  });
+}
+$('place-room-row').insertAdjacentHTML('beforeend', swatchRowHtml($('pr-color').value));
+$('place-room-rect-row').insertAdjacentHTML('beforeend', swatchRowHtml($('prr-color').value));
+wireSwatches($('place-room-row'), '#pr-color');
+wireSwatches($('place-room-rect-row'), '#prr-color');
+
 // ── room colours ───────────────────────────────────────────────────────────
 // The swatches come from the same room_colors.yaml the server tints with, so
 // the legend cannot drift from the picture. Greek names are data (they come
@@ -8863,12 +9380,15 @@ function roomLegend(rooms){
   const el = $('room-legend');
   const names = Object.keys(rooms);
   if (!names.length){ el.innerHTML = ''; return; }
-  el.innerHTML = names.sort().map(n => {
+  el.innerHTML = names.sort().map((n, i) => {
     const c = rooms[n];
+    // Same number the on-map badge shows (sorted-name order, see draw()'s
+    // roomBadgeHits) so "③" on the map and "③" here are the same room.
     return '<span style="display:inline-flex;align-items:center;gap:5px;' +
-           'font-size:11.5px;color:#a1a1aa">' +
-           '<i style="width:11px;height:11px;border-radius:3px;display:inline-block;' +
-           'background:rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')"></i>' + n + '</span>';
+           'font-size:11.5px;color:var(--text-dim)">' +
+           '<i style="width:16px;height:16px;border-radius:50%;display:inline-flex;' +
+           'align-items:center;justify-content:center;font-size:9.5px;font-weight:700;' +
+           'color:#fff;background:rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')">' + (i+1) + '</i>' + n + '</span>';
   }).join('');
 }
 // ── room name/colour editor ─────────────────────────────────────────────────
@@ -8885,15 +9405,19 @@ function renderRoomEditor(rooms){
     const c = rooms[n];
     const hex = '#' + c.map(v => Math.max(0, Math.min(255, v|0))
                               .toString(16).padStart(2, '0')).join('');
-    return '<div class="row" style="gap:8px;margin-top:6px" data-room="' + esc(n) + '">' +
-      '<input type="color" class="re-color" value="' + hex + '" ' +
-        'style="width:34px;height:30px;padding:0;border:none;background:none;flex:0 0 auto">' +
-      '<input type="text" class="re-name" value="' + esc(n) + '" ' +
-        'style="flex:1;min-width:100px;background:#232329;border:1px solid #2c2c32;' +
-        'border-radius:8px;color:#e4e4e7;padding:6px 9px;font-size:12.5px">' +
+    return '<div style="margin-top:8px" data-room="' + esc(n) + '">' +
+      '<div class="row" style="gap:8px">' +
+        '<input type="color" class="re-color" value="' + hex + '" ' +
+          'style="width:34px;height:30px;padding:0;border:none;background:none;flex:0 0 auto">' +
+        '<input type="text" class="re-name" value="' + esc(n) + '" ' +
+          'style="flex:1;min-width:100px;background:var(--bg);border:1px solid var(--border);' +
+          'border-radius:8px;color:var(--text);padding:6px 9px;font-size:12.5px">' +
+      '</div>' +
+      swatchRowHtml(hex).replace('class="swatch-row"', 'class="swatch-row" style="margin:6px 0 0 42px"') +
       '</div>';
   }).join('');
 }
+wireSwatches($('room-edit'), '.re-color');
 $('b-room-save').onclick = () => {
   const rows = $('room-edit').querySelectorAll('[data-room]');
   const rooms = [];
@@ -8908,7 +9432,7 @@ $('b-room-save').onclick = () => {
   if (!rooms.length) return;
   send({type:'save_rooms', rooms});
   $('room-edit-msg').textContent = t('Αποθήκευση…');
-  $('room-edit-msg').style.color = '#71717a';
+  $('room-edit-msg').style.color = 'var(--text-dim)';
 };
 $('b-tint').onchange = e => send({type:'room_tint', on: e.target.checked});
 $('b-slipmap').onchange = e => { slipMapOn = e.target.checked; draw(); };
@@ -8924,26 +9448,26 @@ function renderKeepoutList(zones){
     const z = zones[n];
     const dims = z.shape === 'circle' ? `r=${z.radius}m` : `${z.width}×${z.height}m`;
     return '<div class="row" style="justify-content:space-between;font-size:11.5px">' +
-      '<span>🚫 ' + esc(n) + ' <span style="color:#71717a">(' + dims + ')</span></span>' +
+      '<span>🚫 ' + esc(n) + ' <span style="color:var(--text-dim)">(' + dims + ')</span></span>' +
       '<button class="btn" data-kz-del="' + esc(n) + '" style="padding:3px 8px">✕</button>' +
       '</div>';
   }).join('');
   el.querySelectorAll('[data-kz-del]').forEach(b => b.onclick = () => {
     send({type:'delete_keepout_zone', name: b.dataset.kzDel});
-    $('kz-msg').textContent = t('Διαγραφή…'); $('kz-msg').style.color = '#71717a';
+    $('kz-msg').textContent = t('Διαγραφή…'); $('kz-msg').style.color = 'var(--text-dim)';
   });
 }
 $('kz-on').onclick = () => {
   if (!confirm(t('Θα επανεκκινήσει όλη τη στοίβα (~90 δευτερόλεπτα) με τις '
               + 'απαγορευμένες ζώνες ενεργές. Να συνεχίσω;'))) return;
   send({type:'keepout_activate', on: true});
-  $('kz-msg').textContent = t('Ενεργοποίηση…'); $('kz-msg').style.color = '#71717a';
+  $('kz-msg').textContent = t('Ενεργοποίηση…'); $('kz-msg').style.color = 'var(--text-dim)';
 };
 $('kz-off').onclick = () => {
   if (!confirm(t('Θα επανεκκινήσει όλη τη στοίβα (~90 δευτερόλεπτα) χωρίς τις '
               + 'απαγορευμένες ζώνες. Να συνεχίσω;'))) return;
   send({type:'keepout_activate', on: false});
-  $('kz-msg').textContent = t('Απενεργοποίηση…'); $('kz-msg').style.color = '#71717a';
+  $('kz-msg').textContent = t('Απενεργοποίηση…'); $('kz-msg').style.color = 'var(--text-dim)';
 };
 
 // ── "πήγαινε να δεις" (check mission) ──────────────────────────────────────
@@ -8985,8 +9509,8 @@ const MISSION_EL = {
 function onMission(m){
   const s = (m.state || '').toLowerCase();
   $('ck-msg').textContent = t(MISSION_EL[s] || s);
-  $('ck-msg').style.color = s === 'failed' ? '#f87171'
-                          : s === 'done'   ? '#4ade80' : '#71717a';
+  $('ck-msg').style.color = s === 'failed' ? '#dc2626'
+                          : s === 'done'   ? '#16a34a' : 'var(--text-dim)';
 }
 
 // ── drive controls ─────────────────────────────────────────────────────────
@@ -9012,6 +9536,11 @@ function bindDrive(id,sv,sw){
 }
 bindDrive('bf', 1, 0); bindDrive('bb',-1, 0);
 bindDrive('bl', 0, 1); bindDrive('br', 0,-1);
+// Same pad, glassy buttons over the live camera feed instead of tiles in a
+// card — see #cam-dpad's CSS comment.
+bindDrive('cam-bf', 1, 0); bindDrive('cam-bb',-1, 0);
+bindDrive('cam-bl', 0, 1); bindDrive('cam-br', 0,-1);
+$('cam-bstop').addEventListener('click',()=>{ stopDrive(); send({type:'stop'}); });
 
 // ── speed sliders ──────────────────────────────────────────────────────────
 // Local to the browser (localStorage), not a robot parameter: two people on
@@ -9107,7 +9636,7 @@ function buildCostLegend(){
   const box = $('cost-legend'); if (!box || box.childElementCount) return;
   COST_LEGEND.forEach(([colour, label]) => {
     const s = document.createElement('span');
-    s.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:12px;color:#a1a1aa';
+    s.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-dim)';
     const sw = document.createElement('span');
     sw.style.cssText = `width:12px;height:12px;border-radius:3px;background:${colour}`;
     s.appendChild(sw);
@@ -9126,7 +9655,7 @@ function drawRose(yawDeg, alive){
   g.clearRect(0,0,200,200);
   g.translate(R,R);
 
-  g.strokeStyle = '#3a3a44'; g.lineWidth = 2;
+  g.strokeStyle = '#e2e4e9'; g.lineWidth = 2;
   g.beginPath(); g.arc(0,0,88,0,Math.PI*2); g.stroke();
 
   // Ticks every 30°, drawn in the fixed frame so the needle is what moves.
@@ -9151,7 +9680,7 @@ function drawRose(yawDeg, alive){
     g.lineTo(Math.cos(t)*72, Math.sin(t)*72); g.stroke();
     g.fillStyle = '#3b82f6';
     g.beginPath(); g.arc(0,0,6,0,Math.PI*2); g.fill();
-    g.fillStyle = '#e4e4e7'; g.font = 'bold 20px system-ui';
+    g.fillStyle = '#18181b'; g.font = 'bold 20px system-ui';
     g.fillText(yawDeg.toFixed(0)+'°', 0, 38);
   } else {
     g.fillStyle = '#71717a'; g.font = '13px system-ui';
@@ -9235,7 +9764,7 @@ function fzHealth(s, floor){
     return fzPill('bad', t('ΣΙΩΠΗ') + ' ' + s.age.toFixed(0) + 's');
   const slow = s.hz < floor;
   return fzPill(slow ? 'warn' : 'ok', s.hz.toFixed(1) + ' Hz')
-       + (slow ? ' <span style="color:#fbbf24;font-size:11px">'
+       + (slow ? ' <span style="color:#b45309;font-size:11px">'
                  + t('αργό') + '</span>' : '');
 }
 
@@ -9606,20 +10135,24 @@ document.addEventListener('keydown', e=>{
   if(e.repeat && keyHeld === e.key) return;
   keyHeld = e.key;
   startDrive(k[0]*LIN, k[1]*ANG);
-  const el = $({ArrowUp:'bf',w:'bf',W:'bf', ArrowDown:'bb',s:'bb',S:'bb',
-                ArrowLeft:'bl',a:'bl',A:'bl', ArrowRight:'br',d:'br',D:'br'}[e.key]);
-  if(el) el.classList.add('lit');
+  // Lights up both pads — the map tab's tiles AND the camera tab's glassy
+  // overlay — since either could be the one on screen while a key is held.
+  (({ArrowUp:['bf','cam-bf'],w:['bf','cam-bf'],W:['bf','cam-bf'],
+     ArrowDown:['bb','cam-bb'],s:['bb','cam-bb'],S:['bb','cam-bb'],
+     ArrowLeft:['bl','cam-bl'],a:['bl','cam-bl'],A:['bl','cam-bl'],
+     ArrowRight:['br','cam-br'],d:['br','cam-br'],D:['br','cam-br']}[e.key]) || [])
+    .forEach(id => { const el = $(id); if(el) el.classList.add('lit'); });
 });
 document.addEventListener('keyup', e=>{
   if(!KEYS[e.key]) return;
   if(keyHeld === e.key){ keyHeld=null; stopDrive(); }
-  document.querySelectorAll('.dbtn.lit').forEach(b=>b.classList.remove('lit'));
+  document.querySelectorAll('.dbtn.lit,.cdbtn.lit').forEach(b=>b.classList.remove('lit'));
 });
 // A key can be held while the tab is switched away, in which case keyup never
 // arrives and the robot would drive on with nobody watching it.
 const releaseKeys = ()=>{
   if(keyHeld){ keyHeld=null; stopDrive(); }
-  document.querySelectorAll('.dbtn.lit').forEach(b=>b.classList.remove('lit'));
+  document.querySelectorAll('.dbtn.lit,.cdbtn.lit').forEach(b=>b.classList.remove('lit'));
 };
 window.addEventListener('blur', releaseKeys);
 document.addEventListener('visibilitychange', ()=>{ if(document.hidden) releaseKeys(); });
@@ -10003,6 +10536,7 @@ $('b-cost-smaller').onclick = ()=>costResize(1/COST_STEP);
 $('b-cost-bigger').onclick  = ()=>costResize(COST_STEP);
 $('b-map-new').onclick  = mapNew;
 $('b-map-save').onclick = mapSave;
+$('b-scan-upload').onclick = scanUpload;
 cloudBind();
 
 // ── vacuum ─────────────────────────────────────────────────────────────────
@@ -10070,6 +10604,7 @@ function applyLang(){
   document.documentElement.lang = LANG;
   renderTabs();
   renderChips();
+  renderMoreTools();
   setupCards();
   setupViewers();
   for(const b of document.querySelectorAll('#lang-buttons .btn'))
@@ -10104,11 +10639,11 @@ async function mapsRefresh(){
   for(const m of d.maps){
     const row = document.createElement('div');
     row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:6px 0;'
-                      + 'border-bottom:1px solid #27272a';
+                      + 'border-bottom:1px solid var(--border)';
     const isActive = m.name === d.active;
     const when = new Date(m.mtime * 1000).toLocaleDateString('el-GR');
     row.innerHTML = `<span style="flex:1">${isActive ? '● ' : ''}<b>${m.name}</b>`
-      + `<span style="color:#71717a;font-size:11.5px"> · ${when} · ${m.kb} kB`
+      + `<span style="color:var(--text-dim);font-size:11.5px"> · ${when} · ${m.kb} kB`
       + `${m.resumable ? ' · ' + t('επεκτάσιμος') : ''}</span></span>`;
     if(!isActive){
       const b = document.createElement('button');
@@ -10208,6 +10743,51 @@ async function mapStraightenPreview(name){
     } catch(e){ mapMsg(t('Απέτυχε') + ': ' + e); }
     $('map-straighten').style.display = 'none';
   };
+}
+
+// Web equivalent of the manual ply_to_map.py + scp flow: pick a PLY export
+// straight off the phone that scanned the house and turn it into a new map,
+// with no computer/SSH step in between. The conversion (open3d on a
+// house-scale cloud) runs synchronously on the server for up to 5 minutes —
+// see maps_upload_scan's timeout — so the button just stays disabled with a
+// "converting" message rather than polling, same spirit as mapSave's single
+// await.
+async function scanUpload(){
+  const msg = $('scan-upload-msg');
+  const name = $('scan-upload-name').value.trim();
+  if(!/^[A-Za-z0-9_-]{1,40}$/.test(name)){
+    msg.textContent = t('Δώσε όνομα με λατινικά γράμματα, αριθμούς, - ή _');
+    return;
+  }
+  const plyFile = $('scan-upload-ply').files[0];
+  if(!plyFile){
+    msg.textContent = t('Διάλεξε πρώτα το αρχείο PLY της σάρωσης');
+    return;
+  }
+  const glbFile = $('scan-upload-glb').files[0];
+  const fd = new FormData();
+  fd.append('name', name);
+  fd.append('ply', plyFile);
+  if(glbFile) fd.append('glb', glbFile);
+
+  $('b-scan-upload').disabled = true;
+  msg.textContent = t('Ανεβαίνει και μετατρέπεται… μπορεί να πάρει λίγα λεπτά');
+  try {
+    const res = await fetch('/maps/upload_scan' + (TOKEN_QS || ''), { method: 'POST', body: fd });
+    const r = await res.json();
+    if(r.ok){
+      msg.textContent = t('Έγινε') + ': ' + name + (r.log ? '\n' + r.log : '');
+      $('scan-upload-name').value = '';
+      $('scan-upload-ply').value = '';
+      $('scan-upload-glb').value = '';
+      mapsRefresh();
+    } else {
+      msg.textContent = t('Απέτυχε') + ': ' + (r.error || res.status);
+    }
+  } catch(e){
+    msg.textContent = t('Απέτυχε') + ': ' + e;
+  }
+  $('b-scan-upload').disabled = false;
 }
 
 // ── 3D point cloud ─────────────────────────────────────────────────────────
@@ -10624,8 +11204,8 @@ let beBusy = false;
 function onBackend(m){
   beBusy = m.state === 'busy';
   $('be-msg').textContent = m.text || '';
-  $('be-msg').style.color = m.state === 'err' ? '#f87171'
-                          : m.state === 'busy' ? '#fbbf24' : '#71717a';
+  $('be-msg').style.color = m.state === 'err' ? '#dc2626'
+                          : m.state === 'busy' ? '#b45309' : 'var(--text-dim)';
   const b = m.backend;
   $('be-badge').textContent = b === 'gemini' ? 'Gemini'
                             : b === 'lemonade' ? 'Qwen3.5 (NPU)'
@@ -10659,8 +11239,8 @@ function onQuota(m){
   const pct = limit ? Math.min(100, Math.round(used * 100 / limit)) : 0;
   const bar = $('q-bar');
   bar.style.width = pct + '%';
-  bar.style.background = left <= 0 ? '#f87171'
-                       : left < limit * 0.1 ? '#fbbf24' : '#34d399';
+  bar.style.background = left <= 0 ? '#dc2626'
+                       : left < limit * 0.1 ? '#d97706' : '#16a34a';
   const hours = Math.floor((m.resets_in || 0) / 3600);
   const mins  = Math.round(((m.resets_in || 0) % 3600) / 60);
   const when = hours >= 1 ? hours + t(' ώρες') : mins + t(' λεπτά');
@@ -10929,7 +11509,7 @@ function camShowFrame(bytes){
 // Levels are rcl_interfaces/Log: 30 WARN, 40 ERROR, 50 FATAL. Auto-scroll is
 // suppressed when the user has scrolled up to read something — otherwise the
 // next warning yanks the line they were reading off the screen.
-const LOG_LEVELS = {30:['WARN','#facc15'], 40:['ERROR','#f87171'], 50:['FATAL','#f87171']};
+const LOG_LEVELS = {30:['WARN','#b45309'], 40:['ERROR','#dc2626'], 50:['FATAL','#dc2626']};
 let logSeen = 0;
 let logLast = null;      // {key, count, el} — the run currently being folded
 
@@ -10945,7 +11525,7 @@ const logShape = m => m.level + '|' + m.name + '|' +
 function addLog(m){
   const list = $('log-list');
   const stick = list.scrollHeight - list.scrollTop - list.clientHeight < 40;
-  const [name, colour] = LOG_LEVELS[m.level] || ['LOG', '#a1a1aa'];
+  const [name, colour] = LOG_LEVELS[m.level] || ['LOG', 'var(--text-dim)'];
   const ts = new Date(m.t * 1000).toLocaleTimeString('el-GR');
   const key = logShape(m);
   $('log-count').textContent = ++logSeen;
@@ -11067,6 +11647,43 @@ import { OrbitControls } from '/vendor/three/addons/controls/OrbitControls.js';
     return pts.length;
   }
 
+  // Same idea as syncLine, but emits a flat quad-strip (two triangles per
+  // segment) instead of a polyline, so trailLine actually has width on
+  // screen — see trailLine's construction comment for why a THREE.Line
+  // can't do this.
+  function syncTrailRibbon(mesh, pts, prevLen, y, halfWidth){
+    if (pts.length === prevLen) return prevLen;
+    mesh.visible = pts.length > 1;
+    if (pts.length > 1){
+      const n = pts.length;
+      const positions = new Float32Array((n - 1) * 18);
+      let vi = 0;
+      for (let i = 0; i < n - 1; i++){
+        const ax = pts[i][0], az = -pts[i][1];
+        const bx = pts[i + 1][0], bz = -pts[i + 1][1];
+        let dx = bx - ax, dz = bz - az;
+        const len = Math.hypot(dx, dz) || 1e-6;
+        dx /= len; dz /= len;
+        // Perpendicular offset in the XZ (floor) plane gives each segment
+        // its width — the trail sits at a fixed height, so no 3D miter
+        // handling is needed, just a 2D one.
+        const px = -dz * halfWidth, pz = dx * halfWidth;
+        const a0x = ax + px, a0z = az + pz, a1x = ax - px, a1z = az - pz;
+        const b0x = bx + px, b0z = bz + pz, b1x = bx - px, b1z = bz - pz;
+        positions[vi++] = a0x; positions[vi++] = y; positions[vi++] = a0z;
+        positions[vi++] = a1x; positions[vi++] = y; positions[vi++] = a1z;
+        positions[vi++] = b0x; positions[vi++] = y; positions[vi++] = b0z;
+        positions[vi++] = a1x; positions[vi++] = y; positions[vi++] = a1z;
+        positions[vi++] = b1x; positions[vi++] = y; positions[vi++] = b1z;
+        positions[vi++] = b0x; positions[vi++] = y; positions[vi++] = b0z;
+      }
+      mesh.geometry.dispose();
+      mesh.geometry = new THREE.BufferGeometry();
+      mesh.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    }
+    return pts.length;
+  }
+
   function ensureScene(){
     if (renderer) return;
     renderer = new THREE.WebGLRenderer({canvas, antialias:true});
@@ -11105,11 +11722,15 @@ import { OrbitControls } from '/vendor/three/addons/controls/OrbitControls.js';
     goalMarker = new THREE.Mesh(ring, new THREE.MeshStandardMaterial({color: 0xffa040}));
     goalMarker.visible = false;
     scene.add(goalMarker);
-    // Trail (where driven, same colour/source as the 2D canvas's) and plan
-    // (upcoming Nav2 route, same blue as the 2D canvas's) — both read the
-    // classic script's shared arrays each frame, like goalMarker does.
-    trailLine = new THREE.Line(new THREE.BufferGeometry(),
-      new THREE.LineBasicMaterial({color: 0x38bdf8}));
+    // Trail (where driven) and plan (upcoming Nav2 route, same blue as the
+    // 2D canvas's) — both read the classic script's shared arrays each
+    // frame, like goalMarker does. Trail is a flat white ribbon mesh, not a
+    // THREE.Line — LineBasicMaterial's `linewidth` is ignored by nearly
+    // every browser/GPU (ANGLE clamps it to 1px), so a real quad-strip is
+    // the only portable way to get a visibly thick trail. White so it reads
+    // against both the pale scan mesh and the dark floor grid.
+    trailLine = new THREE.Mesh(new THREE.BufferGeometry(),
+      new THREE.MeshBasicMaterial({color: 0xffffff, side: THREE.DoubleSide}));
     trailLine.visible = false;
     scene.add(trailLine);
     planLine = new THREE.Line(new THREE.BufferGeometry(),
@@ -11166,7 +11787,7 @@ import { OrbitControls } from '/vendor/three/addons/controls/OrbitControls.js';
       goalMarker.visible = loaded && !!goal;
       if (goal) goalMarker.position.set(goal.x, 0.03, -goal.y);
     }
-    if (loaded && trailLine) trailLen = syncLine(trailLine, robotTrail, trailLen, 0.03);
+    if (loaded && trailLine) trailLen = syncTrailRibbon(trailLine, robotTrail, trailLen, 0.03, 0.045);
     if (loaded && planLine) planLen = syncLine(planLine, plan || [], planLen, 0.04);
     controls.update();
     renderer.render(scene, camera);

@@ -459,6 +459,10 @@ TRANSLATIONS = {
          '🖱️ Klick auf die Karte wählt einen Raum (statt den Roboter dorthin zu schicken)'),
     'Δεν βρέθηκε δωμάτιο εκεί.':
         ('No room found there.', 'Dort wurde kein Raum gefunden.'),
+    '(κανένα δωμάτιο εδώ)':
+        ('(no room here)', '(kein Raum hier)'),
+    'm² χάρτης':          ('m² map', 'm² Karte'),
+    'τρέχον δωμάτιο':     ('current room', 'aktueller Raum'),
     '➕ Κλικ στον χάρτη ΠΡΟΣΘΕΤΕΙ δωμάτιο εδώ, με το όνομα/χρώμα από κάτω':
         ('➕ Click on the map ADDS a room here, with the name/colour below',
          '➕ Klick auf die Karte FÜGT hier einen Raum hinzu, mit Name/Farbe unten'),
@@ -641,6 +645,9 @@ TRANSLATIONS = {
          'switch off. The setting is remembered after',
          'Der LED-Ring zeigt IMMER die Richtung der Stimme, auch bei '
          'ausgeschaltetem Schalter. Die Einstellung bleibt erhalten nach'),
+
+    # ── settings: more tools ────────────────────────────────────────────────
+    'Περισσότερα εργαλεία': ('More tools', 'Weitere Werkzeuge'),
 
     # ── settings: language ────────────────────────────────────────────────
     'Γλώσσα':            ('Language', 'Sprache'),

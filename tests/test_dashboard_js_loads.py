@@ -145,9 +145,15 @@ def test_chips_are_built_from_a_function_not_at_top_level():
 
 
 def test_every_pane_referenced_by_a_tab_exists():
-    """A tab whose pane is missing blanks the page when tapped."""
-    m = re.search(r'const TABS = \[(.*?)\];', _SRC, re.S)
-    assert m, 'the TABS table is gone'
+    """A tab whose pane is missing blanks the page when tapped.
+
+    Checks ALL_TABS, not TABS: TABS is now the curated bar
+    (`ALL_TABS.filter(...)`, not a literal array — see CORE_TAB_IDS), and the
+    rest are reached from Ρυθμίσεις → "Περισσότερα εργαλεία" instead of the
+    bar. ALL_TABS is still every tab the page has, bar or not, so it is the
+    right list to demand a pane for."""
+    m = re.search(r'const ALL_TABS = \[(.*?)\];', _SRC, re.S)
+    assert m, 'the ALL_TABS table is gone'
     for tab_id in re.findall(r"\['(\w+)'", m.group(1)):
         assert f'id="p-{tab_id}"' in _SRC, f'tab {tab_id!r} has no pane'
 
