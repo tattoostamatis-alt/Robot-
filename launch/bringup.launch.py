@@ -121,6 +121,16 @@ def generate_launch_description():
     # If use_obstacle_safety:=false, nothing relays cmd_vel -> cmd_vel_safe
     # and the robot won't move — only turn this off together with a manual
     # remap back to cmd_vel for direct testing.
+    # respawn=True: this node's own sensor-cycle watchdog is the ONLY thing
+    # that stops a silent Safe->Passive demotion (e.g. wheel-drop abort) from
+    # running out the OI's 3-5 min Passive sleep timer -- see
+    # project_robot_roomba_keepalive memory. roomba-keepalive.service only
+    # covers the gaps where THIS node isn't running at all; while it IS
+    # running but crashes, nothing else re-enters Safe/Full. Found
+    # 2026-08-16: the node died mid-session and the robot was asleep for the
+    # next 48 minutes because nothing restarted it. BRC (the hardware wake
+    # line) is confirmed dead, so once truly asleep only a physical power
+    # cycle recovers it -- respawning fast is the only defense that exists.
     roomba_node = Node(
         package='home_robot',
         executable='roomba_driver.py',
@@ -129,6 +139,8 @@ def generate_launch_description():
         remappings=[('cmd_vel', 'cmd_vel_safe')],
         output='screen',
         condition=IfCondition(use_roomba),
+        respawn=True,
+        respawn_delay=1.0,
     )
 
     # ── YOLO/D435 forward obstacle safety stop ───────────────────
