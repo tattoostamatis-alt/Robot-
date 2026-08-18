@@ -38,7 +38,11 @@ teleop_twist_joy_node:
     # Circle e-stop remains as a safety stop, and that one is manual, not
     # automatic-on-dropout.
     enable_button: 5
-    # Hold L1 together with R1 for the turbo scale above.
-    enable_turbo_button: 4
+    # L1 turbo DISABLED (was button 4) — L1 is now arm_joy's roll-negative
+    # button (config/arm_joy_ps5.yaml), and holding it while R1 happened to
+    # be down drove the robot forward at turbo speed instead of turning the
+    # wrist. -1 means "no turbo button", matching arm_joy's own -1-to-unbind
+    # convention; scale_linear_turbo/scale_angular_turbo above are now unused.
+    enable_turbo_button: -1
 
     require_enable_button: false

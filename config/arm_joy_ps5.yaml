@@ -12,6 +12,8 @@ arm_joy:
     axis_shoulder: 4    # right stick vertical
     axis_elbow: 7       # D-pad up/down    — extends the reach forward
     axis_wrist: 6       # D-pad left/right — tilts the hand
+    axis_roll: 2        # L2 pull — spins the gripper about its own axis
+                         # (remapped in code: L2 rests at +1.0, not 0)
 
     # rad/s at full stick deflection. NEGATE any of these to flip that
     # direction — the RoArm wiki does not document which way its joints count
@@ -26,6 +28,7 @@ arm_joy:
     scale_shoulder: 1.00
     scale_elbow: 1.00
     scale_wrist: 1.00
+    scale_roll: 1.00
 
     # ‼️ R1 (button 5) is ALSO the drive dead-man in teleop_twist_joy_ps5.yaml
     # (enable_button: 5, require_enable_button: true) — it is held down for the
@@ -82,3 +85,7 @@ arm_joy:
     limit_shoulder: [-0.169, 1.570]
     limit_elbow:    [0.141, 3.079]
     limit_wrist:    [-1.143, 1.407]
+    # Matches arm_driver's limit_roll (bringup.launch.py) exactly — same
+    # measured -68.7..+80.6 deg envelope, 2 deg margin, never wired up here
+    # until now.
+    limit_roll:     [-1.165, 1.372]

@@ -5,8 +5,18 @@
   right stick ↑↓   shoulder  (raise/lower the arm)
   D-pad ↑↓         elbow     (extend the reach forward / fold it back)
   D-pad ←→         wrist     (tilt the hand)
+  L2 pull          roll      (spins the gripper, one direction, proportional)
+  L1 held          roll      (spins the gripper the other way, full rate)
   R1 held          gripper opens
   R2 held          gripper closes
+
+L1 also used to be teleop_twist_joy_ps5.yaml's enable_turbo_button, so holding
+it while R1 happened to be down (e.g. resting a finger there from the gripper
+button) drove the robot forward at turbo speed instead of turning the wrist.
+Fixed by disabling that turbo button there (enable_turbo_button: -1) rather
+than picking a different key for roll, so L1's only job now is roll. R2 was
+ruled out for the same slot — it's already gripper_close_button, so pulling it
+would close the gripper and reverse-roll at once.
 
 Reaching forward is the elbow, not the shoulder — the first version of this
 node bound only base and shoulder and there was simply no way to extend the
@@ -70,6 +80,7 @@ MECH_LIMITS = {
     'shoulder': (-1.57, 1.57),
     'elbow':    (0.0, 3.14),    # reach: this is the joint that extends forward
     'wrist':    (-1.57, 1.57),
+    'roll':     (-3.14, 3.14),  # spins the gripper about its own axis
     'hand':     (1.08, 3.14),   # 1.08 = open, 3.14 = closed
 }
 JOINT_LIMITS = MECH_LIMITS      # backwards-compatible alias
@@ -83,8 +94,15 @@ JOG_SPECS = (
     ('shoulder', 4,  1.00),     # right stick vertical
     ('elbow',    7,  1.00),     # D-pad up/down  — extend/retract the reach
     ('wrist',    6,  1.00),     # D-pad left/right
+    ('roll',     2,  1.00),     # L2 pull (remapped, see TRIGGER_AXES) — spins the gripper
 )
 JOG_JOINTS = tuple(spec[0] for spec in JOG_SPECS)
+
+# DualSense L2/R2 report +1.0 at rest (released) and -1.0 fully pressed —
+# opposite of the sticks, which rest at 0. Binding one straight to a jog axis
+# would make it think the trigger is always pulled at rest and spin the roll
+# joint continuously. Remapped in _axis() to 0-at-rest, 1-at-full-pull instead.
+TRIGGER_AXES = {2, 5}
 
 
 def _clamp(name, value, limits=None):
@@ -124,6 +142,11 @@ class ArmJoy(Node):
         self.declare_parameter('gripper_open_button', 5)    # R1
         self.declare_parameter('gripper_close_button', 7)   # R2
         self.declare_parameter('scale_gripper', 0.80)   # rad/s while held
+        # L2 (axis_roll) only reaches positive deflection. L1 drives roll the
+        # other way at full rate while held — teleop_twist_joy_ps5.yaml's
+        # enable_turbo_button (also L1) is now disabled (-1) specifically so
+        # this no longer risks driving the robot when R1 is also down.
+        self.declare_parameter('roll_negative_button', 4)   # L1
         # See the R1 note in the module docstring: ignore the gripper buttons
         # while the drive stick is pushed, so holding R1 to drive doesn't also
         # open the gripper.
@@ -157,6 +180,7 @@ class ArmJoy(Node):
         self._read_scales()
         self.btn_open = self.get_parameter('gripper_open_button').value
         self.btn_close = self.get_parameter('gripper_close_button').value
+        self.btn_roll_neg = self.get_parameter('roll_negative_button').value
         self.scale_gripper = self.get_parameter('scale_gripper').value
         self.drive_lockout = self.get_parameter('drive_lockout').value
         self.drive_axes = list(self.get_parameter('drive_lockout_axes').value)
@@ -264,7 +288,12 @@ class ArmJoy(Node):
 
     @staticmethod
     def _axis(msg, idx):
-        return msg.axes[idx] if 0 <= idx < len(msg.axes) else 0.0
+        if not (0 <= idx < len(msg.axes)):
+            return 0.0
+        v = msg.axes[idx]
+        if idx in TRIGGER_AXES:
+            v = (1.0 - v) / 2.0
+        return v
 
     @staticmethod
     def _pressed(msg, idx):
@@ -273,6 +302,12 @@ class ArmJoy(Node):
     def _joy_cb(self, msg: Joy):
         self._axes = {joint: self._deadzone(self._axis(msg, ax))
                       for joint, ax, _ in self.jog}
+        # L2 (axis_roll) only reaches positive deflection. L1 held drives
+        # roll the other way at full rate — takes priority over any L2
+        # pull, since pulling L2 while also holding L1 is almost certainly
+        # unintentional.
+        if 'roll' in self._axes and self._pressed(msg, self.btn_roll_neg):
+            self._axes['roll'] = -1.0
         if self.drive_lockout and self._driving(msg):
             self._grip_dir = 0
         else:
