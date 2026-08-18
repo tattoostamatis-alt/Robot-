@@ -13,6 +13,7 @@ from launch_ros.event_handlers import OnStateTransition
 from launch_ros.events.lifecycle import ChangeState
 from launch_ros.substitutions import FindPackageShare
 from lifecycle_msgs.msg import Transition
+from moveit_configs_utils import MoveItConfigsBuilder
 import os
 
 
@@ -25,6 +26,16 @@ def generate_launch_description():
     localization_map = LaunchConfiguration('localization_map', default='')
     use_camera    = LaunchConfiguration('use_camera',    default='true')
     use_arm       = LaunchConfiguration('use_arm',       default='false')
+    # Off by default — see pick_place_node.py's "MoveIt transit" docstring
+    # section. Starts a HEADLESS move_group + arm_moveit_bridge.py +
+    # arm_scene_obstacles.py (no RViz) so pick_place_node.py's autonomous
+    # transit moves can plan around the lidar/camera mast + robot body.
+    # ‼️ Do NOT also open the dashboard's manual "MoveIt" tab while this is
+    # true — that tab launches its own move_group/bridge/scene_obstacles
+    # with the SAME node names (arm_moveit.launch.py), and two instances
+    # fighting over the same action/service names is exactly the kind of
+    # conflict that broke things elsewhere (see the dashboard RViz :2 note).
+    moveit_transit = LaunchConfiguration('moveit_transit', default='false')
     use_roomba    = LaunchConfiguration('use_roomba',    default='true')
     use_sim_time  = LaunchConfiguration('use_sim_time',  default='false')
     # Placeholder drop-off pose (arm_base frame) — no tray/bin measured yet.
@@ -1319,9 +1330,64 @@ def generate_launch_description():
             'drop_y': pick_drop_y,
             'drop_z': pick_drop_z,
             'approach_height': pick_approach_height,
+            'moveit_transit_enabled': moveit_transit,
         }],
         output='screen',
         condition=IfCondition(use_arm),
+    )
+
+    # ── MoveIt (headless) — collision-aware transit for pick_place_node ────
+    # Same config as arm_moveit.launch.py (the dashboard's manual "MoveIt"
+    # tab), minus robot_state_publisher/RViz: pick_place_node.py only needs
+    # move_group to plan+execute, not a visualised model. Gated on
+    # moveit_transit, NOT bare use_arm — see the LaunchConfiguration comment
+    # above for why this must not run at the same time as the dashboard tab.
+    _moveit_config = (
+        MoveItConfigsBuilder("roarm_m3", package_name="roarm_moveit")
+        .robot_description(file_path="config/roarm_m3/roarm_m3.urdf.xacro")
+        .robot_description_semantic(file_path="config/roarm_m3/roarm_m3.srdf")
+        .robot_description_kinematics(file_path="config/roarm_m3/kinematics.yaml")
+        .trajectory_execution(file_path="config/roarm_m3/moveit_controllers.yaml")
+        .joint_limits(file_path="config/roarm_m3/joint_limits.yaml")
+        .planning_pipelines(pipelines=["ompl"])
+        .to_moveit_configs()
+    )
+    moveit_robot_state_publisher = Node(
+        package='robot_state_publisher',
+        executable='robot_state_publisher',
+        name='moveit_robot_state_publisher',
+        output='screen',
+        parameters=[_moveit_config.robot_description, {'publish_frequency': 15.0}],
+        condition=IfCondition(AndSubstitution(use_arm, moveit_transit)),
+    )
+    move_group_node = Node(
+        package='moveit_ros_move_group',
+        executable='move_group',
+        name='move_group',
+        output='screen',
+        parameters=[
+            _moveit_config.to_dict(),
+            {'publish_robot_description_semantic': True,
+             'publish_planning_scene': True,
+             'publish_geometry_updates': True,
+             'publish_state_updates': True,
+             'publish_transforms_updates': True},
+        ],
+        condition=IfCondition(AndSubstitution(use_arm, moveit_transit)),
+    )
+    arm_moveit_bridge_node = Node(
+        package='home_robot',
+        executable='arm_moveit_bridge.py',
+        name='arm_moveit_bridge',
+        output='screen',
+        condition=IfCondition(AndSubstitution(use_arm, moveit_transit)),
+    )
+    arm_scene_obstacles_node = Node(
+        package='home_robot',
+        executable='arm_scene_obstacles.py',
+        name='arm_scene_obstacles',
+        output='screen',
+        condition=IfCondition(AndSubstitution(use_arm, moveit_transit)),
     )
 
     # Forward RViz "2D Goal Pose" (/goal_pose) to the Nav2 action. Only useful
@@ -1412,6 +1478,7 @@ def generate_launch_description():
             default_value=PathJoinSubstitution([pkg, 'maps', 'malou2.yaml'])),
         DeclareLaunchArgument('use_camera',    default_value='true'),
         DeclareLaunchArgument('use_arm',       default_value='false'),
+        DeclareLaunchArgument('moveit_transit', default_value='false'),
         DeclareLaunchArgument('pick_drop_x',          default_value='0.15'),
         DeclareLaunchArgument('pick_drop_y',          default_value='-0.15'),
         DeclareLaunchArgument('pick_drop_z',          default_value='0.10'),
@@ -1556,6 +1623,10 @@ def generate_launch_description():
         tts_node,
         arm_node,
         pick_place_node,
+        moveit_robot_state_publisher,
+        move_group_node,
+        arm_moveit_bridge_node,
+        arm_scene_obstacles_node,
         goal_pose_bridge_node,
         joy_node,
         teleop_twist_joy_node,

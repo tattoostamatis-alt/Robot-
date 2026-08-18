@@ -76,6 +76,40 @@ arm_driver.py exposes no "motion complete" feedback (T:105 reports
 joint/EE pose, not a busy flag), so each step waits a fixed settle time
 instead of polling for arrival — generous by design until real timing is
 observed.
+
+MoveIt transit (param `moveit_transit_enabled`, 2026-08-15, NOT YET
+HW-VERIFIED — off by default):
+Routes the two BIG transit moves — the initial approach to hover_z from
+wherever the arm currently is, and the trip to the drop pose in
+_release_sequence — through MoveIt2 (pymoveit2) instead of a direct T:104
+jump, so they avoid the lidar/camera mast and the robot's own body
+(collision boxes from arm_scene_obstacles.py, same ones the manual "MoveIt"
+dashboard tab already uses). The servo/roll/descend/grasp sequence in
+between is UNCHANGED, direct cartesian — that part needs the tight
+closed-loop nudging MoveIt replanning would only slow down, and obstacle
+avoidance near the object itself isn't the concern there. Position-only
+goals (orientation left unconstrained) — a specific wrist angle is handled
+afterwards by the existing servo/roll logic once hovering.
+
+Needs move_group + arm_moveit_bridge.py running (bringup.launch.py starts
+both whenever use_arm:=true). On ANY failure — no move_group, planning
+failure, timeout — falls back to the direct _cartesian() move; a MoveIt
+hiccup must not strand a pick.
+
+‼️ Uses pymoveit2's plan_async()/execute()/get_execution_future(), NEVER
+its plan()/wait_until_executed() convenience methods — those call
+rclpy.spin_once() internally, and this all runs on the pick worker thread
+while main() already owns rclpy.spin(node). Two spinners on one node is
+the exact bug documented in project_robot_orchestration memory (also see
+task_planner_node.py's _await_future, which this mirrors).
+
+‼️ Frame equivalence, not a verified TF chain: MoveIt's own URDF tree
+(roarm_description) is NOT tf2-connected to the robot's tree (see
+arm_moveit.launch.py header, "cosmetic RViz warnings"). Targets are
+computed in ARM_FRAME (arm_base, this node's own tf2 path) and sent to
+MoveIt in its 'world' frame on the assumption that both represent the same
+physical arm-mount point, independently measured. If arm_base is ever
+re-measured, sanity-check MoveIt transit by hand before trusting it again.
 """
 
 import json
@@ -93,9 +127,29 @@ from tf2_geometry_msgs import do_transform_point
 from home_robot.servo_filter import median_point, spread, converged, hand_eye_correction
 from home_robot.stop_command import is_stop_command
 
+try:
+    from pymoveit2 import MoveIt2
+except ImportError:
+    MoveIt2 = None
+
 
 CAMERA_FRAME = 'camera_color_optical_frame'
 ARM_FRAME = 'arm_base'
+# MoveIt's own URDF tree (roarm_description/roarm_m3.xacro), used ONLY for the
+# collision-aware transit moves — see "MoveIt transit" in the module docstring.
+MOVEIT_JOINT_NAMES = ['base_link_to_link1', 'link1_to_link2', 'link2_to_link3',
+                      'link3_to_link4', 'link4_to_link5']
+MOVEIT_GROUP = 'hand'
+MOVEIT_EE_LINK = 'hand_tcp'
+# world_to_base_link is a fixed 0/0/0.0701 joint inside the arm's OWN tree
+# (roarm_m3.xacro) — 'world' there is the tree's root, meant to BE the arm
+# mount point, same physical spot as this node's own ARM_FRAME ('arm_base',
+# a static_transform_publisher off the robot's base_link). The two trees are
+# NOT tf2-connected (see arm_moveit.launch.py header, "cosmetic RViz
+# warnings") — this equivalence is a physical assumption, not a verified TF
+# chain. If arm_base is ever re-measured, sanity-check MoveIt transit targets
+# by hand before trusting it again.
+MOVEIT_FRAME = 'world'
 # Wrist-mounted AprilTag (id 1, config/apriltag.yaml) — see module docstring,
 # "Hand-eye correction".
 GRIPPER_TAG_FRAME = 'gripper_tag'
@@ -185,6 +239,28 @@ class PickPlaceNode(Node):
         self.gripper_tag_offset = (self.get_parameter('gripper_tag_offset_x').value,
                                    self.get_parameter('gripper_tag_offset_y').value,
                                    self.get_parameter('gripper_tag_offset_z').value)
+        # Off by default like the other new-and-unverified arm features above
+        # (grasp_orient_enabled, gripper_tag_enabled) — flip on only after a
+        # slow, watched first test. Needs move_group + arm_moveit_bridge.py
+        # running (bringup.launch.py starts them whenever use_arm:=true).
+        self.declare_parameter('moveit_transit_enabled', False)
+        self.moveit_transit_enabled = self.get_parameter('moveit_transit_enabled').value
+        self.declare_parameter('moveit_timeout', 15.0)
+        self.moveit_timeout = self.get_parameter('moveit_timeout').value
+        self.moveit2 = None
+        if self.moveit_transit_enabled:
+            if MoveIt2 is None:
+                self.get_logger().warn(
+                    'moveit_transit_enabled but pymoveit2 is not installed — '
+                    'falling back to direct cartesian transit only')
+            else:
+                self.moveit2 = MoveIt2(
+                    node=self,
+                    joint_names=MOVEIT_JOINT_NAMES,
+                    base_link_name=MOVEIT_FRAME,
+                    end_effector_name=MOVEIT_EE_LINK,
+                    group_name=MOVEIT_GROUP,
+                )
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -451,7 +527,8 @@ class PickPlaceNode(Node):
             self._abort_point()
             ax, ay = self._hand_eye_correct(ax, ay, hover_z)
         else:
-            self._cartesian(ax, ay, hover_z)
+            if not self.moveit_transit_enabled or not self._moveit_transit(ax, ay, hover_z):
+                self._cartesian(ax, ay, hover_z)
 
         # Closed-loop XY refinement while hovering (see module docstring).
         # servo_confident stays None (never downgrade the report) when servo
@@ -522,10 +599,74 @@ class PickPlaceNode(Node):
             self._say(f'Τακτοποίησα: {target["label"]}.')
             self._publish_result('ok', target['label'])
 
+    def _wait_future(self, future, timeout):
+        """Poll a future WITHOUT spinning — the main thread's rclpy.spin(node)
+        in main() already services the callbacks that complete it. This runs
+        on the pick worker thread; spinning here would attach a second
+        executor to the same node (see project_robot_orchestration memory —
+        the exact bug this avoids). Mirrors task_planner_node.py's
+        _await_future."""
+        deadline = time.monotonic() + timeout
+        while rclpy.ok() and not future.done():
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.02)
+        return future.done()
+
+    def _moveit_transit(self, x, y, z):
+        """Collision-aware transit to (x, y, z) in arm_base-equivalent
+        coordinates (see MOVEIT_FRAME above), routed through MoveIt2 so the
+        big transit moves (approach from wherever the arm currently is, and
+        the trip to the drop pose) avoid the lidar/camera mast and the
+        robot's own body (arm_scene_obstacles.py's collision boxes) — NOT
+        used for the fine servo/descend/grasp sequence, which stays direct
+        cartesian and unchanged.
+
+        Position-only goal (tolerance_orientation left wide open): getting
+        the gripper near the point without a collision is the job here, not
+        a specific wrist orientation — that is handled afterwards by the
+        existing servo/roll logic once hovering.
+
+        Returns True on a successful plan+execute. ANY failure (no
+        move_group, planning failure, timeout) returns False so the caller
+        falls back to the direct _cartesian() move — a MoveIt hiccup must
+        not strand a pick.
+        """
+        if self.moveit2 is None:
+            return False
+        plan_future = self.moveit2.plan_async(
+            position=(x, y, z), quat_xyzw=(0.0, 0.0, 0.0, 1.0),
+            frame_id=MOVEIT_FRAME, target_link=MOVEIT_EE_LINK,
+            tolerance_orientation=math.pi,
+        )
+        if plan_future is None or not self._wait_future(plan_future, self.moveit_timeout):
+            self.get_logger().warn('MoveIt transit: planning timed out — falling back')
+            return False
+        trajectory = self.moveit2.get_trajectory(plan_future)
+        if trajectory is None:
+            self.get_logger().warn('MoveIt transit: no plan found — falling back')
+            return False
+        self.moveit2.execute(trajectory)
+        deadline = time.monotonic() + self.moveit_timeout
+        exec_future = None
+        while time.monotonic() < deadline:
+            exec_future = self.moveit2.get_execution_future()
+            if exec_future is not None:
+                break
+            time.sleep(0.02)
+        if exec_future is None or not self._wait_future(exec_future, self.moveit_timeout):
+            self.get_logger().warn('MoveIt transit: execution timed out — falling back')
+            return False
+        if not self.moveit2.motion_suceeded:
+            self.get_logger().warn('MoveIt transit: execution failed — falling back')
+            return False
+        return True
+
     def _release_sequence(self, pose):
         """Move to `pose`, open the gripper to release, return to the init pose."""
         px, py, pz = pose
-        self._cartesian(px, py, pz)
+        if not self.moveit_transit_enabled or not self._moveit_transit(px, py, pz):
+            self._cartesian(px, py, pz)
         self._gripper(self.gripper_open)
         self._raw({'T': 100})  # back to init pose
         time.sleep(self.movement_settle_time)
