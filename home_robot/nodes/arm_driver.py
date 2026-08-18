@@ -148,6 +148,14 @@ class ArmDriver(Node):
     # Commands → arm
     # ------------------------------------------------------------------
     def _send_json(self, cmd: dict):
+        # _read_serial is the only place that calls _reopen(), on its own
+        # 20 Hz timer — a disconnect leaves self.ser None for up to that
+        # tick. _request_feedback fires at 10 Hz and hit this window for
+        # real 2026-08-14: 'NoneType' object has no attribute 'write' out of
+        # a timer callback took rclpy's spin down with it, same failure mode
+        # _read_serial was already hardened against (see its docstring).
+        if self.ser is None:
+            return
         line = (json.dumps(cmd) + '\n').encode('utf-8')
         try:
             with self._lock:
