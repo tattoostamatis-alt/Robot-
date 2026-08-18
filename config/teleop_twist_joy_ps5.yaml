@@ -31,10 +31,14 @@ teleop_twist_joy_node:
     # latches the robot stopped, Share+Options (8+9) together resets. Distinct
     # from R1 below — the e-stop is sticky and survives a controller dropout.
     #
-    # R1 must be held to drive at all — dead-man's switch so a dropped/idle
-    # controller can't send a stale nonzero twist.
+    # R1 dead-man's switch DISABLED (require_enable_button: false, 2026-08-16,
+    # user request) — left stick alone now drives, no button held. Trade-off:
+    # if the controller drops/idles while the stick is nonzero, there is no
+    # longer an automatic cutoff from THIS node — only joystick_estop_node's
+    # Circle e-stop remains as a safety stop, and that one is manual, not
+    # automatic-on-dropout.
     enable_button: 5
     # Hold L1 together with R1 for the turbo scale above.
     enable_turbo_button: 4
 
-    require_enable_button: true
+    require_enable_button: false
