@@ -330,16 +330,18 @@ def generate_launch_description():
         package='tf2_ros',
         executable='static_transform_publisher',
         name='tf_base_arm',
-        # Measured 2026-08-14 (user, tape): 100mm forward of the vacuum
-        # centre, centred left/right, first servo (base rotation pivot) at
-        # 180mm off the floor — the two higher servos (230mm) are downstream
-        # of that pivot in the arm's own kinematic chain, not part of this
-        # mount TF. Fully extended the arm reaches 780mm off the floor
-        # (reach reference, not a TF value). Old x=0.12/z=0.186 was a stale
-        # placeholder — identical x to the camera's old value, never actually
-        # measured for the arm.
-        arguments=['--x', '0.10', '--y', '0.0', '--z', '0.18',
-                   '--roll', '0', '--pitch', '0', '--yaw', '0',
+        # Eye-on-base hand-eye calibrated 2026-08-17 (easy_handeye2, D435 <->
+        # gripper_tag AprilTag, 12 samples across the reachable joint space —
+        # see handeye_calibrate.launch.py / scripts/apply_handeye_calibration.py).
+        # Replaces the 2026-08-14 tape-measured guess below: that one only
+        # measured translation (100mm forward of the vacuum centre, 180mm off
+        # the floor) and left rotation at identity since eyeballing mount
+        # rotation by hand isn't feasible — the calibrated quaternion is the
+        # first real rotation measurement this TF has ever had, hence the
+        # large swing from identity.
+        #   old: --x 0.10 --y 0.0 --z 0.18 --roll 0 --pitch 0 --yaw 0
+        arguments=['--x', '0.0428', '--y', '0.1516', '--z', '0.3244',
+                   '--qx', '0.2331', '--qy', '-0.3829', '--qz', '0.8732', '--qw', '0.1912',
                    '--frame-id', 'base_link', '--child-frame-id', 'arm_base'],
         condition=IfCondition(use_arm),
     )
