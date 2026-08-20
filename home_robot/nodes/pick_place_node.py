@@ -135,6 +135,17 @@ except ImportError:
 
 CAMERA_FRAME = 'camera_color_optical_frame'
 ARM_FRAME = 'arm_base'
+# ‼️ T:104 takes MILLIMETRES; every coordinate in this node is in METRES (tf2,
+# MoveIt and the *_x/_y/_z params are all SI). _cartesian() is the one place
+# the two meet, and it is the only place allowed to apply this. Confirmed on
+# the real arm 2026-08-19: T:105 feedback in the init pose reports
+# x=352.3 y=-2.2 z=199.3, which is millimetres — the RoArm-M3's init pose is
+# ~35 cm forward and ~20 cm up, not 352 metres.
+MM_PER_M = 1000.0
+# Smallest radius the firmware IK will accept, in mm. Anything closer to the
+# base than this is inside the arm's own shoulder and has no solution — see
+# _cartesian for why we refuse instead of forwarding it.
+MIN_IK_RADIUS_MM = 50.0
 # MoveIt's own URDF tree (roarm_description/roarm_m3.xacro), used ONLY for the
 # collision-aware transit moves — see "MoveIt transit" in the module docstring.
 MOVEIT_JOINT_NAMES = ['base_link_to_link1', 'link1_to_link2', 'link2_to_link3',
@@ -175,7 +186,18 @@ class PickPlaceNode(Node):
         self.declare_parameter('gripper_open', 1.2)        # rad — JOINT_LIMITS['hand'] is 1.08..3.14, lower = more open
         self.declare_parameter('gripper_closed', 3.0)
         self.declare_parameter('arm_speed', 0)             # passed through to T:104 "spd", 0 = firmware default
-        self.declare_parameter('movement_settle_time', 2.0)  # s — no completion feedback from arm_driver.py, see module docstring
+        # ‼️ Must exceed how long a move actually takes: T:104/T:100 are blocking
+        # on the arm side and the firmware DROPS anything that arrives while it
+        # is still executing — silently, with no error line. Traced on the real
+        # arm 2026-08-19, a 100 mm move takes ~4-5 s wall clock
+        # ((289,228)->(291,217)->(328,178)->(374,141)->(380,142) sampled at
+        # 4 Hz), so the old 2.0 s meant the second half of every grasp sequence
+        # was thrown away and the gripper closed wherever the first move
+        # happened to leave it. 6.0 s is that measurement plus margin.
+        # The real fix is to watch /arm/joint_states settle instead of sleeping
+        # a fixed time — possible now that feedback is reliable, see
+        # arm_driver._boot_firmware — but that is a bigger change than this.
+        self.declare_parameter('movement_settle_time', 6.0)
         self.declare_parameter('tf_timeout', 2.0)
         self.declare_parameter('max_reach', 0.52)          # m from arm_base — see _run_pick
         self.declare_parameter('open_vocab_hold', 3.0)     # s — ride out flickering open-vocab frames
@@ -288,6 +310,24 @@ class PickPlaceNode(Node):
         # finishing the step.
         self._cancel = threading.Event()
 
+        # Cooldown between pick SEQUENCES (not between the individual moves
+        # inside one — those already wait movement_settle_time each). Added
+        # 2026-08-19 when a full pick-and-drop appeared to precede the ESP32
+        # going silent twice in a row, on the theory that back-to-back bursts
+        # of T:104/T:106/T:100 were the trigger.
+        #
+        # ‼️ That theory turned out to be WRONG, later the same day: the board
+        # was being reset into its serial bootloader by DTR/RTS on every port
+        # open (see arm_driver._boot_firmware). Command rate had nothing to do
+        # with it — the board was afterwards stress-tested at 120 Hz for T:105
+        # and with 120 T:104 moves in 12 s, and survived both. So this cooldown
+        # is NOT load-shedding and should not be tuned as if it were; it now
+        # only serves its plain purpose of not re-triggering a pick while the
+        # previous one is still settling. It can probably go.
+        self.declare_parameter('min_pick_interval', 8.0)  # s since the last pick sequence ended
+        self.min_pick_interval = self.get_parameter('min_pick_interval').value
+        self._last_pick_end = 0.0
+
         self.create_subscription(String, 'detected_objects', self._on_detected_objects, 10)
         # ‼️ Without this the arm could only ever grasp the 80 COCO classes, and
         # anything the user names outside them ("η παντόφλα") died at
@@ -399,6 +439,12 @@ class PickPlaceNode(Node):
         threading.Thread(target=_run, daemon=True).start()
 
     def _wrapped(self, label, hold):
+        # See __init__'s min_pick_interval comment — space out consecutive
+        # command bursts rather than firing one right on the heels of the last.
+        wait = self.min_pick_interval - (time.monotonic() - self._last_pick_end)
+        if self._last_pick_end > 0.0 and wait > 0:
+            self.get_logger().info(f'Cooling down {wait:.1f}s before the next pick sequence')
+            time.sleep(wait)
         try:
             self._run_pick(label, hold)
         except _Cancelled:
@@ -407,6 +453,7 @@ class PickPlaceNode(Node):
             self._say('Σταμάτησα τον βραχίονα.')
             self._publish_result('cancelled', 'stopped by user')
         finally:
+            self._last_pick_end = time.monotonic()
             self._busy.release()
 
     def _abort_point(self):
@@ -843,7 +890,32 @@ class PickPlaceNode(Node):
         return point
 
     def _cartesian(self, x, y, z, settle=None, roll=0.0):
-        self._raw({'T': 104, 'x': x, 'y': y, 'z': z, 't': 0, 'r': roll, 'spd': self.arm_speed})
+        """Move to (x, y, z) — METRES in ARM_FRAME — via T:104.
+
+        ‼️ Converts to millimetres. This node had shipped the metre values
+        straight through, so a grasp target at a perfectly good (0.478, 0.003,
+        0.102) m went out as x=0.478 y=0.003 z=0.102 MILLIMETRES: a point half
+        a millimetre from the arm's own origin. That is not merely the wrong
+        place — measured on the real arm 2026-08-19, one such command wedged
+        the ESP32 outright (no more T:105 feedback, port still open, only a
+        power cycle of the arm board recovers it; arm_driver.py's watchdog
+        comment describes the same hang from 2026-08-10). So the unit bug was
+        both why the gripper always closed on empty air AND the source of the
+        "arm goes silent after a burst of commands" mystery.
+        """
+        mx, my, mz = x * MM_PER_M, y * MM_PER_M, z * MM_PER_M
+        # Refuse degenerate targets rather than letting the firmware hang on
+        # them — recovering costs a physical power cycle, so this guard is
+        # worth more than the move it drops.
+        radius = math.sqrt(mx * mx + my * my + mz * mz)
+        if radius < MIN_IK_RADIUS_MM:
+            self.get_logger().error(
+                f'Refusing T:104 to ({mx:.1f}, {my:.1f}, {mz:.1f}) mm — '
+                f'{radius:.1f} mm from the arm origin is inside the base and '
+                f'has hung the firmware before')
+            return
+        self._raw({'T': 104, 'x': mx, 'y': my, 'z': mz,
+                   't': 0, 'r': roll, 'spd': self.arm_speed})
         time.sleep(self.movement_settle_time if settle is None else settle)
 
     def _gripper(self, pos):

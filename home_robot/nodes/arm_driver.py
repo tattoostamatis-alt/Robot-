@@ -102,19 +102,30 @@ class ArmDriver(Node):
 
         self.declare_parameter('feedback_timeout', 3.0)
 
+        # Seconds to wait out the ESP32 boot banner after a reset — see
+        # _boot_firmware, which every port open now goes through.
+        self.declare_parameter('boot_settle', 2.0)
+        self._boot_settle = self.get_parameter('boot_settle').value
+
         self._port, self._baud = port, baud
         self.ser = serial.Serial(port, baud, timeout=0.1)
+        self._boot_firmware(self.ser)
         self._lock = threading.Lock()
         # Backoff for _reopen(); see _read_serial for why this exists at all.
         self._reopen_at = 0.0
         self._reopen_delay = 1.0
-        # Watchdog for a firmware-side hang: 2026-08-10 found the ESP32 can
-        # stop answering T:105 after a burst of commands while the USB link
-        # stays electrically alive (no OSError/SerialException ever fires —
-        # ser.in_waiting just reads 0 forever). Only a physical power-cycle
-        # of the arm board recovered it, confirmed via a real USB
-        # disconnect/reconnect in `journalctl -k`. Track last-good feedback
-        # so we can force the same reopen path in software instead.
+        # Watchdog for the ESP32 going silent: it stops answering T:105 while
+        # the USB link stays electrically alive (no OSError/SerialException
+        # ever fires — ser.in_waiting just reads 0 forever, and the kernel
+        # logs nothing). Track last-good feedback so we can force a reopen.
+        #
+        # 2026-08-19: the cause was found and it was ours — opening the port
+        # was resetting the board into its serial bootloader via DTR/RTS. See
+        # _boot_firmware, which every open now goes through. The 2026-08-10
+        # note here used to say only a physical power-cycle recovered it and
+        # blamed "a burst of commands"; both were wrong. This watchdog is now
+        # a real recovery path rather than a reopen loop that re-armed the
+        # same trap, so it should very rarely have anything to do.
         self._last_feedback_at = time.monotonic()
         self.get_logger().info(f'Arm connected on {port} @ {baud}')
 
@@ -239,11 +250,46 @@ class ArmDriver(Node):
         self._reopen_at = time.monotonic() + self._reopen_delay
         self._reopen_delay = min(self._reopen_delay * 2, 30.0)
 
+    def _boot_firmware(self, ser):
+        """Reset the ESP32 into its FIRMWARE, not its serial bootloader.
+
+        ‼️ This is why the arm kept "hanging". The RoArm-M3's CP2102N has its
+        DTR/RTS lines wired to the ESP32's auto-reset circuit (RTS->EN,
+        DTR->IO0), and pyserial asserts BOTH on open. Every port open is
+        therefore a reset with the boot-select line in play, and landing IO0
+        low at the moment EN releases boots the serial bootloader — which
+        answers nothing, forever, while the USB link stays perfectly healthy
+        and the kernel logs not one error. `_check_feedback_watchdog` then
+        reopened every ~3 s, each reopen another chance to re-arm the same
+        trap, so the driver could hold the board in the bootloader
+        indefinitely. That is the "only a physical power cycle recovers it"
+        note above: power-cycling worked because it reset the ESP32 while
+        nothing was driving those lines. Cycling USB power never did, because
+        re-enumeration is followed by another open.
+
+        Verified on the real arm 2026-08-19: a silent board (0 bytes to
+        {"T":105} on a raw pyserial probe) came straight back with this
+        sequence, printing "All bus servos status checked. / Server Starts."
+        and then streaming T:1051 again.
+        """
+        try:
+            ser.dtr = False          # IO0 HIGH -> run firmware, not bootloader
+            ser.rts = True           # EN LOW   -> hold in reset
+            time.sleep(0.15)
+            ser.rts = False          # EN HIGH  -> boot
+            # The banner + "All bus servos status checked" takes ~1.5 s; talking
+            # over it just loses the first commands.
+            time.sleep(self._boot_settle)
+            ser.reset_input_buffer()
+        except (OSError, serial.SerialException) as e:
+            self.get_logger().warn(f'Arm reset lines unavailable: {e!r}')
+
     def _reopen(self):
         if time.monotonic() < self._reopen_at:
             return
         try:
             self.ser = serial.Serial(self._port, self._baud, timeout=0.1)
+            self._boot_firmware(self.ser)
             self._reopen_delay = 1.0
             self._current_joints = None      # pose is unknown again after a drop
             self._last_feedback_at = time.monotonic()  # grace period for the watchdog
