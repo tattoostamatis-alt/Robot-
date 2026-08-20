@@ -76,18 +76,24 @@ TRANSLATIONS = {
     '👣 Ακολούθησέ με':  ('👣 Follow me', '👣 Folge mir'),
     '■ Σταμάτα να ακολουθείς': ('■ Stop following', '■ Nicht mehr folgen'),
     'Τα πράσινα πλαίσια είναι άνθρωποι, τα πορτοκαλί αντικείμενα· ο κίτρινος '
-    'σκελετός είναι 17 σημεία COCO. ‼️ Χρειάζονται τα perception nodes — ξεκίνα '
-    'με «robot max use_perception:=true», αλλιώς η εικόνα μένει καθαρή και ο '
-    'μετρητής στο 0. Το «Ακολούθησέ με» σταματά μόνο του μετά από 30 '
+    'σκελετός είναι 17 σημεία COCO. Κλικ πάνω σε ένα πορτοκαλί αντικείμενο '
+    'στέλνει τον βραχίονα να το πιάσει. ‼️ Χρειάζονται τα perception nodes — '
+    'ξεκίνα με «robot max use_perception:=true», αλλιώς η εικόνα μένει καθαρή '
+    'και ο μετρητής στο 0. Το «Ακολούθησέ με» σταματά μόνο του μετά από 30 '
     'δευτερόλεπτα.':
         ('Green boxes are people, orange ones objects; the yellow skeleton is 17 '
-         'COCO keypoints. ‼️ Needs the perception nodes — start with "robot max '
+         'COCO keypoints. Clicking an orange object sends the arm to pick it up. '
+         '‼️ Needs the perception nodes — start with "robot max '
          'use_perception:=true", otherwise the picture stays clean and the '
          'counter sits at 0. "Follow me" stops by itself after 30 seconds.',
          'Grüne Rahmen sind Menschen, orange sind Objekte; das gelbe Skelett '
-         'sind 17 COCO-Punkte. ‼️ Braucht die Perception-Nodes — starte mit '
+         'sind 17 COCO-Punkte. Klick auf ein orangenes Objekt schickt den Arm, '
+         'es zu greifen. ‼️ Braucht die Perception-Nodes — starte mit '
          '„robot max use_perception:=true", sonst bleibt das Bild sauber und '
          'der Zähler auf 0. „Folge mir" stoppt nach 30 Sekunden von selbst.'),
+
+    # ── camera pane: click-to-pick feedback ─────────────────────────────────
+    'Πάω να πιάσω: ':    ('Going to grab: ', 'Ich greife: '),
 
     # ── camera pane: on-demand Pose/AprilTag toggles ────────────────────────
     'Πρόσθετη αντίληψη': ('Additional perception', 'Zusätzliche Wahrnehmung'),

@@ -840,6 +840,9 @@ class DashboardNode(Node):
         self._arm_cmd_pub = self.create_publisher(JointState, '/arm/joint_cmd', 10)
         self._gripper_pub = self.create_publisher(Float32, '/arm/gripper_cmd', 10)
         self._arm_raw_pub = self.create_publisher(String, '/arm/raw_cmd', 10)
+        # Click-to-pick from the camera tab — see the 'pick' branch below and
+        # pick_place_node.py's pick_command subscription (label/hold JSON).
+        self._pick_pub = self.create_publisher(String, '/pick_command', 10)
         # The e-stop is latched on the driver's side, so ours must be too or a
         # driver that restarts comes up not knowing the stop is engaged.
         self._estop_pub = self.create_publisher(
@@ -3944,6 +3947,14 @@ class DashboardNode(Node):
             self._arm_apply_speed(msg.get('value'))
         elif t == 'arm_reset':
             self._arm_reset()
+        elif t == 'pick':
+            # Click-to-pick: the client hit-tests the click against the same
+            # detection boxes _draw_overlay burns into the frame (see the
+            # camera tab's click handler) and sends back just the label —
+            # pick_place_node re-detects it itself, this is only a trigger.
+            label = str(msg.get('label', '')).strip()
+            if label:
+                self._pick_pub.publish(String(data=json.dumps({'label': label})))
         elif t == 'mic_set':
             self._mic_apply(str(msg.get('key', '')), msg.get('value'))
         elif t == 'mic_reset':
@@ -5401,7 +5412,7 @@ button{font:inherit;color:inherit}
 .ovl{position:absolute;top:8px;left:10px;font-size:10px;color:#6b6b73;
   background:rgba(0,0,0,.55);padding:3px 8px;border-radius:5px;pointer-events:none}
 /* ── Camera ── */
-#cam{width:100%;height:100%;object-fit:contain;display:block;background:#0c0c0e}
+#cam{width:100%;height:100%;object-fit:contain;display:block;background:#0c0c0e;cursor:pointer}
 #cam-wrap{position:relative;flex:1;min-height:200px;background:#0c0c0e;
   border:1px solid var(--border);border-radius:12px;overflow:hidden;box-shadow:var(--shadow-card)}
 /* ── VNC ── */
@@ -5793,6 +5804,11 @@ button{font:inherit;color:inherit}
         <div class="ovl" id="cam-why" style="top:auto;bottom:8px;left:10px;
              right:10px;display:none;background:rgba(120,53,15,.85);
              color:#fbbf24;font-size:11.5px;line-height:1.5"></div>
+        <!-- Click-to-pick feedback — see the click handler on #cam. top-right,
+             opposite the "📷 RealSense" .ovl label (top-left) and above
+             cam-why (bottom-anchored), so none of the three ever collide. -->
+        <div class="ovl" id="cam-pick-msg" style="top:8px;left:auto;right:10px;
+             display:none;background:rgba(37,99,235,.85);color:#fff;font-size:11.5px"></div>
         <div id="cam-dpad">
           <div class="cdbtn ghost"></div><div class="cdbtn" id="cam-bf">▲</div><div class="cdbtn ghost"></div>
           <div class="cdbtn" id="cam-bl">◄</div><div class="cdbtn stop" id="cam-bstop">■</div><div class="cdbtn" id="cam-br">►</div>
@@ -5807,7 +5823,7 @@ button{font:inherit;color:inherit}
           <button class="btn warn" id="b-follow-stop">■ Σταμάτα να ακολουθείς</button>
         </div>
         <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
-          Τα πράσινα πλαίσια είναι άνθρωποι, τα πορτοκαλί αντικείμενα· ο κίτρινος σκελετός είναι 17 σημεία COCO. ‼️ Χρειάζονται τα perception nodes — ξεκίνα με «robot max use_perception:=true», αλλιώς η εικόνα μένει καθαρή και ο μετρητής στο 0. Το «Ακολούθησέ με» σταματά μόνο του μετά από 30 δευτερόλεπτα.
+          Τα πράσινα πλαίσια είναι άνθρωποι, τα πορτοκαλί αντικείμενα· ο κίτρινος σκελετός είναι 17 σημεία COCO. Κλικ πάνω σε ένα πορτοκαλί αντικείμενο στέλνει τον βραχίονα να το πιάσει. ‼️ Χρειάζονται τα perception nodes — ξεκίνα με «robot max use_perception:=true», αλλιώς η εικόνα μένει καθαρή και ο μετρητής στο 0. Το «Ακολούθησέ με» σταματά μόνο του μετά από 30 δευτερόλεπτα.
         </p>
       </div>
       <div class="card">
@@ -7879,7 +7895,16 @@ const HANDLERS = {
     $('room-badge').textContent = m.name||'—';
     $('ml-curroom').textContent = m.name||'—';
   },
-  objects(m){ $('objects').textContent = m.text || '—'; },
+  objects(m){
+    $('objects').textContent = m.text || '—';
+    // Kept for click-to-pick (see the #cam click handler) — same list
+    // _draw_overlay burns into the frame server-side, so hit-testing it
+    // client-side stays aligned with what's actually drawn on screen.
+    try {
+      const d = JSON.parse(m.text);
+      latestDetections = Array.isArray(d) ? d : [];
+    } catch(e) { latestDetections = []; }
+  },
   situation(m){ $('situation').textContent = m.text || '—'; },
   gesture(m){ gestureState = m; drawPointRing(); renderGestureBindings(); },
   vocab(m){ renderVocab(m); },
@@ -11504,6 +11529,58 @@ function camShowFrame(bytes){
   $('cam').src = url;
   if(old) URL.revokeObjectURL(old);
 }
+
+// ── click-to-pick ────────────────────────────────────────────────────────
+// latestDetections holds the SAME list _draw_overlay (web_dashboard_node.py)
+// burns into the JPEG as boxes — see the 'objects' handler above. Boxes are
+// in the DETECTOR's own frame size (d.img_w/img_h), which need not match the
+// JPEG actually on screen (object_detector.py and _cb_camera resize
+// independently). cam.naturalWidth/Height IS that JPEG's exact pixel size —
+// the blob is made straight from the bytes the server sent — so scaling
+// through it mirrors the server's own `sc()` and stays aligned even if
+// either resize changes.
+let latestDetections = [];
+function camPickAt(clientX, clientY){
+  const img = $('cam');
+  const nw = img.naturalWidth, nh = img.naturalHeight;
+  if(!nw || !nh || !latestDetections.length) return null;
+  const rect = img.getBoundingClientRect();
+  // object-fit:contain letterboxes: the bitmap sits centred in `rect`,
+  // scaled to the largest size that fits without cropping either axis.
+  const scale = Math.min(rect.width / nw, rect.height / nh);
+  const dispW = nw * scale, dispH = nh * scale;
+  const offX = rect.left + (rect.width - dispW) / 2;
+  const offY = rect.top + (rect.height - dispH) / 2;
+  const px = (clientX - offX) / scale, py = (clientY - offY) / scale;
+  if(px < 0 || py < 0 || px > nw || py > nh) return null;   // clicked a letterbox bar
+  let best = null, bestArea = Infinity;
+  for(const d of latestDetections){
+    if(!d || d.x1 === undefined || !d.label) continue;
+    const s = nw / (d.img_w || nw);
+    const x1 = d.x1*s, y1 = d.y1*s, x2 = d.x2*s, y2 = d.y2*s;
+    if(px < x1 || px > x2 || py < y1 || py > y2) continue;
+    // Smallest box under the click wins — a small object's box nested inside
+    // a bigger one's (a cup on a table) should win over the table.
+    const area = (x2-x1)*(y2-y1);
+    if(area < bestArea){ bestArea = area; best = d; }
+  }
+  return best;
+}
+let camPickMsgTimer = null;
+function camPickMsg(text){
+  const el = $('cam-pick-msg');
+  el.textContent = text;
+  el.style.display = 'block';
+  clearTimeout(camPickMsgTimer);
+  camPickMsgTimer = setTimeout(() => { el.style.display = 'none'; }, 3000);
+}
+$('cam').addEventListener('click', e => {
+  if(!camOn) return;
+  const d = camPickAt(e.clientX, e.clientY);
+  if(!d) return;
+  send({type:'pick', label:d.label});
+  camPickMsg(t('Πάω να πιάσω: ') + d.label);
+});
 
 // ── log tail ───────────────────────────────────────────────────────────────
 // Levels are rcl_interfaces/Log: 30 WARN, 40 ERROR, 50 FATAL. Auto-scroll is
