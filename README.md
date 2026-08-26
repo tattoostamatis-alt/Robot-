@@ -1,5 +1,9 @@
 # home_robot
 
+> Recovery guide: [`deploy/RECOVERY.md`](deploy/RECOVERY.md). The previous
+> Waveshare RoArm-M3 integration has been removed; a replacement arm is not
+> part of the current robot stack.
+
 A home tidying/assistant robot: a Roomba 692 base with a 360° LiDAR, a depth
 camera, an IMU, a robot arm and a mic array, running a full ROS 2 Jazzy
 autonomy + voice + LLM stack on an AMD Ryzen AI mini-PC.
@@ -16,7 +20,6 @@ autonomy + voice + LLM stack on an AMD Ryzen AI mini-PC.
 | SLAMTEC RPLiDAR C1 | 360° scan → `/scan` (arm box-filtered out of the plane) |
 | Intel RealSense D435 | depth for localization + RGB-D for object detection |
 | BNO085 IMU | orientation + yaw-rate for the EKF (mounted upside-down, gyro watchdog) |
-| Waveshare RoArm-M3 | 5-DoF arm for pick-and-place (MoveIt) |
 | reSpeaker XVF3800 | 6-ch mic array (ch4 = AEC'd ASR beam) for the voice stack |
 | AMD Ryzen AI (NPU + Radeon 860M iGPU) | Qwen3-VL/embeddings on NPU, YOLO on iGPU |
 
@@ -33,7 +36,6 @@ autonomy + voice + LLM stack on an AMD Ryzen AI mini-PC.
 - **Voice / LLM** — openWakeWord wake word ("Έι ρομπότ"), faster-whisper STT
   (Greek), edge-tts TTS, an LLM bridge to a local Qwen3-VL (Lemonade/NPU) with
   tool-calling, and a ChromaDB RAG long-term memory.
-- **Arm** — MoveIt 3D control + a detection-driven pick-and-place bridge.
 - **Teleop** — PS5 DualSense joystick, keyboard teleop.
 - **Orchestration** — task planner → mission executor → recovery manager.
 
@@ -50,14 +52,13 @@ cd ~/robot_ws && colcon build --packages-select home_robot --symlink-install && 
 | `slam_only.launch.py` | build a new map with slam_toolbox |
 | `view_map.launch.py` | inspect a saved map in RViz |
 | `sim.launch.py` | headless Gazebo Nav2 sim (no hardware) |
-| `arm_moveit.launch.py` | MoveIt 3D arm control |
 
 `use_obstacle_safety:=true` is required for the robot to move in localize mode
 (nothing relays `cmd_vel → cmd_vel_safe` otherwise).
 
 ## Web dashboard
 
-`robot max` serves the whole robot at `http://<host>:8080/?t=<token>` — the URL
+`robot max` serves the robot at `http://<host>:8080/?t=<token>` — the URL
 is printed at startup, and the token persists in `~/.home_robot/dashboard_token`
 so a phone bookmark keeps working. `use_dashboard:=false` skips it.
 
@@ -66,7 +67,6 @@ so a phone bookmark keeps working. `use_dashboard:=false` skips it.
 | Χάρτης | map, LiDAR, global plan, click-to-navigate, room buttons, teleop |
 | Κάμερα | D435 colour stream, YOLO detections, situational context |
 | RViz / MoveIt / Gazebo | the **real** Qt applications, streamed from VNC |
-| Βραχίονας | live joint feedback + sliders inside the measured limits, gripper |
 | Σκούπα | OI mode, bumper/cliff/wheel-drop, serial link age, docking |
 | Φωνή/LLM | transcript of what was heard and said; type to ask the LLM |
 | Σύστημα | CPU/RAM/temp and the live ROS node list |
@@ -113,7 +113,7 @@ Enable the first three together:
 
 ```bash
 ros2 launch home_robot localize.launch.py map:=kela3 \
-  use_obstacle_safety:=true use_perception:=true use_arm:=true   # use_arm only for pick
+  use_obstacle_safety:=true use_perception:=true
 ```
 
 ## Label-free object clustering (`perception_clusters`)
