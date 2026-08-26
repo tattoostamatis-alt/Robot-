@@ -95,6 +95,8 @@ def _launch_setup(context, *args, **kwargs):
         name='pose_saver_node',
         output='screen',
         parameters=[{'save_interval': 10.0, 'map_yaml': map_yaml,
+                     # Restore this map's last pose immediately. The global
+                     # localizer verifies it against the live scan below.
                      'restore_pose': False}],
     ))
 
@@ -105,9 +107,11 @@ def _launch_setup(context, *args, **kwargs):
         output='screen',
         parameters=[{
             'auto_localize': True,
+            # Always run the 360° LiDAR wall-match first; saved poses are
+            # still written, but they no longer override the scan search.
             'defer_to_saved_pose': False,
             'map_yaml': map_yaml,
-            'depth_weight': 0.5,
+            'depth_weight': 0.0,
         }],
     ))
 

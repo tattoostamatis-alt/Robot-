@@ -1,0 +1,1 @@
+/home/dimi/robot_ws/src/home_robot/scripts/derive_dock_pose.py

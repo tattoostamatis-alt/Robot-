@@ -1,6 +1,6 @@
 """One command to open a saved map and localize on it — no manual 2D Pose Estimate.
 
-Loads a saved map (default 'iphone_house') and brings up AMCL + pose_saver (restores
+Loads a saved map (default 'room4') and brings up AMCL + pose_saver (restores
 the last pose when available) + global_localizer (FFT scan-match only when
 no saved pose) + RViz, by including bringup.launch.py with the heavy
 AI/voice/camera stack switched off.
@@ -9,11 +9,12 @@ If the robot was moved since the last session, call:
   ros2 service call /localize_globally std_srvs/srv/Empty "{}"
 or delete ~/.ros/last_amcl_pose_<map>.yaml and relaunch.
 
-The LiDAR runs as a systemd service (ros-sllidar-c1.service) and is always up,
-so it is NOT started here. Wheel odometry + IMU + EKF (odom->base_link) and
-map_server + AMCL (map->odom) come from bringup.
+The LiDAR runs as the on-demand systemd service ros-sllidar-c1.service.  The
+`robot` wrapper starts it for `robot max` / `robot map` and stops it for
+`robot stop`, so it is NOT started again here. Wheel odometry + IMU + EKF
+(odom->base_link) and map_server + AMCL (map->odom) come from bringup.
 
-  ros2 launch home_robot localize.launch.py             # uses maps/iphone_house.yaml
+  ros2 launch home_robot localize.launch.py             # uses maps/room4.yaml
   ros2 launch home_robot localize.launch.py map:=home   # a different saved map
   ros2 launch home_robot localize.launch.py map:=/abs/path/to/my.yaml
 """
@@ -64,11 +65,15 @@ def _launch_setup(context, *args, **kwargs):
     # never start its first mapping run.
     map_yaml = '' if use_slam else _resolve_map(
         LaunchConfiguration('map').perform(context), share_dir)
+    map_name = (os.path.splitext(os.path.basename(map_yaml))[0]
+                if map_yaml else 'mapping')
     use_depth = LaunchConfiguration('use_depth_camera').perform(context).lower() in ('true', '1')
     use_joy = LaunchConfiguration('use_joy').perform(context).lower() in ('true', '1')
     # Inherited by the nested bringup (which starts arm_driver); read here too
     # so the right stick can jog the arm in localize mode as well.
-    use_arm = LaunchConfiguration('use_arm').perform(context).lower() in ('true', '1')
+    # No arm hardware is installed. Keep the legacy argument below harmless
+    # until a replacement model is integrated.
+    use_arm = False
     use_apriltag = LaunchConfiguration('use_apriltag').perform(context).lower() in ('true', '1')
     # A tag sighting publishes /initialpose, which is AMCL's input. Under SLAM
     # there is no AMCL to accept it and slam_toolbox is already producing
@@ -116,7 +121,9 @@ def _launch_setup(context, *args, **kwargs):
             'use_camera':          perc,      # detector on only with perception
             'use_tracker':         perc,      # track_id/velocity for prediction
             'use_prediction':      perc,      # /predicted_obstacles costmap layer
-            'use_semantic_costmap': perc,     # /semantic_obstacles costmap layer
+            # Disabled: synthetic semantic cylinders produced persistent false
+            # obstacles. LiDAR/prediction/cliff sources remain active.
+            'use_semantic_costmap': 'false',
             'use_object_memory':   perc,      # remembers where objects are (map frame)
             # ‼️ Same omission as use_pose/use_situational below: declared in
             # bringup, defaulting false, and never forwarded here — so no
@@ -194,6 +201,7 @@ def _launch_setup(context, *args, **kwargs):
             # also spawn one — our 'use_joy' arg is inherited into bringup
             # otherwise and would double-launch it with the wrong settings.
             'use_joy':             'false',
+            'moveit_transit':      LaunchConfiguration('moveit_transit', default='false'),
         }.items(),
     ))
 
@@ -261,7 +269,16 @@ def _launch_setup(context, *args, **kwargs):
             executable='teleop_node',
             name='teleop_twist_joy_node',
             parameters=[PathJoinSubstitution([pkg, 'config', 'teleop_twist_joy_ps5.yaml'])],
-            remappings=[('cmd_vel', 'cmd_vel_safe')],
+            # Raw joy autorepeats at 20 Hz, including zero while the sticks are
+            # idle. Sending that directly to cmd_vel_safe cuts between web
+            # D-pad commands. The gate below forwards motion plus one release
+            # STOP, and suppresses the remaining idle zeros.
+            remappings=[('cmd_vel', 'cmd_vel_joy_raw')],
+        ))
+        actions.append(Node(
+            package='home_robot',
+            executable='joy_cmd_gate_node.py',
+            name='joy_cmd_gate',
         ))
         # Sticky soft e-stop: Circle latches the robot stopped (roomba_driver
         # zeros the wheels + ignores cmd_vel), Share+Options together resets.
@@ -307,6 +324,11 @@ def _launch_setup(context, *args, **kwargs):
                 'tag_frame': 'saloni_tag',
                 'base_frame': 'base_link',
                 'map_frame': 'map',
+                # A map->tag calibration is meaningful for exactly one map.
+                # Reusing saloni_tag_map_pose.yaml after switching to room4
+                # could teleport AMCL into the old map's coordinate system.
+                'calib_file': os.path.expanduser(
+                    f'~/.ros/{map_name}_tag_map_pose.yaml'),
             }],
         ))
 
@@ -330,7 +352,7 @@ def _launch_setup(context, *args, **kwargs):
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
-            'map', default_value='iphone_house',
+            'map', default_value='room4',
             description='Saved map name (in maps/) or a full path to a .yaml'),
         DeclareLaunchArgument(
             'use_slam', default_value='false',
@@ -345,22 +367,31 @@ def generate_launch_description():
             description='Start the D435 depth stream so global_localizer fuses it '
                         'with the LiDAR (set false for LiDAR-only)'),
         DeclareLaunchArgument(
-            'use_joy', default_value='true',
+            'use_joy', default_value='false',
             description='Start PS5 DualSense teleop (R1 = dead-man, left stick) '
-                        'wired straight to cmd_vel_safe for localize mode'),
+                        'wired straight to cmd_vel_safe for localize mode. Off by '
+                        'default because its 20 Hz zero autorepeat fights Nav2; '
+                        'enable explicitly only for a manual-driving session.'),
         DeclareLaunchArgument(
             'use_arm', default_value='false',
             description='Start the RoArm-M3 (inherited by bringup) and, with '
                         'use_joy, the right-stick jog for it'),
         DeclareLaunchArgument(
+            'moveit_transit', default_value='false',
+            description='pick_place_node.py routes its big transit moves through '
+                        'MoveIt2 (collision-aware) instead of direct cartesian — '
+                        'see pick_place_node.py\'s module docstring. Forwarded '
+                        'explicitly below, not left to inheritance (see use_situational '
+                        'et al. for why that has bitten this file before).'),
+        DeclareLaunchArgument(
             'use_apriltag', default_value='true',
             description='Detect the saloni reference AprilTag off the D435 color '
                         'stream and relocalize from a sighting (needs use_depth_camera)'),
         DeclareLaunchArgument(
-            'use_obstacle_safety', default_value='false',
+            'use_obstacle_safety', default_value='true',
             description='Relay cmd_vel -> cmd_vel_safe through velocity_smoother + '
-                        'collision_monitor (needed for autonomous drive tests; teleop '
-                        'still bypasses via its direct cmd_vel_safe remap)'),
+                        'collision_monitor. Required for autonomous navigation: '
+                        'roomba_driver intentionally listens only to cmd_vel_safe.'),
         DeclareLaunchArgument(
             'use_recovery', default_value='true',
             description='Run recovery_manager_node: detects the robot physically '

@@ -77,6 +77,11 @@ def spin_drv(seconds=0.0):
 
 
 def _die_with_parent():
+    # Give each top-level subprocess its own process group.  ros2 launch keeps
+    # all of the nodes it spawns in that group, so cleanup can target this
+    # simulation only instead of using global pkill patterns that may match
+    # the real robot or another ROS domain.
+    os.setsid()
     try:
         import ctypes
         ctypes.CDLL('libc.so.6').prctl(1, 9, 0, 0, 0)
@@ -147,31 +152,18 @@ def ensure_display(verbose=False):
     return True
 
 
-def reap(verbose=False):
-    """Kill anything left over from an earlier sim run.
-
-    ‼️ gz ignores SIGTERM (see feedback_gazebo_orphan_clock): an orphaned
-    server keeps publishing /clock, and the next launch then sits forever
-    waiting for a simulation that is already running somewhere else.
-    """
-    # ‼️ The Nav2/home_robot nodes the launch starts are NOT children that die
-    # with it — three recovery_manager_node processes from earlier runs were
-    # found alive at once, each ~20% CPU, which is most of why a later run's
-    # map_server never finished configuring.
-    pats = ['ros2 launch home_robot sim.launch.py', 'gz sim', 'ruby.*gz',
-            _MISSION_MARK, 'parameter_bridge', 'fetch_sim_perception',
-            'recovery_manager_node', 'odom_tf_broadcaster', 'goal_pose_bridge',
-            'nav2_controller/controller_server', 'nav2_planner/planner_server',
-            'nav2_bt_navigator', 'nav2_amcl/amcl', 'nav2_map_server/map_server',
-            'nav2_lifecycle_manager', 'nav2_smoother', 'nav2_behaviors',
-            'nav2_velocity_smoother', 'nav2_collision_monitor',
-            'nav2_waypoint_follower', 'nav2_route', 'opennav_docking',
-            'robot_state_publisher']
-    for p in pats:
-        sh(f'pkill -9 -f "{p}"')
-    if verbose:
-        print('  (cleaned up any previous sim)')
-    time.sleep(2)
+def terminate_group(proc):
+    """Stop only ``proc`` and descendants in its private process group."""
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        proc.wait(timeout=3.0)
+    except subprocess.TimeoutExpired:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        proc.wait(timeout=3.0)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 # ── simulated perception + arm ───────────────────────────────────────────────
@@ -283,21 +275,29 @@ def run_perception(objects, ready_evt, stop_evt, shared):
     # ‼️ Its OWN executor. rclpy.spin_once(node) borrows a shared one, and with
     # the driver node spinning on the main thread at the same time both raise
     # "RuntimeError: Executor is already spinning" the moment they overlap.
-    from rclpy.executors import SingleThreadedExecutor
+    from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
     node = SimPerception()
     ex = SingleThreadedExecutor()
     ex.add_node(node)
     shared['perception'] = node
     ready_evt.set()
-    while not stop_evt.is_set():
-        ex.spin_once(timeout_sec=0.1)
+    try:
+        while not stop_evt.is_set():
+            ex.spin_once(timeout_sec=0.1)
+    except ExternalShutdownException:
+        pass
+    except Exception:
+        # SIGINT invalidates rclpy's context before the worker observes the
+        # stop event; suppress only that expected shutdown race.
+        if rclpy.ok():
+            raise
     ex.remove_node(node)
     node.destroy_node()
 
 
 # ── waiting for the stack ────────────────────────────────────────────────────
 
-def wait_for_nav(drv, rclpy, timeout=420.0):
+def wait_for_nav(drv, rclpy, start, timeout=420.0):
     """Block until the sim is actually usable, in the order things come up.
 
     ‼️ Gazebo takes far longer to start than sim.launch.py assumes. On this
@@ -379,8 +379,8 @@ def wait_for_nav(drv, rclpy, timeout=420.0):
     # — the same bug bit all three publishers on the real robot).
     msg = PoseWithCovarianceStamped()
     msg.header.frame_id = 'map'
-    msg.pose.pose.position.x = START[0]
-    msg.pose.pose.position.y = START[1]
+    msg.pose.pose.position.x = start[0]
+    msg.pose.pose.position.y = start[1]
     msg.pose.pose.orientation.w = 1.0
     msg.pose.covariance[0] = msg.pose.covariance[7] = 0.25
     msg.pose.covariance[35] = 0.07
@@ -439,25 +439,68 @@ def _has_tf(buf, rclpy):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--domain', default='77')
+    ap.add_argument('--world', default=str(WORLD),
+                    help='Gazebo world; its .objects.json supplies ground truth')
+    ap.add_argument('--map', dest='map_yaml', default=str(MAP_YAML),
+                    help='Nav2 occupancy-map YAML matching --world')
+    ap.add_argument('--start-room',
+                    help='starting pose from config/locations.yaml (e.g. saloni)')
+    ap.add_argument('--start-x', type=float)
+    ap.add_argument('--start-y', type=float)
+    ap.add_argument('--start-yaw', type=float, default=0.0)
     ap.add_argument('--object', action='append')
     ap.add_argument('--all', action='store_true')
+    ap.add_argument('--preload-memory', action='store_true',
+                    help='seed object memory from world ground truth; tests direct fetch routes')
     ap.add_argument('--gui', action='store_true', help='show Gazebo and RViz')
     ap.add_argument('--timeout', type=float, default=300.0)
     ap.add_argument('--keep-alive', action='store_true',
                     help='leave the sim running afterwards')
     args = ap.parse_args()
 
-    if not GROUND_TRUTH.exists():
-        print(f'{GROUND_TRUTH} missing — run:\n'
-              f'  scripts/map_to_world.py maps/malou2.yaml worlds/malou2.world\n'
-              f'  scripts/sim_place_objects.py maps/malou2.yaml worlds/malou2.world')
+    world = Path(args.world).expanduser().resolve()
+    map_yaml = Path(args.map_yaml).expanduser().resolve()
+    ground_truth = Path(str(world) + '.objects.json')
+    if not ground_truth.exists():
+        print(f'{ground_truth} missing — run:\n'
+              f'  scripts/map_to_world.py {map_yaml} {world}\n'
+              f'  scripts/sim_place_objects.py {map_yaml} {world}')
         return 2
-    objects = json.loads(GROUND_TRUTH.read_text())
+    raw_objects = json.loads(ground_truth.read_text())
+    # The mission normalises spoken Greek nouns to the detector's English
+    # matching key ("μπάλα" -> "ball", "κούπα" -> "cup").  Mirror that
+    # contract here; otherwise simulated perception can see an object but the
+    # mission quite correctly ignores the mismatched label.
+    from home_robot.vocabulary import to_prompt
+    objects = {}
+    for display_label, obj in raw_objects.items():
+        key = to_prompt(display_label) or display_label
+        obj = dict(obj)
+        obj['display_label'] = display_label
+        if args.preload_memory:
+            obj['seen'] = True
+        objects[key] = obj
+
+    start = START
+    if args.start_room:
+        import yaml
+        locations = yaml.safe_load((SRC / 'config' / 'locations.yaml').read_text()) or {}
+        loc = locations.get(args.start_room)
+        if not isinstance(loc, dict) or 'x' not in loc or 'y' not in loc:
+            print(f'unknown start room {args.start_room!r}; have {sorted(locations)}')
+            return 2
+        start = (float(loc['x']), float(loc['y']), float(loc.get('yaw', 0.0)))
+    elif args.start_x is not None or args.start_y is not None:
+        if args.start_x is None or args.start_y is None:
+            print('--start-x and --start-y must be supplied together')
+            return 2
+        start = (args.start_x, args.start_y, args.start_yaw)
 
     os.environ['ROS_DOMAIN_ID'] = str(args.domain)
     print(f'ROS_DOMAIN_ID={args.domain}  (the robot lives on 0 — untouched)')
 
-    wanted = args.object or (list(objects) if args.all else None)
+    wanted = ([to_prompt(label) or label for label in args.object]
+              if args.object else (list(objects) if args.all else None))
     if wanted is None:
         # Default: one object, and deliberately not the one in the starting
         # room — the point is to go to ANOTHER room and come back.
@@ -470,20 +513,23 @@ def main():
     print('The house:')
     for label, o in objects.items():
         mark = '←' if label in wanted else ' '
-        print(f'  {mark} {label:12s} in {o["room"]:20s} '
+        shown = o.get('display_label', label)
+        print(f'  {mark} {shown:12s} in {o["room"]:20s} '
               f'at ({o["x"]:6.2f}, {o["y"]:6.2f})')
-    print(f'Robot starts at saloni {START[:2]} and delivers back there.\n')
+    start_name = args.start_room or 'configured start'
+    print(f'Robot starts at {start_name} {start[:2]} and delivers back there.\n')
 
-    reap(verbose=True)
+    print('  cleanup is PID-scoped; other ROS domains/processes are untouched')
     if not ensure_display(verbose=True):
         return 3
 
     launch = [
         'ros2', 'launch', 'home_robot', 'sim.launch.py',
-        f'world:={WORLD}', f'map:={MAP_YAML}',
-        f'init_x:={START[0]}', f'init_y:={START[1]}', f'init_yaw:={START[2]}',
+        f'world:={world}', f'map:={map_yaml}',
+        f'init_x:={start[0]}', f'init_y:={start[1]}', f'init_yaw:={start[2]}',
         f'use_rviz:={"true" if args.gui else "false"}',
         f'headless:={"false" if args.gui else "true"}',
+        'use_camera:=false',
     ]
     print('starting Gazebo + Nav2 — the world load alone takes 2-3 minutes, '
           'be patient…')
@@ -517,9 +563,13 @@ def main():
             self.set_parameters([rclpy.parameter.Parameter(
                 'use_sim_time', rclpy.Parameter.Type.BOOL, True)])
             self.status, self.speech = [], []
+            self.recovery_status = []
             self.create_subscription(String, 'mission/status',
                                      lambda m: self.status.append(m.data), 10)
             self.create_subscription(String, 'speech_response', self._sp, 10)
+            self.create_subscription(
+                String, 'recovery/status',
+                lambda m: self.recovery_status.append(m.data), 10)
             self.start_pub = self.create_publisher(String, 'mission/start', 10)
 
         def _sp(self, m):
@@ -537,7 +587,7 @@ def main():
     results = {}
 
     try:
-        if not wait_for_nav(drv, rclpy):
+        if not wait_for_nav(drv, rclpy, start):
             print('\nNav2 never came up. Last 40 lines:')
             for l in sim_log[-40:]:
                 print('  ' + l)
@@ -555,6 +605,11 @@ def main():
         mission = subprocess.Popen(
             [sys.executable, str(exe), '--ros-args',
              '-p', 'use_sim_time:=true',
+             # Room4 props are placed exactly 0.5 m from their maximum-
+             # clearance room waypoints. Use that known-free point first;
+             # real hardware keeps its tuned current-side/0.4 m defaults.
+             '-p', 'fetch_approach_dist:=0.5',
+             '-p', 'fetch_prefer_room_origin:=true',
              '-p', 'inspect_settle:=1.0',
              '-p', 'pick_timeout:=15.0', '-p', 'place_timeout:=15.0'],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -602,7 +657,7 @@ def main():
             # to "where you asked me from" — after the first fetch the robot
             # is wherever it released the last object, so comparing to START
             # scored correct deliveries as failures.
-            ref = commanded_from or START[:2]
+            ref = commanded_from or start[:2]
             back = bool(places and math.hypot(places[0][2] - ref[0],
                                               places[0][3] - ref[1]) < 1.5)
             results[label] = {'verdict': verdict, 'picked': picked,
@@ -613,22 +668,27 @@ def main():
             for e in perception.events:
                 print(f'      · {e}')
             print()
-            time.sleep(3)
+            # A mission can finish after reaching delivery radius while a
+            # recovery thread from its last exact-pose goal is still winding
+            # down. Do not let that stale physical recovery overlap the next
+            # object in an --all batch.
+            settle_end = time.monotonic() + 30.0
+            while (drv.recovery_status
+                   and drv.recovery_status[-1] not in ('idle', 'recovered', 'failed')
+                   and time.monotonic() < settle_end):
+                spin_drv(0.2)
+            time.sleep(4)
     finally:
         if not args.keep_alive:
             stop.set()
             if perc_thread:
                 perc_thread.join(timeout=5)
             for p in (mission, sim):
-                if p:
-                    p.terminate()
-            time.sleep(2)
+                terminate_group(p)
             drv.destroy_node()
             rclpy.try_shutdown()
-            reap()
         else:
-            print('\n--keep-alive: sim still running. Clean up with:')
-            print('  pkill -9 -f "gz sim"; pkill -9 -f sim.launch.py')
+            print('\n--keep-alive requested; this process must stay alive to own the sim.')
 
     print('=' * 64)
     ok = 0

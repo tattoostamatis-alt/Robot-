@@ -29,6 +29,22 @@ _BAUD_MAP = {
 }
 
 
+def _pop_complete_line(buf: bytearray):
+    """Remove and return one newline-terminated record, preserving the rest.
+
+    Serial reads are chunks, not records: at the BNO085's ~110 Hz one read
+    commonly contains several IMU lines.  Returning the first and discarding
+    the tail silently reduced the ROS topic to roughly 10 Hz.
+    """
+    end = buf.find(b'\n')
+    if end < 0:
+        return None
+    end += 1
+    line = bytes(buf[:end])
+    del buf[:end]
+    return line
+
+
 def _open_raw_serial(port: str, baud: int) -> io.FileIO:
     """Open a serial port without any modem-status ioctls."""
     fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
@@ -62,6 +78,7 @@ class ImuNode(Node):
         self.imu_pub = self.create_publisher(Imu, 'imu/data', 10)
 
         self._fio: io.FileIO | None = None
+        self._rx_buf = bytearray()
         self._open_serial()
 
         self._stop = False
@@ -77,28 +94,28 @@ class ImuNode(Node):
         raw = _open_raw_serial(self.port, self.baud)
         self._fio = raw
         self._reader = io.BufferedReader(raw, buffer_size=4096)
+        self._rx_buf.clear()
         self.get_logger().info(f'Opened IMU serial on {self.port}')
 
     def _readline(self) -> bytes:
         """Read one \n-terminated line with a 1-second timeout via select."""
         import select
-        buf = b''
         deadline = time.monotonic() + 1.0
         fd = self._fio.fileno()
         while True:
+            line = _pop_complete_line(self._rx_buf)
+            if line is not None:
+                return line
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return buf  # timeout — return whatever we have
+                return b''  # keep any partial record for the next read
             ready, _, _ = select.select([fd], [], [], remaining)
             if not ready:
-                return buf
+                return b''
             chunk = os.read(fd, 256)
             if not chunk:
                 raise OSError('EOF on serial port')
-            buf += chunk
-            if b'\n' in buf:
-                line, _ = buf.split(b'\n', 1)
-                return line + b'\n'
+            self._rx_buf.extend(chunk)
 
     def _read_loop(self):
         while not self._stop:

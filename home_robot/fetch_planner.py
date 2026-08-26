@@ -9,6 +9,21 @@ arithmetic on plain numbers and dicts; the node handles TF, Nav2 and the arm.
 import math
 
 
+def approach_origin(target, locations, fallback_xy):
+    """Choose an accessible side from which to approach an object.
+
+    A robot in another room may have a wall on the direct line to the object.
+    Object memory records the containing room, whose navigation waypoint is a
+    known-safe indication of the accessible side.  Fall back to the live robot
+    position for detections without room metadata.
+    """
+    room = (target or {}).get('room')
+    pose = (locations or {}).get(room) if room else None
+    if isinstance(pose, dict) and 'x' in pose and 'y' in pose:
+        return float(pose['x']), float(pose['y'])
+    return float(fallback_xy[0]), float(fallback_xy[1])
+
+
 def approach_pose(robot_xy, obj_xy, dist=0.4):
     """Where to park to grasp the object at obj_xy.
 

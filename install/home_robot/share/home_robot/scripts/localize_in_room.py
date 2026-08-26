@@ -1,0 +1,1 @@
+/home/dimi/robot_ws/src/home_robot/scripts/localize_in_room.py

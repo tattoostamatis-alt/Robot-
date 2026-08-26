@@ -45,10 +45,16 @@ class ObstacleSafetyNode(Node):
         self.declare_parameter('safety_distance', 0.5)
         self.declare_parameter('center_fraction', 0.5)
         self.declare_parameter('detection_timeout', 2.0)
+        # The wrist/forearm is visible in the D435 image.  Its depth cluster is
+        # fixed in camera coordinates and YOLO intermittently calls it a phone.
+        # Mask only that small, measured self-volume; a broad pixel mask would
+        # also hide real floor obstacles.
+        self.declare_parameter('self_mask_enabled', True)
 
         self.safety_distance = self.get_parameter('safety_distance').value
         self.center_fraction = self.get_parameter('center_fraction').value
         self.detection_timeout = self.get_parameter('detection_timeout').value
+        self.self_mask_enabled = self.get_parameter('self_mask_enabled').value
 
         # These three were read once, here, and never again — so the web
         # dashboard's safety tab (and `ros2 param set`) could write a new
@@ -124,6 +130,20 @@ class ObstacleSafetyNode(Node):
             img_w = obj.get('img_w')
             x1, x2 = obj.get('x1'), obj.get('x2')
             if distance is None or img_w is None or x1 is None or x2 is None:
+                continue
+
+            # Measured live with the arm parked: x=-0.058, y=0.034, z=0.337 m
+            # (small frame-to-frame variation). Keep the bounds deliberately
+            # tight so an object just beyond or beside the arm still blocks.
+            px, py, pz = obj.get('x'), obj.get('y'), obj.get('z')
+            is_robot_arm = (
+                self.self_mask_enabled
+                and px is not None and py is not None and pz is not None
+                and -0.10 <= px <= -0.02
+                and 0.00 <= py <= 0.07
+                and 0.30 <= pz <= 0.38
+            )
+            if is_robot_arm:
                 continue
 
             center_margin = (1.0 - self.center_fraction) / 2.0

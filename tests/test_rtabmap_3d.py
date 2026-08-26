@@ -63,12 +63,14 @@ def test_the_reason_is_written_down_next_to_the_setting():
 
 # ── rule 2: never a second publisher of /map ────────────────────────────────
 
-def test_both_nodes_run_in_the_rtabmap_namespace():
+def test_rtabmap_publishers_run_in_the_rtabmap_namespace():
     """Bare, this node publishes /map — map_server's topic."""
     nodes = re.findall(r"Node\((.*?)\n        \)", _LAUNCH, re.S)
     assert nodes, 'no Node() blocks found — did the launch file change shape?'
     for n in nodes:
         pkg = re.search(r"package='([^']+)'", n)
+        if pkg and pkg.group(1) == 'tf2_ros':
+            continue  # the anchor only publishes TF, never /map
         assert "namespace='rtabmap'" in n, \
             f"{pkg.group(1) if pkg else '?'} is not namespaced — it would " \
             "publish /map, /global_path and /goal_out into the live graph"
@@ -77,7 +79,8 @@ def test_both_nodes_run_in_the_rtabmap_namespace():
 def test_the_subscriptions_are_absolute_so_the_namespace_cannot_hide_them():
     """Namespacing the node must not also namespace what it listens to, or it
     would sit waiting on /rtabmap/camera/... forever."""
-    for topic in ('/camera/camera/color/image_raw', '/scan', '/odom'):
+    for topic in ('/camera/camera/color/image_raw', '/scan',
+                  '/odometry/filtered'):
         assert f"'{topic}'" in _LAUNCH, f'{topic} is no longer remapped absolutely'
 
 

@@ -360,7 +360,10 @@ local_costmap:
         # catches those, and it does work (project_robot_bumper). `cliffs`
         # still marks drops — that source is the Roomba's own IR, not the
         # camera.
-        observation_sources: scan predicted_obstacles semantic_obstacles cliffs
+        # semantic_obstacles disabled: intermittent vision labels created
+        # synthetic cylinders that could seal otherwise-clear space. LiDAR,
+        # predicted motion and the Roomba cliff sensors remain active.
+        observation_sources: scan predicted_obstacles cliffs
         scan:
           topic: /scan
           max_obstacle_height: 2.0

@@ -83,7 +83,7 @@ SPECS = (
          lo=0.0, hi=500.0, step=10.0),
 
     # ── speech-to-text ────────────────────────────────────────────────────────
-    Spec('energy_thresh', 'double', 0.065,
+    Spec('energy_thresh', 'double', 0.030,
          (('/stt_node', 'energy_thresh'),),
          lo=0.010, hi=0.200, step=0.005, warn_below=0.015),
     Spec('use_hw_vad', 'bool', True,

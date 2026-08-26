@@ -84,7 +84,10 @@ def generate_launch_description():
     use_rviz = LaunchConfiguration('use_rviz')
     headless = LaunchConfiguration('headless')
 
-    robot_description = ParameterValue(Command(['xacro ', xacro_file]), value_type=str)
+    robot_description = ParameterValue(Command([
+        'xacro ', xacro_file, ' use_camera:=',
+        LaunchConfiguration('use_camera'),
+    ]), value_type=str)
 
     # ── Gazebo ───────────────────────────────────────────────────
     # headless:=true runs the server only (-s), for CI / display-less hosts.
@@ -259,6 +262,9 @@ def generate_launch_description():
         DeclareLaunchArgument('init_y', default_value=str(INIT_Y)),
         DeclareLaunchArgument('init_yaw', default_value=str(INIT_YAW)),
         DeclareLaunchArgument('use_rviz', default_value='true'),
+        DeclareLaunchArgument(
+            'use_camera', default_value='false',
+            description='enable the simulated RGB-D camera (costly in software rendering)'),
         DeclareLaunchArgument('headless', default_value='false',
                               description='run gz server only (no GUI) for display-less hosts'),
         DeclareLaunchArgument('render_engine', default_value='ogre',

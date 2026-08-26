@@ -1,0 +1,11 @@
+/home/dimi/robot_ws/src/home_robot/build/home_robot/CMakeFiles/uninstall.dir
+/home/dimi/robot_ws/src/home_robot/build/home_robot/CMakeFiles/home_robot_uninstall.dir
+/home/dimi/robot_ws/src/home_robot/build/home_robot/CMakeFiles/ament_cmake_python_symlink_home_robot.dir
+/home/dimi/robot_ws/src/home_robot/build/home_robot/CMakeFiles/ament_cmake_python_build_home_robot_egg.dir
+/home/dimi/robot_ws/src/home_robot/build/home_robot/CMakeFiles/test.dir
+/home/dimi/robot_ws/src/home_robot/build/home_robot/CMakeFiles/edit_cache.dir
+/home/dimi/robot_ws/src/home_robot/build/home_robot/CMakeFiles/rebuild_cache.dir
+/home/dimi/robot_ws/src/home_robot/build/home_robot/CMakeFiles/list_install_components.dir
+/home/dimi/robot_ws/src/home_robot/build/home_robot/CMakeFiles/install.dir
+/home/dimi/robot_ws/src/home_robot/build/home_robot/CMakeFiles/install/local.dir
+/home/dimi/robot_ws/src/home_robot/build/home_robot/CMakeFiles/install/strip.dir

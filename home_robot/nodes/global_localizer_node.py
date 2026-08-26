@@ -38,10 +38,10 @@ from sensor_msgs.msg import CameraInfo, Image, LaserScan
 from std_srvs.srv import Empty
 import tf2_ros
 
-COARSE_ANGLES = 36      # 10° step, full 360°
-FINE_HALF_DEG = 12.0    # ± degrees around each coarse peak
-FINE_STEPS    = 10      # steps within the fine window (≈2.4° each)
-N_CANDIDATES  = 5       # top coarse peaks to refine
+COARSE_ANGLES = 72      # 5° step, full 360°
+FINE_HALF_DEG = 18.0    # ± degrees around each coarse peak
+FINE_STEPS    = 15      # steps within the fine window (≈2.4° each)
+N_CANDIDATES  = 8       # top coarse peaks to refine
 LF_SIGMA_M    = 0.25    # Gaussian blur radius for likelihood field [m]
 
 
@@ -52,6 +52,18 @@ def _wrap(angle: float) -> float:
 
 def _quat(yaw: float) -> tuple[float, float]:
     return math.sin(yaw / 2), math.cos(yaw / 2)
+
+
+def _global_match_is_safe(blocked_fraction: float,
+                          max_blocked_fraction: float) -> bool:
+    """Whether a global hypothesis is trustworthy enough to move AMCL.
+
+    Endpoint fit alone produces convincing false matches in similarly-shaped
+    rooms.  A hypothesis that sees through too many occupied cells must never
+    be published: a wrong pose is less useful (and less safe) than no new pose.
+    """
+    return (math.isfinite(blocked_fraction)
+            and blocked_fraction <= max_blocked_fraction)
 
 
 def _pose_file_for(map_yaml: str) -> str:
@@ -157,6 +169,7 @@ class GlobalLocalizerNode(Node):
         self._lock    = threading.Lock()
         self._running = False
         self._ready_since: float | None = None   # when map+scan first both arrived
+        self._global_retries = 0
 
         self.declare_parameter('auto_localize', True)
         self.declare_parameter('map_yaml', '')
@@ -168,11 +181,11 @@ class GlobalLocalizerNode(Node):
         self.declare_parameter('verify_saved_pose', True)
         # Median scan->wall distance, metres. A correctly localized robot sits
         # well under 0.15 m; being in the wrong room puts it far above this.
-        self.declare_parameter('saved_pose_max_err', 0.30)
+        self.declare_parameter('saved_pose_max_err', 0.22)
         # How many distinct hypotheses to refine and compare. The FFT peak alone
         # is not trustworthy (see the candidate selection in _run), so more than
         # one has to be measured properly.
-        self.declare_parameter('refine_candidates', 4)
+        self.declare_parameter('refine_candidates', 8)
         # Two candidates count as the same place within this distance, so the
         # shortlist explores different rooms rather than one room five times.
         self.declare_parameter('candidate_min_separation', 0.8)   # m
@@ -182,11 +195,14 @@ class GlobalLocalizerNode(Node):
         # Metres of scan->wall error that a whole unit of blocked-beam fraction
         # is worth. At 1.0 a candidate with 30% of its beams passing through
         # walls must beat a clear one by 0.30 m of fit. 0 disables the check.
-        self.declare_parameter('blocked_weight', 1.0)
-        # Only used to warn: above this, even the winner is seeing through
-        # walls, which usually means the wrong map or moved furniture.
-        self.declare_parameter('max_blocked_fraction', 0.30)
-        self.declare_parameter('depth_weight',  0.5)   # 0 → LiDAR only
+        self.declare_parameter('blocked_weight', 1.5)
+        # Hard safety gate: above this, even the winner is seeing through
+        # walls, which means the global hypothesis is not trustworthy. Never
+        # teleport AMCL to it; leave the current pose alone and retry manually.
+        self.declare_parameter('max_blocked_fraction', 0.22)
+        self.declare_parameter('global_retry_attempts', 3)
+        self.declare_parameter('global_retry_delay', 1.0)
+        self.declare_parameter('depth_weight',  0.0)   # LiDAR does the alignment
         # On a random/cold start, briefly hold the auto-trigger until the D435
         # depth arrives so it joins the very first match (better disambiguation),
         # then fall back to LiDAR-only after depth_timeout if it never shows.
@@ -675,11 +691,30 @@ class GlobalLocalizerNode(Node):
             return (lx, ly, lyaw, 9.9) if quiet else (lx, ly, lyaw)
         median_err = self._wall_err_fn(lidar, map_msg)
 
-        best = (median_err(lx, ly, lyaw), lx, ly, lyaw)
+        standable = self._standable(map_msg)
+        info = map_msg.info
+
+        def can_stand(laser_x, laser_y, laser_yaw):
+            # Refinement operates in the laser frame, while collision checking
+            # must use the centre of base_link.  Without this gate a good,
+            # standable coarse candidate could be polished 20--40 cm into a
+            # wall.  AMCL would accept it, then Nav2 quite correctly refused
+            # every goal because the robot started in lethal cost.
+            base_x, base_y, _ = self._laser_to_base(
+                laser_x, laser_y, laser_yaw)
+            gx = int(round((base_x - info.origin.position.x) / info.resolution))
+            gy = int(round((base_y - info.origin.position.y) / info.resolution))
+            return (0 <= gx < info.width and 0 <= gy < info.height
+                    and bool(standable[gy, gx]))
+
+        seed_err = median_err(lx, ly, lyaw) if can_stand(lx, ly, lyaw) else 9.9
+        best = (seed_err, lx, ly, lyaw)
         for dx in np.arange(-span, span + 1e-9, step):
             for dy in np.arange(-span, span + 1e-9, step):
                 for dth in range(-ang, ang + 1):
                     yaw = lyaw + math.radians(dth)
+                    if not can_stand(lx + dx, ly + dy, yaw):
+                        continue
                     err = median_err(lx + dx, ly + dy, yaw)
                     if err < best[0]:
                         best = (err, lx + dx, ly + dy, yaw)
@@ -911,11 +946,25 @@ class GlobalLocalizerNode(Node):
                 '  with line-of-sight: ' + ', '.join(
                     f'({c[3]:.1f},{c[4]:.1f})={c[0]:.3f}'
                     f'[fit {c[1]:.3f} blk {c[2]*100:.0f}%]' for c in combined[:5]))
-            if combined[0][2] > self.get_parameter('max_blocked_fraction').value:
+            max_blocked = self.get_parameter('max_blocked_fraction').value
+            if not _global_match_is_safe(combined[0][2], max_blocked):
                 self.get_logger().warning(
                     f'  even the best pose has {combined[0][2]*100:.0f}% of beams '
                     'passing through walls — is this the right map, or has '
-                    'furniture moved?')
+                    'furniture moved? Refusing to publish this pose; the '
+                    'current AMCL position is unchanged.')
+                if self._global_retries < self.get_parameter(
+                        'global_retry_attempts').value:
+                    self._global_retries += 1
+                    delay = self.get_parameter('global_retry_delay').value
+                    self.get_logger().info(
+                        f'  retrying global localization in {delay:.1f}s '
+                        f'({self._global_retries}/'
+                        f'{self.get_parameter("global_retry_attempts").value})')
+                    retry = threading.Timer(delay, self._retry_global_search)
+                    retry.daemon = True
+                    retry.start()
+                return
             # ‼️ Hand _pick the COMBINED score. It tie-breaks anything within
             # prior_tie_margin by nearness to the last known pose, and on the
             # raw fit everything ties at 0.050 — so the prior would decide and
@@ -935,6 +984,7 @@ class GlobalLocalizerNode(Node):
                 f'scan->wall={best_score:.3f} m')
 
             self._publish(robot_x, robot_y, best_theta)
+            self._global_retries = 0
 
         except Exception as exc:
             import traceback
@@ -942,6 +992,13 @@ class GlobalLocalizerNode(Node):
             traceback.print_exc()
         finally:
             self._running = False
+
+    def _retry_global_search(self):
+        """Retry a rejected global match using a fresh LiDAR scan."""
+        with self._lock:
+            ready = self._map is not None and self._scan is not None
+        if ready and not self._running:
+            threading.Thread(target=self._run, daemon=True).start()
 
     def _publish(self, x: float, y: float, yaw: float, tight: bool = False):
         msg = PoseWithCovarianceStamped()

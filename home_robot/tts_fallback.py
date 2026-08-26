@@ -25,7 +25,7 @@ import numpy as np
 
 # Downloaded by scripts/, kept out of the ROS package data on purpose.
 DEFAULT_MODEL = os.path.expanduser(
-    '~/robot_ws/src/home_robot/config/models/piper/el_GR-rapunzelina-low.onnx')
+    '~/robot_ws/src/home_robot/config/models/piper/el_GR-joy-medium.onnx')
 
 
 class PiperFallback:

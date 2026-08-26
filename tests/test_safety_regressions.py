@@ -226,6 +226,24 @@ def test_close_object_in_centre_blocks_forward(safety):
     assert _drive_forward(safety).linear.x == 0.0
 
 
+def test_visible_robot_arm_is_not_treated_as_an_obstacle(safety):
+    """The parked forearm is in view and YOLO often mislabels it as a phone."""
+    det = ('[{"label":"cell phone","box_distance":0.344,"img_w":640,'
+           '"x1":182,"x2":256,"x":-0.058,"y":0.034,"z":0.337}]')
+    safety._detections_cb(_ns(data=det))
+    assert safety.obstacle_blocking is False
+    assert _drive_forward(safety).linear.x == pytest.approx(0.2)
+
+
+def test_real_obstacle_near_arm_image_region_still_blocks(safety):
+    """Only the measured 3-D self-volume is ignored, not its image pixels."""
+    det = ('[{"label":"bottle","box_distance":0.34,"img_w":640,'
+           '"x1":182,"x2":256,"x":-0.058,"y":0.034,"z":0.45}]')
+    safety._detections_cb(_ns(data=det))
+    assert safety.obstacle_blocking is True
+    assert _drive_forward(safety).linear.x == 0.0
+
+
 # ── recovery_manager_node ───────────────────────────────────────────────────
 
 @pytest.fixture
@@ -235,7 +253,9 @@ def recovery():
                                               time_allowance=None)),
                   DriveOnHeading=_ns(Goal=lambda: _ns(target=None, speed=0.0,
                                                       time_allowance=None)),
-                  NavigateToPose=_ns(Goal=lambda: _ns(pose=None)),
+                      NavigateToPose=_ns(
+                          Goal=lambda: _ns(pose=None),
+                          Impl=_ns(FeedbackMessage=object)),
                   Spin=_ns(Goal=lambda: _ns(target_yaw=0.0,
                                             time_allowance=None)))
     mods = {
@@ -261,9 +281,12 @@ def recovery():
                                     pose=None)),
         'nav_msgs': _mod('nav_msgs'),
         'nav_msgs.msg': _mod('nav_msgs.msg', Odometry=object, Path=object),
-        'nav2_msgs': _mod('nav2_msgs'),
-        'nav2_msgs.action': action,
-        'std_msgs': _mod('std_msgs'),
+            'nav2_msgs': _mod('nav2_msgs'),
+            'nav2_msgs.action': action,
+            'nav2_msgs.srv': _mod(
+                'nav2_msgs.srv',
+                ClearEntireCostmap=_ns(Request=lambda: _ns())),
+            'std_msgs': _mod('std_msgs'),
         'std_msgs.msg': _std_msgs(),
     }
     mod = _load(f'{PKG}/home_robot/nodes/recovery_manager_node.py', mods)
@@ -323,6 +346,92 @@ def test_reset_cmd_tracking_clears_the_window(recovery):
     node._reset_cmd_tracking()
     assert node._cmd_active is False
     assert node._cmd_active_since is None
+
+
+def test_rotation_in_place_counts_as_motion(recovery):
+    """A valid Nav2 initial turn must not be cancelled as a translation stall."""
+    _mod_rec, node = recovery
+    node._clock_ns = lambda: 6_000_000_000
+    node._cmd_active = True
+    node._cmd_active_since = 0.0
+    node._cmd_last_rx = 6.0
+    node._cmd_linear = 0.0
+    node._cmd_angular = 0.4
+    node._positions.extend([(0.0, 0.0, 0.0, 0.0),
+                            (6.0, 0.0, 0.0, 0.3)])
+    declared = []
+    node._declare_stuck = declared.append
+
+    node._check_stuck()
+
+    assert not declared
+    assert node._cmd_active_since == 6.0
+
+
+def test_rotation_command_without_yaw_is_stuck(recovery):
+    _mod_rec, node = recovery
+    node._clock_ns = lambda: 6_000_000_000
+    node._cmd_active = True
+    node._cmd_active_since = 0.0
+    node._cmd_last_rx = 6.0
+    node._cmd_linear = 0.0
+    node._cmd_angular = 0.4
+    node._positions.extend([(0.0, 0.0, 0.0, 0.0),
+                            (6.0, 0.0, 0.0, 0.0)])
+    declared = []
+    node._declare_stuck = declared.append
+
+    node._check_stuck()
+
+    assert declared and 'rotation=0.000rad' in declared[0]
+
+
+def test_tiny_goal_settling_command_does_not_trigger_recovery(recovery):
+    _mod_rec, node = recovery
+    node._clock_ns = lambda: 6_000_000_000
+    node._cmd_active = True
+    node._cmd_active_since = 0.0
+    node._cmd_last_rx = 6.0
+    node._cmd_linear = 0.015
+    node._cmd_angular = 0.04
+    node._positions.extend([(0.0, 0.0, 0.0, 0.0),
+                            (6.0, 0.0, 0.0, 0.0)])
+    declared = []
+    node._declare_stuck = declared.append
+
+    node._check_stuck()
+
+    assert not declared
+    assert node._cmd_active_since == 6.0
+
+
+def test_new_navigation_target_abandons_recovery_for_old_goal(recovery):
+    mod, node = recovery
+    old_pose = _ns(position=_ns(x=0.0, y=0.0))
+    node._last_goal = _ns(pose=old_pose)
+    node._status = mod.STATUS_RECOVERING
+    node._cancelled = False
+    msg = _ns(header=_ns(frame_id='map'), poses=[
+        _ns(pose=_ns(position=_ns(x=2.0, y=1.0)))])
+
+    node._on_plan(msg)
+
+    assert node._cancelled is True
+    assert node.pubs['cmd_vel_safe'].sent, 'stale recovery nudge was not stopped'
+
+
+def test_new_goal_id_abandons_recovery_even_when_planner_published_no_path(recovery):
+    mod, node = recovery
+    node._status = mod.STATUS_RECOVERING
+    node._nav_feedback_goal_id = b'old'
+    node._last_goal = None
+    msg = _ns(goal_id=_ns(uuid=list(b'new')),
+              feedback=_ns(number_of_recoveries=0))
+
+    node._on_nav_feedback(msg)
+
+    assert node._cancelled is True
+    assert node._nav_feedback_goal_id == b'new'
 
 
 # ── mission_executor_node ───────────────────────────────────────────────────

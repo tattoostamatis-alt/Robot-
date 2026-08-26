@@ -44,7 +44,7 @@ TURN_DEAD = 40
 TURN_MIN = 0.35
 TURN_MAX = 0.60
 DIST_MIN = 0.8
-DIST_MAX = 1.5
+DIST_MAX = 1.0
 SPEED = 0.15
 
 
@@ -70,6 +70,18 @@ def _person(centre, distance, img_w=IMG_W, width=80, label='person'):
             'img_w': img_w, 'img_h': 480, 'box_distance': distance}
 
 
+def _pose_person(anchor_x, box_centre=520):
+    return {
+        'x1': box_centre - 60, 'x2': box_centre + 60,
+        'keypoints': [
+            {'name': 'left_shoulder', 'x': anchor_x - 20, 'y': 180, 'v': 0.9},
+            {'name': 'right_shoulder', 'x': anchor_x + 20, 'y': 180, 'v': 0.9},
+            {'name': 'left_hip', 'x': anchor_x - 15, 'y': 280, 'v': 0.9},
+            {'name': 'right_hip', 'x': anchor_x + 15, 'y': 280, 'v': 0.9},
+        ],
+    }
+
+
 @pytest.fixture
 def node():
     """_pick_person/_turn_for/_control lifted onto a bare class.
@@ -80,7 +92,8 @@ def node():
     """
     src = open(NODE).read()
     body = ''
-    for name in ('_pick_person', '_turn_for', '_control'):
+    for name in ('_pose_anchor', '_pick_pose_person', '_apply_pose_centre',
+                 '_pick_person', '_turn_for', '_control'):
         match = re.search(rf'\n    (?:@staticmethod\n    )?def {name}\(.*?\n(?=    (?:[@#]|def |-))',
                           src, re.S)
         assert match, f'{name} not found — was it renamed?'
@@ -91,6 +104,7 @@ def node():
     stub._turn_gain, stub._turn_dead = TURN_GAIN, TURN_DEAD
     stub._turn_min, stub._turn_max = TURN_MIN, TURN_MAX
     stub._dist_min, stub._dist_max, stub._speed = DIST_MIN, DIST_MAX, SPEED
+    stub._forward_turn_gate = 90
     stub._cmd_pub = _Pub()
     stub.get_logger = lambda: type('L', (), {
         'debug': lambda *a, **k: None, 'info': lambda *a, **k: None,
@@ -161,8 +175,7 @@ def test_the_robot_converges_on_the_person_and_stops_turning(live):
 
 
 def test_losing_the_person_stops_the_robot(live):
-    """A lost target used to keep the last bearing, and therefore the last turn
-    rate, indefinitely."""
+    """After the bounded reacquisition window, a lost target is fully stopped."""
     _frame(live, [_person(600, 1.2)])
     live._last_seen -= 10.0                       # person out of view, timeout passed
     twist = _frame(live, [])
@@ -171,13 +184,21 @@ def test_losing_the_person_stops_the_robot(live):
 
 
 def test_an_empty_frame_never_produces_motion(live):
-    """Stronger version of the above: with nothing detected, at no point may a
-    non-zero command be published, however long the follow runs."""
+    """A centred disappearance has no safe side to search, so it stays stopped."""
     for _ in range(30):
         twist = _frame(live, [])
         if twist is not None:
             assert twist.angular.z == 0.0 and twist.linear.x == 0.0
         live._last_seen -= 0.5
+
+
+def test_camera_edge_loss_turns_in_place_toward_the_last_seen_side(live):
+    """Reacquisition may rotate, but it must never drive forwards blind."""
+    _frame(live, [_person(600, 1.2)])
+    live._last_seen -= live._lost_after + 0.1
+    twist = _frame(live, [])
+    assert twist.linear.x == 0.0
+    assert twist.angular.z < 0.0, 'person left at the right edge; search must turn right'
 
 
 def test_a_person_walking_away_is_followed(live):
@@ -187,6 +208,14 @@ def test_a_person_walking_away_is_followed(live):
     assert twist.linear.x > 0, 'did not set off after a distant person'
     twist = _frame(live, [_person(CENTRE, (DIST_MIN + DIST_MAX) / 2)])
     assert twist.linear.x == 0.0, 'did not stop once in range'
+
+
+def test_far_off_centre_target_turns_before_driving(live):
+    """With the camera pitched down, forward+turn loses the upper body at the
+    image edge. The robot must centre the person first, then advance."""
+    twist = _frame(live, [_person(600, 3.0)])
+    assert twist.angular.z != 0.0
+    assert twist.linear.x == 0.0
 
 
 def test_following_expires_and_stops(live):
@@ -245,6 +274,13 @@ def test_the_robot_stops_turning_once_centred(node):
     assert node._turn_for(CENTRE, IMG_W) == 0.0
     assert node._turn_for(CENTRE + TURN_DEAD, IMG_W) == 0.0
     assert node._turn_for(CENTRE - TURN_DEAD, IMG_W) == 0.0
+
+
+def test_pose_anchor_prefers_upper_body_not_box_middle(node):
+    pose_centre = node._pick_pose_person([_pose_person(360, box_centre=520)], 520)
+    found = node._pick_person([_person(520, 1.2)], 520)
+    merged = node._apply_pose_centre(found, pose_centre)
+    assert merged[0] == pytest.approx(360.0)
 
 
 def test_the_controller_is_fed_the_detected_bearing_not_the_seed():
@@ -343,11 +379,18 @@ def test_in_range_holds(node):
     assert node._cmd_pub.sent[-1].linear.x == 0.0
 
 
-def test_turns_while_closing_the_distance(node):
-    """Both axes at once — the old node only ever set linear.x."""
-    node._control(3.0, 620, IMG_W)
+def test_small_bearing_error_can_turn_while_closing_the_distance(node):
+    """Once mostly centred, the robot may advance and trim the heading."""
+    node._control(3.0, CENTRE + node._forward_turn_gate - 10, IMG_W)
     twist = node._cmd_pub.sent[-1]
     assert twist.linear.x == pytest.approx(SPEED)
+    assert twist.angular.z != 0.0
+
+
+def test_large_bearing_error_turns_before_driving(node):
+    node._control(3.0, 620, IMG_W)
+    twist = node._cmd_pub.sent[-1]
+    assert twist.linear.x == 0.0
     assert twist.angular.z != 0.0
 
 

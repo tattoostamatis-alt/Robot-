@@ -55,7 +55,7 @@ from std_srvs.srv import Empty
 
 from home_robot import dock_geometry
 from home_robot.sort_planner import SortProgress, SortRules, plan_order
-from home_robot.fetch_planner import (approach_pose, memory_target,
+from home_robot.fetch_planner import (approach_origin, approach_pose, memory_target,
                                       nearest_detection, homing_twist,
                                       is_stale_repeat)
 from home_robot.status_query import ROOM_NAMES_EL, rooms_from_locations
@@ -113,6 +113,7 @@ class MissionExecutorNode(Node):
 
         # fetch tuning
         self.declare_parameter('fetch_approach_dist', 0.4)   # m — park this short of the object
+        self.declare_parameter('fetch_prefer_room_origin', False)
         self.declare_parameter('fetch_grasp_range', 1.0)     # m — object must be within this to grasp
         self.declare_parameter('memory_max_age', 300.0)      # s — older object-memory hits are re-verified live
         self.declare_parameter('pick_timeout', 40.0)         # s — wait for the arm to report
@@ -144,6 +145,8 @@ class MissionExecutorNode(Node):
         # Delivery: 'start_pose' returns to where the command was given; 'follow'
         # then homes in on the user's *current* position (they may have moved).
         self.declare_parameter('delivery_mode', 'start_pose')
+        self.declare_parameter('delivery_nav_retries', 1)
+        self.declare_parameter('delivery_retry_settle', 3.0)
         self.declare_parameter('deliver_distance', 0.8)      # m — how close to get to the user
         self.declare_parameter('homing_timeout', 25.0)       # s — give up homing, place anyway
         self.declare_parameter('search_speed', 0.4)          # rad/s — rotate to find the user
@@ -161,6 +164,8 @@ class MissionExecutorNode(Node):
         self.declare_parameter('sort_max_attempts', 2)   # per object, then give up
         self.declare_parameter('sort_max_reach', 6.0)    # m — leave the far side for later
         self._fetch_approach_dist = self.get_parameter('fetch_approach_dist').value
+        self._fetch_prefer_room_origin = bool(
+            self.get_parameter('fetch_prefer_room_origin').value)
         self._fetch_grasp_range   = self.get_parameter('fetch_grasp_range').value
         self._memory_max_age      = self.get_parameter('memory_max_age').value
         self._pick_timeout        = self.get_parameter('pick_timeout').value
@@ -168,6 +173,10 @@ class MissionExecutorNode(Node):
         self._fetch_max_retries   = self.get_parameter('fetch_max_retries').value
         self._inspect_settle      = self.get_parameter('inspect_settle').value
         self._delivery_mode       = self.get_parameter('delivery_mode').value
+        self._delivery_nav_retries = int(
+            self.get_parameter('delivery_nav_retries').value)
+        self._delivery_retry_settle = float(
+            self.get_parameter('delivery_retry_settle').value)
         self._deliver_distance    = self.get_parameter('deliver_distance').value
         self._homing_timeout      = self.get_parameter('homing_timeout').value
         self._search_speed        = self.get_parameter('search_speed').value
@@ -518,7 +527,8 @@ class MissionExecutorNode(Node):
 
         # Park short of it and face it, exactly as fetch does — driving at the
         # remembered point itself would end with the object under the bumper.
-        ax, ay, yaw = approach_pose((rob[0], rob[1]), (target['x'], target['y']),
+        origin = approach_origin(target, self._locations, (rob[0], rob[1]))
+        ax, ay, yaw = approach_pose(origin, (target['x'], target['y']),
                                     dist=self._fetch_approach_dist)
         room = target.get('room')
         where = f' στο {LOCATION_NAMES_EL.get(room, room)}' if room else ''
@@ -598,15 +608,46 @@ class MissionExecutorNode(Node):
         searched = False      # room-by-room fallback already used once
         reached = False       # did we ever actually get to the object?
         attempt = 0
+        # First approach from the side the robot is actually arriving from.
+        # If Nav2 cannot use that side (typically a wall between rooms), the
+        # retry uses the containing room's known-safe waypoint as its origin.
+        # A fixed side is not robust: in Room4 it either put the book behind a
+        # wall or asked the base to cross through the ball to reach the goal.
+        use_room_origin = self._fetch_prefer_room_origin
         while attempt <= self._fetch_max_retries and not self._cancel_flag.is_set():
             attempt += 1
             rob = self._lookup_base_pose() or (target['x'] - 1.0, target['y'], 0.0)
-            ax, ay, yaw = approach_pose((rob[0], rob[1]), (target['x'], target['y']),
+            origin = (approach_origin(target, self._locations, (rob[0], rob[1]))
+                      if use_room_origin else (rob[0], rob[1]))
+            ax, ay, yaw = approach_pose(origin, (target['x'], target['y']),
                                         self._fetch_approach_dist)
             if not self._navigate_to_xy(ax, ay, yaw):
                 reached = False
+                use_room_origin = True
+                if (attempt <= self._fetch_max_retries
+                        and not self._cancel_flag.is_set()):
+                    # recovery_manager cancels the owner goal in order to run
+                    # its physical backup/nudge.  An immediate second approach
+                    # supersedes that recovery before it moves the robot; give
+                    # it the same settling window used by delivery retries.
+                    time.sleep(self._delivery_retry_settle)
                 continue
             reached = True
+
+            # Nav2 may stop anywhere inside its XY goal tolerance.  The yaw
+            # above faces the object from the *ideal* approach point, so an
+            # offset final position can leave a small object outside the
+            # camera FOV (Room4 ball: 24 cm lateral offset -> 41 degrees).
+            # Recompute from the pose we actually reached and rotate in place
+            # before trusting a negative visual check.
+            arrived = self._lookup_base_pose()
+            if arrived is not None:
+                face_yaw = math.atan2(target['y'] - arrived[1],
+                                      target['x'] - arrived[0])
+                yaw_error = math.atan2(math.sin(face_yaw - arrived[2]),
+                                       math.cos(face_yaw - arrived[2]))
+                if abs(yaw_error) > 0.15:
+                    self._navigate_to_xy(arrived[0], arrived[1], face_yaw)
 
             self._set_state(State.INSPECTING)
             time.sleep(self._inspect_settle)
@@ -616,6 +657,7 @@ class MissionExecutorNode(Node):
                 if self._do_pick(label, hold=True):
                     picked = True
                     break
+                use_room_origin = True
                 continue
 
             # Not here. Note the dud, then ask memory for something better.
@@ -657,12 +699,34 @@ class MissionExecutorNode(Node):
 
         # 5. carry back to the user (skip the drive if cancelled, but still
         #    release below so the arm isn't left holding the object)
+        delivered = True
         if not self._cancel_flag.is_set():
             self._set_state(State.NAVIGATING)
             self._speak(f'Σου φέρνω {label_acc}.')
             if start_pose is not None:
-                self._navigate_to_xy(*start_pose)      # Nav2 to the area
-            if self._delivery_mode == 'follow':
+                here = self._lookup_base_pose()
+                delivered = bool(
+                    here and math.hypot(here[0] - start_pose[0],
+                                        here[1] - start_pose[1]) <= self._deliver_distance)
+                if not delivered:
+                    for nav_try in range(self._delivery_nav_retries + 1):
+                        nav_ok = self._navigate_to_xy(*start_pose)
+                        here = self._lookup_base_pose()
+                        close_enough = bool(
+                            here and math.hypot(here[0] - start_pose[0],
+                                                here[1] - start_pose[1])
+                            <= self._deliver_distance)
+                        if nav_ok or close_enough:
+                            delivered = True
+                            break
+                        if (nav_try < self._delivery_nav_retries
+                                and not self._cancel_flag.is_set()):
+                            # A physical-stuck recovery cancels NavigateToPose
+                            # to back up/nudge. Give it time to move, then issue
+                            # a new goal instead of dropping the object where
+                            # it was picked and falsely declaring DONE.
+                            time.sleep(self._delivery_retry_settle)
+            if delivered and self._delivery_mode == 'follow':
                 self._home_in_on_person()              # close onto the user now
 
         # 6. DELIVER — release the object
@@ -670,6 +734,9 @@ class MissionExecutorNode(Node):
 
         if self._cancel_flag.is_set():
             self._finish(State.CANCELLED, f'Ακυρώθηκε — άφησα {label_acc}.')
+        elif not delivered:
+            self._finish(State.FAILED,
+                         f'Πήρα {label_acc}, αλλά δεν μπόρεσα να επιστρέψω.')
         else:
             self._finish(State.DONE, f'Ορίστε {label_acc}.')
 
@@ -1043,7 +1110,8 @@ class MissionExecutorNode(Node):
 
         here = self._lookup_base_pose()
         robot_xy = (here[0], here[1]) if here else (0.0, 0.0)
-        ax, ay, ayaw = approach_pose(robot_xy, (target['x'], target['y']),
+        origin = approach_origin(target, self._locations, robot_xy)
+        ax, ay, ayaw = approach_pose(origin, (target['x'], target['y']),
                                      dist=self._fetch_approach_dist)
         if not self._navigate_to_xy(ax, ay, ayaw):
             return False

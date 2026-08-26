@@ -26,7 +26,7 @@ Three poses come out of this, and they are different things:
   it. IR homing takes over from there.
 
 That last one is the crux. The corridor into the base measures 0.05-0.16 m of
-clearance while the robot's inscribed radius is 0.17 m and Nav2's inflation is
+clearance while the robot's inscribed radius is 0.175 m and Nav2's inflation is
 0.30 m, so Nav2 cannot plan the final approach even in principle. It does not
 need to: the robot fits, and `ir_homing` drives it in on the dock's own beams
 with the costmap out of the loop.
@@ -34,9 +34,10 @@ with the costmap out of the loop.
 import math
 
 # Distance from the wall plane (where the tag is) out to the robot's centre
-# when it is parked on the base: the Roomba's 0.17 m inscribed radius plus the
-# depth the Home Base's ramp holds it off the wall.
-DEFAULT_SEAT_OFFSET = 0.28
+# when it is parked on the base: the Roomba's 0.175 m inscribed radius (chassis
+# re-measured Ø0.35 on 2026-07-31) plus the depth the Home Base's ramp holds it
+# off the wall.
+DEFAULT_SEAT_OFFSET = 0.285
 
 # Nav2 will not plan into anything tighter than its inflation radius, so a
 # staging pose below this is one the robot will never be given.

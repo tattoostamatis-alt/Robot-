@@ -1,0 +1,116 @@
+[0.147s] colcon DEBUG Command line arguments: ['/usr/bin/colcon', 'build', '--packages-select', 'home_robot', '--symlink-install']
+[0.147s] colcon DEBUG Parsed command line arguments: Namespace(log_base=None, log_level=None, verb_name='build', build_base='build', install_base='install', merge_install=False, symlink_install=True, test_result_base=None, continue_on_error=False, executor='parallel', parallel_workers=16, event_handlers=None, ignore_user_meta=False, metas=['./colcon.meta'], base_paths=['.'], packages_ignore=None, packages_ignore_regex=None, paths=None, packages_up_to=None, packages_up_to_regex=None, packages_above=None, packages_above_and_dependencies=None, packages_above_depth=None, packages_select_by_dep=None, packages_skip_by_dep=None, packages_skip_up_to=None, packages_select_build_failed=False, packages_skip_build_finished=False, packages_select_test_failures=False, packages_skip_test_passed=False, packages_select=['home_robot'], packages_skip=None, packages_select_regex=None, packages_skip_regex=None, packages_start=None, packages_end=None, allow_overriding=[], cmake_args=None, cmake_target=None, cmake_target_skip_unavailable=False, cmake_clean_cache=False, cmake_clean_first=False, cmake_force_configure=False, ament_cmake_args=None, catkin_cmake_args=None, catkin_skip_building_tests=False, verb_parser=<colcon_defaults.argument_parser.defaults.DefaultArgumentsDecorator object at 0x7552d4386510>, verb_extension=<colcon_core.verb.build.BuildVerb object at 0x7552d43863f0>, main=<bound method BuildVerb.main of <colcon_core.verb.build.BuildVerb object at 0x7552d43863f0>>)
+[0.196s] colcon.colcon_core.package_discovery Level 1 discover_packages(colcon_meta) check parameters
+[0.196s] colcon.colcon_core.package_discovery Level 1 discover_packages(recursive) check parameters
+[0.196s] colcon.colcon_core.package_discovery Level 1 discover_packages(ignore) check parameters
+[0.196s] colcon.colcon_core.package_discovery Level 1 discover_packages(path) check parameters
+[0.196s] colcon.colcon_core.package_discovery Level 1 discover_packages(colcon_meta) discover
+[0.196s] colcon.colcon_core.package_discovery Level 1 discover_packages(recursive) discover
+[0.196s] colcon.colcon_core.package_discovery INFO Crawling recursively for packages in '/home/dimi/robot_ws/src/home_robot'
+[0.197s] colcon.colcon_core.package_identification Level 1 _identify(.) by extensions ['ignore', 'ignore_ament_install']
+[0.197s] colcon.colcon_core.package_identification Level 1 _identify(.) by extension 'ignore'
+[0.197s] colcon.colcon_core.package_identification Level 1 _identify(.) by extension 'ignore_ament_install'
+[0.197s] colcon.colcon_core.package_identification Level 1 _identify(.) by extensions ['colcon_pkg']
+[0.197s] colcon.colcon_core.package_identification Level 1 _identify(.) by extension 'colcon_pkg'
+[0.197s] colcon.colcon_core.package_identification Level 1 _identify(.) by extensions ['colcon_meta']
+[0.197s] colcon.colcon_core.package_identification Level 1 _identify(.) by extension 'colcon_meta'
+[0.197s] colcon.colcon_core.package_identification Level 1 _identify(.) by extensions ['ros']
+[0.197s] colcon.colcon_core.package_identification Level 1 _identify(.) by extension 'ros'
+[0.232s] colcon.colcon_core.package_identification DEBUG Package '.' with type 'ros.ament_cmake' and name 'home_robot'
+[0.232s] colcon.colcon_core.package_discovery Level 1 discover_packages(recursive) using defaults
+[0.232s] colcon.colcon_core.package_discovery Level 1 discover_packages(ignore) discover
+[0.232s] colcon.colcon_core.package_discovery Level 1 discover_packages(ignore) using defaults
+[0.232s] colcon.colcon_core.package_discovery Level 1 discover_packages(path) discover
+[0.232s] colcon.colcon_core.package_discovery Level 1 discover_packages(path) using defaults
+[0.250s] colcon.colcon_core.package_discovery Level 1 discover_packages(prefix_path) check parameters
+[0.250s] colcon.colcon_core.package_discovery Level 1 discover_packages(prefix_path) discover
+[0.253s] colcon.colcon_installed_package_information.package_discovery DEBUG Found 9 installed packages in /home/dimi/robot_ws/install
+[0.254s] colcon.colcon_installed_package_information.package_discovery DEBUG Found 7 installed packages in /home/dimi/ros2_robot_ws/install
+[0.255s] colcon.colcon_installed_package_information.package_discovery DEBUG Found 1 installed packages in /home/dimi/roomba_ws/install
+[0.257s] colcon.colcon_installed_package_information.package_discovery DEBUG Found 478 installed packages in /opt/ros/jazzy
+[0.259s] colcon.colcon_core.package_discovery Level 1 discover_packages(prefix_path) using defaults
+[0.341s] colcon.colcon_core.verb Level 5 set package 'home_robot' build argument 'cmake_args' from command line to 'None'
+[0.341s] colcon.colcon_core.verb Level 5 set package 'home_robot' build argument 'cmake_target' from command line to 'None'
+[0.341s] colcon.colcon_core.verb Level 5 set package 'home_robot' build argument 'cmake_target_skip_unavailable' from command line to 'False'
+[0.341s] colcon.colcon_core.verb Level 5 set package 'home_robot' build argument 'cmake_clean_cache' from command line to 'False'
+[0.341s] colcon.colcon_core.verb Level 5 set package 'home_robot' build argument 'cmake_clean_first' from command line to 'False'
+[0.341s] colcon.colcon_core.verb Level 5 set package 'home_robot' build argument 'cmake_force_configure' from command line to 'False'
+[0.341s] colcon.colcon_core.verb Level 5 set package 'home_robot' build argument 'ament_cmake_args' from command line to 'None'
+[0.341s] colcon.colcon_core.verb Level 5 set package 'home_robot' build argument 'catkin_cmake_args' from command line to 'None'
+[0.341s] colcon.colcon_core.verb Level 5 set package 'home_robot' build argument 'catkin_skip_building_tests' from command line to 'False'
+[0.341s] colcon.colcon_core.verb DEBUG Building package 'home_robot' with the following arguments: {'ament_cmake_args': None, 'build_base': '/home/dimi/robot_ws/src/home_robot/build/home_robot', 'catkin_cmake_args': None, 'catkin_skip_building_tests': False, 'cmake_args': None, 'cmake_clean_cache': False, 'cmake_clean_first': False, 'cmake_force_configure': False, 'cmake_target': None, 'cmake_target_skip_unavailable': False, 'install_base': '/home/dimi/robot_ws/src/home_robot/install/home_robot', 'merge_install': False, 'path': '/home/dimi/robot_ws/src/home_robot', 'symlink_install': True, 'test_result_base': None}
+[0.341s] colcon.colcon_core.executor INFO Executing jobs using 'parallel' executor
+[0.343s] colcon.colcon_parallel_executor.executor.parallel DEBUG run_until_complete
+[0.343s] colcon.colcon_ros.task.ament_cmake.build INFO Building ROS package in '/home/dimi/robot_ws/src/home_robot' with build type 'ament_cmake'
+[0.343s] colcon.colcon_cmake.task.cmake.build INFO Building CMake package in '/home/dimi/robot_ws/src/home_robot'
+[0.345s] colcon.colcon_core.plugin_system INFO Skipping extension 'colcon_core.shell.bat': Not used on non-Windows systems
+[0.345s] colcon.colcon_core.shell INFO Skip shell extension 'powershell' for command environment: Not usable outside of PowerShell
+[0.345s] colcon.colcon_core.shell DEBUG Skip shell extension 'dsv' for command environment
+[0.354s] colcon.colcon_core.event_handler.log_command DEBUG Invoking command in '/home/dimi/robot_ws/src/home_robot/build/home_robot': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/dimi/robot_ws/install/easy_handeye2:/opt/ros/jazzy /usr/bin/cmake /home/dimi/robot_ws/src/home_robot -DAMENT_CMAKE_SYMLINK_INSTALL=1 -DCMAKE_INSTALL_PREFIX=/home/dimi/robot_ws/src/home_robot/install/home_robot
+[1.634s] colcon.colcon_core.event_handler.log_command DEBUG Invoked command in '/home/dimi/robot_ws/src/home_robot/build/home_robot' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/dimi/robot_ws/install/easy_handeye2:/opt/ros/jazzy /usr/bin/cmake /home/dimi/robot_ws/src/home_robot -DAMENT_CMAKE_SYMLINK_INSTALL=1 -DCMAKE_INSTALL_PREFIX=/home/dimi/robot_ws/src/home_robot/install/home_robot
+[1.635s] colcon.colcon_core.event_handler.log_command DEBUG Invoking command in '/home/dimi/robot_ws/src/home_robot/build/home_robot': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/dimi/robot_ws/install/easy_handeye2:/opt/ros/jazzy /usr/bin/cmake --build /home/dimi/robot_ws/src/home_robot/build/home_robot -- -j16 -l16
+[2.228s] colcon.colcon_core.event_handler.log_command DEBUG Invoked command in '/home/dimi/robot_ws/src/home_robot/build/home_robot' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/dimi/robot_ws/install/easy_handeye2:/opt/ros/jazzy /usr/bin/cmake --build /home/dimi/robot_ws/src/home_robot/build/home_robot -- -j16 -l16
+[2.239s] colcon.colcon_core.event_handler.log_command DEBUG Invoking command in '/home/dimi/robot_ws/src/home_robot/build/home_robot': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/dimi/robot_ws/install/easy_handeye2:/opt/ros/jazzy /usr/bin/cmake --install /home/dimi/robot_ws/src/home_robot/build/home_robot
+[7.196s] colcon.colcon_core.environment Level 1 create_environment_scripts_only(home_robot)
+[7.197s] colcon.colcon_core.event_handler.log_command DEBUG Invoked command in '/home/dimi/robot_ws/src/home_robot/build/home_robot' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/dimi/robot_ws/install/easy_handeye2:/opt/ros/jazzy /usr/bin/cmake --install /home/dimi/robot_ws/src/home_robot/build/home_robot
+[7.201s] colcon.colcon_core.environment Level 1 checking '/home/dimi/robot_ws/src/home_robot/install/home_robot' for CMake module files
+[7.202s] colcon.colcon_core.environment Level 1 checking '/home/dimi/robot_ws/src/home_robot/install/home_robot' for CMake config files
+[7.204s] colcon.colcon_core.shell Level 1 create_environment_hook('home_robot', 'cmake_prefix_path')
+[7.205s] colcon.colcon_core.shell INFO Creating environment hook '/home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/hook/cmake_prefix_path.ps1'
+[7.207s] colcon.colcon_core.shell INFO Creating environment descriptor '/home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/hook/cmake_prefix_path.dsv'
+[7.207s] colcon.colcon_core.shell INFO Creating environment hook '/home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/hook/cmake_prefix_path.sh'
+[7.208s] colcon.colcon_core.environment Level 1 checking '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib'
+[7.208s] colcon.colcon_core.environment Level 1 checking '/home/dimi/robot_ws/src/home_robot/install/home_robot/bin'
+[7.208s] colcon.colcon_core.environment Level 1 checking '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/pkgconfig/home_robot.pc'
+[7.208s] colcon.colcon_core.environment Level 1 checking '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages'
+[7.209s] colcon.colcon_core.shell Level 1 create_environment_hook('home_robot', 'pythonpath')
+[7.209s] colcon.colcon_core.shell INFO Creating environment hook '/home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/hook/pythonpath.ps1'
+[7.209s] colcon.colcon_core.shell INFO Creating environment descriptor '/home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/hook/pythonpath.dsv'
+[7.210s] colcon.colcon_core.shell INFO Creating environment hook '/home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/hook/pythonpath.sh'
+[7.210s] colcon.colcon_core.environment Level 1 checking '/home/dimi/robot_ws/src/home_robot/install/home_robot/bin'
+[7.210s] colcon.colcon_core.shell INFO Creating package script '/home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/package.ps1'
+[7.211s] colcon.colcon_core.shell INFO Creating package descriptor '/home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/package.dsv'
+[7.212s] colcon.colcon_core.shell INFO Creating package script '/home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/package.sh'
+[7.212s] colcon.colcon_core.shell INFO Creating package script '/home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/package.bash'
+[7.212s] colcon.colcon_core.shell INFO Creating package script '/home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/package.zsh'
+[7.213s] colcon.colcon_core.environment Level 1 create_file_with_runtime_dependencies(/home/dimi/robot_ws/src/home_robot/install/home_robot/share/colcon-core/packages/home_robot)
+[7.213s] colcon.colcon_core.environment Level 1 create_environment_scripts_only(home_robot)
+[7.213s] colcon.colcon_core.environment Level 1 checking '/home/dimi/robot_ws/src/home_robot/install/home_robot' for CMake module files
+[7.214s] colcon.colcon_core.environment Level 1 checking '/home/dimi/robot_ws/src/home_robot/install/home_robot' for CMake config files
+[7.216s] colcon.colcon_core.shell Level 1 create_environment_hook('home_robot', 'cmake_prefix_path')
+[7.216s] colcon.colcon_core.shell INFO Creating environment hook '/home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/hook/cmake_prefix_path.ps1'
+[7.216s] colcon.colcon_core.shell INFO Creating environment descriptor '/home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/hook/cmake_prefix_path.dsv'
+[7.216s] colcon.colcon_core.shell INFO Creating environment hook '/home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/hook/cmake_prefix_path.sh'
+[7.217s] colcon.colcon_core.environment Level 1 checking '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib'
+[7.217s] colcon.colcon_core.environment Level 1 checking '/home/dimi/robot_ws/src/home_robot/install/home_robot/bin'
+[7.217s] colcon.colcon_core.environment Level 1 checking '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/pkgconfig/home_robot.pc'
+[7.217s] colcon.colcon_core.environment Level 1 checking '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages'
+[7.217s] colcon.colcon_core.shell Level 1 create_environment_hook('home_robot', 'pythonpath')
+[7.217s] colcon.colcon_core.shell INFO Creating environment hook '/home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/hook/pythonpath.ps1'
+[7.217s] colcon.colcon_core.shell INFO Creating environment descriptor '/home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/hook/pythonpath.dsv'
+[7.218s] colcon.colcon_core.shell INFO Creating environment hook '/home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/hook/pythonpath.sh'
+[7.218s] colcon.colcon_core.environment Level 1 checking '/home/dimi/robot_ws/src/home_robot/install/home_robot/bin'
+[7.219s] colcon.colcon_core.shell INFO Creating package script '/home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/package.ps1'
+[7.219s] colcon.colcon_core.shell INFO Creating package descriptor '/home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/package.dsv'
+[7.219s] colcon.colcon_core.shell INFO Creating package script '/home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/package.sh'
+[7.220s] colcon.colcon_core.shell INFO Creating package script '/home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/package.bash'
+[7.220s] colcon.colcon_core.shell INFO Creating package script '/home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/package.zsh'
+[7.220s] colcon.colcon_core.environment Level 1 create_file_with_runtime_dependencies(/home/dimi/robot_ws/src/home_robot/install/home_robot/share/colcon-core/packages/home_robot)
+[7.220s] colcon.colcon_parallel_executor.executor.parallel DEBUG closing loop
+[7.221s] colcon.colcon_parallel_executor.executor.parallel DEBUG loop closed
+[7.221s] colcon.colcon_parallel_executor.executor.parallel DEBUG run_until_complete finished with '0'
+[7.221s] colcon.colcon_core.event_reactor DEBUG joining thread
+[7.227s] colcon.colcon_core.plugin_system INFO Skipping extension 'colcon_notification.desktop_notification.terminal_notifier': Not used on non-Darwin systems
+[7.227s] colcon.colcon_core.plugin_system INFO Skipping extension 'colcon_notification.desktop_notification.win32': Not used on non-Windows systems
+[7.227s] colcon.colcon_notification.desktop_notification INFO Sending desktop notification using 'notify2'
+[7.240s] colcon.colcon_core.event_reactor DEBUG joined thread
+[7.240s] colcon.colcon_core.shell INFO Creating prefix script '/home/dimi/robot_ws/src/home_robot/install/local_setup.ps1'
+[7.241s] colcon.colcon_core.shell INFO Creating prefix util module '/home/dimi/robot_ws/src/home_robot/install/_local_setup_util_ps1.py'
+[7.242s] colcon.colcon_core.shell INFO Creating prefix chain script '/home/dimi/robot_ws/src/home_robot/install/setup.ps1'
+[7.243s] colcon.colcon_core.shell INFO Creating prefix script '/home/dimi/robot_ws/src/home_robot/install/local_setup.sh'
+[7.243s] colcon.colcon_core.shell INFO Creating prefix util module '/home/dimi/robot_ws/src/home_robot/install/_local_setup_util_sh.py'
+[7.243s] colcon.colcon_core.shell INFO Creating prefix chain script '/home/dimi/robot_ws/src/home_robot/install/setup.sh'
+[7.244s] colcon.colcon_core.shell INFO Creating prefix script '/home/dimi/robot_ws/src/home_robot/install/local_setup.bash'
+[7.245s] colcon.colcon_core.shell INFO Creating prefix chain script '/home/dimi/robot_ws/src/home_robot/install/setup.bash'
+[7.246s] colcon.colcon_core.shell INFO Creating prefix script '/home/dimi/robot_ws/src/home_robot/install/local_setup.zsh'
+[7.246s] colcon.colcon_core.shell INFO Creating prefix chain script '/home/dimi/robot_ws/src/home_robot/install/setup.zsh'

@@ -320,6 +320,22 @@ class CameraWatchdog(Node):
     def _restart_camera(self):
         args = list(self.get_parameter('launch_args').value or [])
         try:
+            # A silent camera is not always a process that has exited.  The
+            # native node can stay alive after its USB pipeline wedges; simply
+            # launching another copy then leaves two nodes competing for the
+            # same D435, and the replacement fails with "device busy".  Ask
+            # every stale RealSense camera node to stop first.  `pkill` returns
+            # 1 when the segfault already removed it, which is the normal other
+            # case and deliberately not an error.
+            subprocess.run(
+                ['pkill', '-INT', '-f',
+                 '/realsense2_camera/realsense2_camera_node'],
+                timeout=5, check=False,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # Give librealsense a moment to close the USB handles.  Starting
+            # the replacement in the same instant reproduces the contention
+            # this cleanup is meant to prevent.
+            time.sleep(1.0)
             # start_new_session: this outlives the request that triggered it,
             # and must not die with this node if the node is next to be killed.
             subprocess.Popen(

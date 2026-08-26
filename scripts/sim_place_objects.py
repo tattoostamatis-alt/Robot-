@@ -118,9 +118,10 @@ def model_sdf(name, x, y, rgb):
       <static>true</static>
       <pose>{x:.4f} {y:.4f} {OBJ_HEIGHT / 2:.4f} 0 0 0</pose>
       <link name="link">
-        <collision name="c">
-          <geometry><box><size>{OBJ_SIZE} {OBJ_SIZE} {OBJ_HEIGHT}</size></box></geometry>
-        </collision>
+        <!-- Visual/perception target only.  The fetch simulator models grasp
+             state explicitly; a static collision here cannot be attached to
+             the virtual gripper and behaves like an immovable wall, which can
+             seal a narrow corridor before the robot reaches grasp range. -->
         <visual name="v">
           <geometry><box><size>{OBJ_SIZE} {OBJ_SIZE} {OBJ_HEIGHT}</size></box></geometry>
           <material>
@@ -139,6 +140,8 @@ def main():
     ap.add_argument('world')
     ap.add_argument('--clearance', type=float, default=0.35,
                     help='m of free space required around an object')
+    ap.add_argument('--exclude-room', action='append', default=[],
+                    help='room to omit from this scenario (repeatable)')
     args = ap.parse_args()
 
     meta, img = load_grid(args.map_yaml)
@@ -148,7 +151,8 @@ def main():
         locs = yaml.safe_load(f) or {}
     rooms = {k: (float(v['x']), float(v['y']))
              for k, v in locs.items()
-             if isinstance(v, dict) and 'x' in v and not k.startswith('dock')}
+             if (isinstance(v, dict) and 'x' in v and not k.startswith('dock')
+                 and k not in set(args.exclude_room))}
 
     with open(args.world) as f:
         world = f.read()

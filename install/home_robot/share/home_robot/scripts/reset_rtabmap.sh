@@ -1,0 +1,1 @@
+/home/dimi/robot_ws/src/home_robot/scripts/reset_rtabmap.sh

@@ -8,7 +8,12 @@
      odom->base_link TF that the real EKF would otherwise provide. -->
 <robot name="robot_sim" xmlns:xacro="http://ros.org/wiki/xacro">
 
-  <xacro:property name="body_radius" value="0.17"/>   <!-- Ø0.34 Roomba -->
+  <!-- RGB-D is useful for dedicated camera tests but extremely expensive on
+       the software-rendered headless simulator.  Navigation/fetch tests use
+       ground-truth perception, so keep it opt-in there. -->
+  <xacro:arg name="use_camera" default="false"/>
+
+  <xacro:property name="body_radius" value="0.175"/>  <!-- Ø0.35 Roomba -->
   <xacro:property name="body_height" value="0.09"/>
   <xacro:property name="wheel_radius" value="0.036"/>
   <xacro:property name="wheel_width"  value="0.02"/>
@@ -151,23 +156,25 @@
        a properly-oriented optical frame. Modest 424x240 res + 15Hz: this
        machine renders in software (llvmpipe, no GPU) and RGBD is much
        heavier per-frame than the lidar. -->
-  <gazebo reference="camera_link">
-    <sensor name="camera" type="rgbd_camera">
-      <update_rate>15</update_rate>
-      <topic>camera</topic>
-      <camera>
-        <horizontal_fov>1.2043</horizontal_fov>
-        <image>
-          <width>424</width>
-          <height>240</height>
-          <format>R8G8B8</format>
-        </image>
-        <clip><near>0.1</near><far>8.0</far></clip>
-        <optical_frame_id>camera_color_optical_frame</optical_frame_id>
-      </camera>
-      <always_on>1</always_on>
-      <visualize>true</visualize>
-    </sensor>
-  </gazebo>
+  <xacro:if value="$(arg use_camera)">
+    <gazebo reference="camera_link">
+      <sensor name="camera" type="rgbd_camera">
+        <update_rate>15</update_rate>
+        <topic>camera</topic>
+        <camera>
+          <horizontal_fov>1.2043</horizontal_fov>
+          <image>
+            <width>424</width>
+            <height>240</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip><near>0.1</near><far>8.0</far></clip>
+          <optical_frame_id>camera_color_optical_frame</optical_frame_id>
+        </camera>
+        <always_on>1</always_on>
+        <visualize>true</visualize>
+      </sensor>
+    </gazebo>
+  </xacro:if>
 
 </robot>

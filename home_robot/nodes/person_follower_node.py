@@ -53,7 +53,8 @@ class PersonFollowerNode(Node):
 
         # --- Parameters ---------------------------------------------------
         self.declare_parameter('follow_distance_min', 0.8)
-        self.declare_parameter('follow_distance_max', 1.5)
+        # Start closing the gap once the person is more than one metre away.
+        self.declare_parameter('follow_distance_max', 1.0)
         self.declare_parameter('follow_speed',        0.15)
         self.declare_parameter('follow_timeout',      30.0)
         self.declare_parameter('camera_hfov_deg',     87.0)
@@ -61,6 +62,18 @@ class PersonFollowerNode(Node):
         # ‼️ Not cosmetic: acting on a stale bearing is exactly what made the
         # old open-loop version spin forever. No fresh sighting, no motion.
         self.declare_parameter('person_timeout',      1.0)
+        # When the person leaves the camera image, do not drive on a stale
+        # depth/bearing.  A short in-place turn is enough to reacquire someone
+        # who has just crossed an edge of the image, without turning a lost
+        # target into blind navigation through the house.
+        self.declare_parameter('reacquire_turn_seconds', 4.0)
+        self.declare_parameter('reacquire_turn_speed',   0.35)
+        self.declare_parameter('motion_deadband_px_s',   20.0)
+        # Do not drive forward while the person is still far off-centre: with
+        # the D435 pitched down, a combined forward+turn manoeuvre keeps only
+        # the lower body in frame and loses the target exactly when someone
+        # turns away across the edge. Turn first, then advance.
+        self.declare_parameter('forward_turn_gate_px',   90)
         # ‼️ Turning. The docstring has always claimed this node "aims at the
         # speaker", but _control only ever set linear.x — the DoA column picked
         # which depth strip to MEASURE and nothing more, so the robot drove
@@ -82,6 +95,10 @@ class PersonFollowerNode(Node):
         # Divisor for the pixels-per-degree conversion.
         self._hfov        = max(1.0, float(self.get_parameter('camera_hfov_deg').value))
         self._lost_after  = self.get_parameter('person_timeout').value
+        self._reacquire_for = self.get_parameter('reacquire_turn_seconds').value
+        self._reacquire_speed = self.get_parameter('reacquire_turn_speed').value
+        self._motion_deadband = self.get_parameter('motion_deadband_px_s').value
+        self._forward_turn_gate = self.get_parameter('forward_turn_gate_px').value
         self._turn_gain   = self.get_parameter('turn_gain').value
         self._turn_dead   = self.get_parameter('turn_deadband_px').value
         self._turn_min    = self.get_parameter('min_turn_speed').value
@@ -97,7 +114,10 @@ class PersonFollowerNode(Node):
         # that write is what closes the control loop.
         self._target_col   = _CENTER_COL
         self._last_seen    = 0.0          # monotonic; staleness clock for _lost_after
+        self._last_col_velocity = 0.0      # pixels/s; direction before occlusion
         self._lost_warned  = False
+        self._pose_people  = []
+        self._pose_seen    = 0.0
 
         # --- Publishers ---------------------------------------------------
         # ‼️ cmd_vel_safe, NOT cmd_vel. /cmd_vel has FOUR publishers and ZERO
@@ -133,6 +153,8 @@ class PersonFollowerNode(Node):
         # wall, which is how it ended up steering by a stale DoA angle.
         self.create_subscription(String, 'detected_objects',
                                  self._detections_cb, 10)
+        self.create_subscription(String, 'pose_detections',
+                                 self._poses_cb, 10)
 
         self.get_logger().info(
             f'PersonFollowerNode ready '
@@ -175,6 +197,7 @@ class PersonFollowerNode(Node):
                 # ever detected says so after person_timeout instead of sitting
                 # silent for the full 30 s.
                 self._last_seen    = time.monotonic()
+                self._last_col_velocity = 0.0
                 self._lost_warned  = False
                 col = self._target_col
             self.get_logger().info(
@@ -188,8 +211,64 @@ class PersonFollowerNode(Node):
                 self.get_logger().info('Following stopped: stop command received')
 
     # ------------------------------------------------------------------
+    # Pose callback — upper-body centring for a downward-pitched camera
+    # ------------------------------------------------------------------
+    def _poses_cb(self, msg: String):
+        try:
+            payload = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        if isinstance(payload, dict):
+            persons = payload.get('persons') or []
+        else:
+            persons = payload
+        if not isinstance(persons, list):
+            return
+        with self._lock:
+            self._pose_people = [p for p in persons if isinstance(p, dict)]
+            self._pose_seen = time.monotonic()
+
+    # ------------------------------------------------------------------
     # Person selection
     # ------------------------------------------------------------------
+    @staticmethod
+    def _pose_anchor(person):
+        """A horizontal target column from the upper body when pose is available.
+
+        With the camera pitched down, the box centre is biased toward the legs.
+        Steering from shoulders/hips/nose keeps the followed person visually
+        "higher" in the frame and preserves lock better while turning.
+        """
+        keypoints = person.get('keypoints') or []
+        by_name = {
+            kp.get('name'): kp for kp in keypoints
+            if isinstance(kp, dict) and kp.get('v', 0.0) >= 0.5
+        }
+        cols = []
+        for name in ('left_shoulder', 'right_shoulder', 'left_hip', 'right_hip', 'nose'):
+            kp = by_name.get(name)
+            if kp and kp.get('x') is not None:
+                cols.append(float(kp['x']))
+        if cols:
+            return sum(cols) / len(cols)
+        x1, x2 = person.get('x1'), person.get('x2')
+        if x1 is None or x2 is None:
+            return None
+        return (float(x1) + float(x2)) / 2.0
+
+    @classmethod
+    def _pick_pose_person(cls, persons, target_col):
+        """Pose person nearest target_col, returned as centre column only."""
+        best = None
+        for person in persons:
+            centre = cls._pose_anchor(person)
+            if centre is None:
+                continue
+            gap = abs(centre - target_col)
+            if best is None or gap < best[0]:
+                best = (gap, centre)
+        return None if best is None else best[1]
+
     @staticmethod
     def _pick_person(objects, target_col):
         """The 'person' box nearest `target_col`, as (centre_col, distance_m, img_w).
@@ -222,6 +301,16 @@ class PersonFollowerNode(Node):
         _, centre, distance, img_w = best
         return centre, distance, img_w
 
+    @staticmethod
+    def _apply_pose_centre(found, pose_centre):
+        """Replace bbox centre with pose-based upper-body centre when sane."""
+        if found is None or pose_centre is None:
+            return found
+        centre, distance, img_w = found
+        if abs(float(pose_centre) - centre) > img_w * 0.25:
+            return found
+        return float(pose_centre), distance, img_w
+
     # ------------------------------------------------------------------
     # Detections callback — main control loop
     # ------------------------------------------------------------------
@@ -244,20 +333,33 @@ class PersonFollowerNode(Node):
             objects = json.loads(msg.data)
         except json.JSONDecodeError:
             return
+        with self._lock:
+            pose_people = list(self._pose_people)
+            pose_seen = self._pose_seen
 
         found = self._pick_person(objects, target_col)
+        if pose_people and (now - pose_seen) <= 0.7:
+            found = self._apply_pose_centre(
+                found, self._pick_pose_person(pose_people, target_col))
 
         if found is None:
-            # Out of view. Keep the follow alive so they can step back in, but
-            # STOP — the old code kept steering at the last bearing, which is
-            # what turned a lost target into an endless spin.
+            # Out of view. Never move forwards from a stale sighting.  For a
+            # few seconds turn in place toward the side/direction where the
+            # person disappeared; this reacquires ordinary camera-edge losses
+            # while preserving the hard stop when the person is truly gone.
             if last_seen and (now - last_seen) > self._lost_after:
-                self._publish_stop()
                 with self._lock:
                     warn, self._lost_warned = not self._lost_warned, True
+                    target_col = self._target_col
+                    velocity = self._last_col_velocity
+                lost_for = now - last_seen
+                if lost_for <= self._reacquire_for:
+                    self._publish_reacquire_turn(target_col, velocity)
+                else:
+                    self._publish_stop()
                 if warn:
                     self.get_logger().info(
-                        'Δεν σε βλέπω — σταματώ μέχρι να ξαναφανείς')
+                        'Δεν σε βλέπω — ψάχνω γύρω μου χωρίς να προχωρώ')
             return
 
         centre, distance_m, img_w = found
@@ -265,6 +367,13 @@ class PersonFollowerNode(Node):
             # Remembers WHO to follow next frame (see _pick_person). The control
             # loop itself is closed one line further down, by handing _control
             # `centre` — this frame's measurement — rather than this stored one.
+            previous_col = self._target_col
+            previous_seen = self._last_seen
+            elapsed = max(now - previous_seen, 1e-3)
+            # Clamp detector jitter: a single bad box must not choose the
+            # search direction after an occlusion.
+            self._last_col_velocity = max(
+                -img_w, min(img_w, (centre - previous_col) / elapsed))
             self._target_col  = centre
             self._last_seen   = now
             was_lost, self._lost_warned = self._lost_warned, False
@@ -296,12 +405,16 @@ class PersonFollowerNode(Node):
         """Publish Twist based on measured distance to, and bearing of, person."""
         twist = Twist()
         twist.angular.z = self._turn_for(col, img_w)
+        centred_enough = abs(col - img_w / 2.0) <= self._forward_turn_gate
 
         if depth_m > self._dist_max:
-            # Person is too far away — drive toward them
-            twist.linear.x = self._speed
+            # Person is too far away — but only advance once the turn has
+            # mostly completed, or the downward-pitched camera keeps the legs
+            # in frame and loses the rest of the person on a turn.
+            twist.linear.x = self._speed if centred_enough else 0.0
             self.get_logger().debug(
-                f'depth={depth_m:.2f}m > {self._dist_max}m → forward'
+                f'depth={depth_m:.2f}m > {self._dist_max}m → '
+                f'{"forward" if centred_enough else "turn-first"}'
             )
         elif depth_m < self._dist_min:
             # Person is too close — stop completely
@@ -316,6 +429,23 @@ class PersonFollowerNode(Node):
                 f'depth={depth_m:.2f}m in range [{self._dist_min},{self._dist_max}]m → hold'
             )
 
+        self._cmd_pub.publish(twist)
+
+    def _publish_reacquire_turn(self, last_col: float, velocity_px_s: float):
+        """Turn in place toward the last observed travel/bearing, never drive."""
+        if abs(velocity_px_s) >= self._motion_deadband:
+            # Person moving right in the image -> turn right (negative z).
+            direction = -math.copysign(1.0, velocity_px_s)
+        else:
+            # With no reliable motion estimate, use the side where they were
+            # last visible.  A centred target gives no safe direction to infer.
+            turn = self._turn_for(last_col)
+            if turn == 0.0:
+                self._publish_stop()
+                return
+            direction = math.copysign(1.0, turn)
+        twist = Twist()
+        twist.angular.z = direction * self._reacquire_speed
         self._cmd_pub.publish(twist)
 
     def _publish_stop(self):

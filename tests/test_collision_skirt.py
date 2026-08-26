@@ -56,13 +56,12 @@ def _max_reach(pts):
 # ── the generator matches production, byte for byte ─────────────────────────
 
 def test_circle_points_matches_the_real_moving_ring_exactly():
-    """R=0.215 is today's production margin (40 mm). If the formula drifts
-    from what's actually in the file, this catches it before it ever reaches
-    a real robot."""
+    """The generator must match whichever live margin the dashboard applied."""
     real = _real_text()
     stop = yaml.safe_load(real)['collision_monitor']['ros__parameters']['Stop']
+    radius = cs.margin_to_radius(cs.current_margin_mm(real))
     for name in ('moving_forward', 'moving_backward'):
-        assert cs.circle_points(0.215) == stop[name]['points']
+        assert cs.circle_points(radius) == stop[name]['points']
 
 
 def test_circle_points_matches_the_real_rotating_ring_too():
@@ -72,15 +71,17 @@ def test_circle_points_matches_the_real_rotating_ring_too():
     assert cs.circle_points(0.180) == stop['stopped_or_rotating']['points']
 
 
-def test_current_margin_mm_reads_the_real_file_as_40():
-    assert cs.current_margin_mm(_real_text()) == cs.MARGIN_DEFAULT_MM == 40
+def test_current_margin_mm_reads_an_allowed_live_value():
+    assert cs.current_margin_mm(_real_text()) in cs.ALLOWED_MARGINS_MM
 
 
 # ── patch_moving_points touches exactly two lines ───────────────────────────
 
 def test_patch_changes_only_the_two_points_lines():
     real = _real_text()
-    patched = cs.patch_moving_points(real, 30)
+    current = cs.current_margin_mm(real)
+    target = next(m for m in cs.ALLOWED_MARGINS_MM if m != current)
+    patched = cs.patch_moving_points(real, target)
     old_lines, new_lines = real.splitlines(), patched.splitlines()
     assert len(old_lines) == len(new_lines)
     changed = [i for i, (a, b) in enumerate(zip(old_lines, new_lines)) if a != b]

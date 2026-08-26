@@ -115,7 +115,18 @@ def _setup(context, *args, **kwargs):
         ('depth/image',     '/camera/camera/aligned_depth_to_color/image_raw'),
         ('rgb/camera_info', '/camera/camera/color/camera_info'),
         ('scan',            '/scan'),
-        ('odom',            '/odom'),
+        # /odometry/filtered (ekf_filter_node), NOT raw /odom: the EKF fuses
+        # the IMU gyro into yaw, so a wheel-slip event that throws off the
+        # differential-drive heading estimate (one wheel skidding mid-turn)
+        # gets corrected before it ever reaches RTAB-Map's registration prior.
+        # Raw /odom has no such correction — 2026-08-14, after two mapping
+        # sessions kept producing a smeared/doubled cloud with the graph
+        # optimizer permanently rejecting all further loop closures past one
+        # bad edge (abs error ~4-5 deg / ~5 cm, small in absolute terms but
+        # miles past RGBD/OptimizeMaxError's 3-sigma bar), found nothing was
+        # subscribed to /odometry/filtered at all despite ekf_filter_node
+        # publishing it cleanly at 30 Hz the whole time.
+        ('odom',            '/odometry/filtered'),
     ]
 
     # RTAB-Map's own parameters (the Rtabmap/... namespace) go on the same node.
@@ -125,6 +136,15 @@ def _setup(context, *args, **kwargs):
         # 1 Hz keyframes. The default 1 Hz is already conservative, but say it
         # explicitly — this is the single biggest CPU lever here.
         'Rtabmap/DetectionRate':      detect_rate,
+        # Default 3.0 (sigma). 2026-08-14: after switching to EKF-filtered
+        # odom (see the /odometry/filtered remap above), residual loop-closure
+        # errors from real wheel-slip events dropped to ~4-5 deg / ~5 cm —
+        # small in absolute terms for a home map, but still just over 3 sigma,
+        # which makes RTAB-Map reject EVERY loop closure for the rest of the
+        # session once it hits one (by design: one "wrong" closure makes it
+        # distrust the whole region). Loosened to let those near-miss, small-
+        # magnitude closures through instead of stalling the graph.
+        'RGBD/OptimizeMaxError':      '5',
         'RGBD/NeighborLinkRefining':  'true',
         'RGBD/ProximityBySpace':      'true',
         'RGBD/AngularUpdate':         '0.05',   # skip keyframes while parked

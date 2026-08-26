@@ -137,7 +137,9 @@ def test_every_bearing_keeps_the_full_stop_margin():
             f'{name} comes within {closest:.4f} m of centre — only '
             f'{margin_mm:.0f} mm clear of the Ø0.35 chassis, against the '
             f'{STOP_MARGIN * 1000:.0f} mm this polygon exists to keep')
-        assert _max_reach(_points(name)) <= SKIRT_R + 1e-6, (
+        # Points are serialised to four decimals, so a diagonal can round a
+        # few 1e-5 m outside the mathematical radius.
+        assert _max_reach(_points(name)) <= SKIRT_R + 1e-4, (
             f'{name} reaches past the {SKIRT_R} m skirt the Safety tab '
             f'reports — the page would be lying about the robot')
 

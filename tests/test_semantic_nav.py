@@ -92,6 +92,13 @@ def test_it_parks_short_of_the_object():
     body = _mission_body()
     assert 'approach_pose' in body, 'it navigates straight at the object'
     assert '_navigate_to_xy' in body, 'it does not navigate to the approach pose'
+    assert 'dist=self._fetch_approach_dist' in body, \
+        'the approach distance is no longer parameterized'
+
+
+def test_the_default_approach_distance_is_400mm():
+    assert "self.declare_parameter('fetch_approach_dist', 0.4)" in _MISSION, \
+        'goto_object/fetch no longer default to a 0.4 m stand-off'
 
 
 def test_it_does_not_try_to_grasp():

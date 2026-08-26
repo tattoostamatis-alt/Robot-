@@ -12,6 +12,16 @@ Environment=ROS_DOMAIN_ID=0
 ExecStart=/home/dimi/bin/start_sllidar_c1
 Restart=on-failure
 RestartSec=3
+# sllidar_node.cpp only installs a handler for SIGINT (its work_loop() checks
+# a `need_exit` flag set by that handler, then calls setMotorSpeed(0) before
+# exiting) -- it never handles SIGTERM. systemd's default stop signal IS
+# SIGTERM, so a plain `systemctl stop` killed the process without ever
+# telling the hardware to stop spinning: the motor is driven by the LiDAR's
+# own onboard MCU and keeps its last commanded speed indefinitely as long as
+# it has USB power, with nothing left running to change that. Found
+# 2026-08-16: `robot stop` (which stops this service) left the motor audibly
+# spinning with zero processes/services/open fds anywhere on the box.
+KillSignal=SIGINT
 
 [Install]
 WantedBy=multi-user.target

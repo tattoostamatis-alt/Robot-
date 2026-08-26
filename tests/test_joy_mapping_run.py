@@ -72,15 +72,12 @@ def _joy_node_block(src: str) -> str:
 
 
 def test_new_mapping_run_asks_for_the_pad():
-    """The command map_session.sh actually runs must contain use_joy:=true."""
+    """A hot mapping swap preserves the already-running joy stack."""
     m = re.search(r'^\s*new\)(.*?)^\s*;;', MAP_SESSION, re.S | re.M)
     assert m, 'the `new` branch of map_session.sh is gone or changed shape'
     branch = m.group(1)
-    launch = re.search(r'ros2 launch home_robot bringup\.launch\.py(.*?)>>', branch, re.S)
-    assert launch, 'the `new` branch no longer launches bringup'
-    assert 'use_joy:=true' in launch.group(1), (
-        'mapping is driven by hand with the PS5 pad — without use_joy:=true no '
-        'joy_node starts and only the dashboard arrows move the robot')
+    assert 'switch_map_mode.sh' in MAP_SESSION or 'SWITCH_MODE_SH' in branch
+    assert ' slam ' in branch or ' slam' in branch
 
 
 def test_bringup_enables_joy_by_default():

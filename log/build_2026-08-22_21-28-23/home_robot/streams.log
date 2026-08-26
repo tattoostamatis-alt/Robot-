@@ -1,0 +1,554 @@
+[0.011s] Invoking command in '/home/dimi/robot_ws/src/home_robot/build/home_robot': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/dimi/robot_ws/install/easy_handeye2:/opt/ros/jazzy /usr/bin/cmake /home/dimi/robot_ws/src/home_robot -DAMENT_CMAKE_SYMLINK_INSTALL=1 -DCMAKE_INSTALL_PREFIX=/home/dimi/robot_ws/src/home_robot/install/home_robot
+[0.162s] -- The C compiler identification is GNU 13.3.0
+[0.279s] -- The CXX compiler identification is GNU 13.3.0
+[0.302s] -- Detecting C compiler ABI info
+[0.423s] -- Detecting C compiler ABI info - done
+[0.432s] -- Check for working C compiler: /usr/bin/cc - skipped
+[0.432s] -- Detecting C compile features
+[0.433s] -- Detecting C compile features - done
+[0.442s] -- Detecting CXX compiler ABI info
+[0.555s] -- Detecting CXX compiler ABI info - done
+[0.567s] -- Check for working CXX compiler: /usr/bin/c++ - skipped
+[0.567s] -- Detecting CXX compile features
+[0.567s] -- Detecting CXX compile features - done
+[0.592s] -- Found ament_cmake: 2.5.6 (/opt/ros/jazzy/share/ament_cmake/cmake)
+[0.787s] -- Found Python3: /usr/bin/python3 (found version "3.12.3") found components: Interpreter 
+[0.905s] -- Override CMake install command with custom implementation using symlinks instead of copying resources
+[0.983s] -- Found rclpy: 7.1.11 (/opt/ros/jazzy/share/rclpy/cmake)
+[1.275s] -- Configuring done (1.2s)
+[1.278s] -- Generating done (0.0s)
+[1.281s] -- Build files have been written to: /home/dimi/robot_ws/src/home_robot/build/home_robot
+[1.290s] Invoked command in '/home/dimi/robot_ws/src/home_robot/build/home_robot' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/dimi/robot_ws/install/easy_handeye2:/opt/ros/jazzy /usr/bin/cmake /home/dimi/robot_ws/src/home_robot -DAMENT_CMAKE_SYMLINK_INSTALL=1 -DCMAKE_INSTALL_PREFIX=/home/dimi/robot_ws/src/home_robot/install/home_robot
+[1.292s] Invoking command in '/home/dimi/robot_ws/src/home_robot/build/home_robot': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/dimi/robot_ws/install/easy_handeye2:/opt/ros/jazzy /usr/bin/cmake --build /home/dimi/robot_ws/src/home_robot/build/home_robot -- -j16 -l16
+[1.364s] Built target ament_cmake_python_symlink_home_robot
+[1.620s] running egg_info
+[1.622s] creating home_robot.egg-info
+[1.724s] writing home_robot.egg-info/PKG-INFO
+[1.724s] writing dependency_links to home_robot.egg-info/dependency_links.txt
+[1.724s] writing top-level names to home_robot.egg-info/top_level.txt
+[1.724s] writing manifest file 'home_robot.egg-info/SOURCES.txt'
+[1.793s] reading manifest file 'home_robot.egg-info/SOURCES.txt'
+[1.793s] writing manifest file 'home_robot.egg-info/SOURCES.txt'
+[1.875s] Built target ament_cmake_python_build_home_robot_egg
+[1.885s] Invoked command in '/home/dimi/robot_ws/src/home_robot/build/home_robot' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/dimi/robot_ws/install/easy_handeye2:/opt/ros/jazzy /usr/bin/cmake --build /home/dimi/robot_ws/src/home_robot/build/home_robot -- -j16 -l16
+[1.896s] Invoking command in '/home/dimi/robot_ws/src/home_robot/build/home_robot': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/dimi/robot_ws/install/easy_handeye2:/opt/ros/jazzy /usr/bin/cmake --install /home/dimi/robot_ws/src/home_robot/build/home_robot
+[1.904s] -- Install configuration: ""
+[1.905s] -- Execute custom install script
+[1.905s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/environment/pythonpath.sh
+[1.915s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/environment/pythonpath.dsv
+[1.930s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot-0.1.0-py3.12.egg-info/PKG-INFO
+[1.940s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot-0.1.0-py3.12.egg-info/SOURCES.txt
+[1.954s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot-0.1.0-py3.12.egg-info/dependency_links.txt
+[1.964s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot-0.1.0-py3.12.egg-info/top_level.txt
+[1.975s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/__init__.py
+[1.988s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/acoustic_map.py
+[2.000s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/api_keys.py
+[2.009s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/arm_motion.py
+[2.023s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/arm_settings.py
+[2.032s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/collision_skirt.py
+[2.042s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/compass.py
+[2.058s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/dashboard_i18n.py
+[2.073s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/desktop.py
+[2.091s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/diagnostics.py
+[2.101s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/dock_geometry.py
+[2.109s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/echo.py
+[2.117s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/episodic.py
+[2.127s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/face_identity.py
+[2.141s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/fall_detect.py
+[2.155s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/fetch_planner.py
+[2.165s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/gesture.py
+[2.173s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/gesture_bindings.py
+[2.186s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/gesture_vocab.py
+[2.198s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/grasp_geometry.py
+[2.208s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/hand_gestures.py
+[2.221s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/ir_homing.py
+[2.231s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/joy_cmd_gate.py
+[2.240s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/keepout_files.py
+[2.253s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/keepout_toggle.py
+[2.268s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/llm_quota.py
+[2.278s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/map_straighten.py
+[2.287s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/map_walls3d.py
+[2.298s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/mic_settings.py
+[2.306s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/motion_confirm.py
+[2.317s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nerf.py
+[2.335s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/acoustic_map_node.py
+[2.348s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/apriltag_relocalizer.py
+[2.362s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/arm_driver.py
+[2.371s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/arm_joy_node.py
+[2.381s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/arm_moveit_bridge.py
+[2.395s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/arm_scene_obstacles.py
+[2.405s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/calibrate_odom.py
+[2.416s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/camera_watchdog_node.py
+[2.428s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/cluster_detector_node.py
+[2.437s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/diarization_node.py
+[2.447s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/doa_node.py
+[2.462s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/echo_node.py
+[2.472s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/episodic_memory_node.py
+[2.482s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/explore_manager_node.py
+[2.493s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/face_detection_node.py
+[2.501s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/face_identity_node.py
+[2.508s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/fall_monitor_node.py
+[2.514s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/gesture_node.py
+[2.522s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/global_localizer_node.py
+[2.536s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/goal_pose_bridge.py
+[2.555s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/goto_room.py
+[2.571s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/hand_gesture_node.py
+[2.582s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/imu_node.py
+[2.596s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/joy_cmd_gate_node.py
+[2.606s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/joystick_estop_node.py
+[2.620s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/llm_bridge_node.py
+[2.630s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/mission_executor_node.py
+[2.640s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/nerf_capture_node.py
+[2.653s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/object_detector.py
+[2.666s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/object_memory_node.py
+[2.678s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/obstacle_prediction_node.py
+[2.690s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/obstacle_safety_node.py
+[2.699s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/odom_tf_broadcaster.py
+[2.706s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/open_vocab_detector.py
+[2.713s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/people_node.py
+[2.722s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/person_follower_node.py
+[2.734s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/pick_place_node.py
+[2.747s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/pose_node.py
+[2.760s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/pose_saver_node.py
+[2.769s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/proactive_observer_node.py
+[2.777s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/rag_memory_node.py
+[2.796s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/record_location.py
+[2.808s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/recovery_manager_node.py
+[2.824s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/room_markers_node.py
+[2.834s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/room_tour.py
+[2.845s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/roomba_driver.py
+[2.858s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/self_diagnosis_node.py
+[2.871s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/semantic_costmap_node.py
+[2.881s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/situational_awareness_node.py
+[2.892s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/slip_monitor_node.py
+[2.900s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/sound_event_node.py
+[2.907s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/stt_node.py
+[2.923s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/system_metrics_node.py
+[2.935s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/tactile_node.py
+[2.945s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/task_planner_node.py
+[2.956s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/tracker_node.py
+[2.966s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/trail_publisher_node.py
+[2.973s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/tts_node.py
+[2.985s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/vision_node.py
+[3.003s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/wake_word_node.py
+[3.016s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/web_dashboard_node.py
+[3.031s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/yolo11n-pose.pt
+[3.041s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/yolo11n-seg.pt
+[3.053s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/yolo11n.pt
+[3.067s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/yolo11n_int8.onnx
+[3.076s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/yolo11n_pose_int8.onnx
+[3.085s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/yolo11n_seg_int8.onnx
+[3.095s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/yunet_face_2023mar.onnx
+[3.103s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/yunet_int8.onnx
+[3.111s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/object_memory.py
+[3.122s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/obstacle_prediction.py
+[3.135s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/pcl_clusters.py
+[3.143s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/people.py
+[3.151s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/proactive.py
+[3.161s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/room_files.py
+[3.171s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/room_segment.py
+[3.179s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/routines.py
+[3.193s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/safety_settings.py
+[3.205s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/servo_filter.py
+[3.213s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/simple_commands.py
+[3.222s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/slip_detect.py
+[3.234s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/slip_map.py
+[3.243s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/sort_planner.py
+[3.263s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/sound_events.py
+[3.272s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/speaker_fusion.py
+[3.280s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/status_query.py
+[3.288s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/stop_command.py
+[3.298s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/stt_postprocess.py
+[3.306s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/system_settings.py
+[3.322s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/tactile.py
+[3.335s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/tool_router.py
+[3.348s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/tts_fallback.py
+[3.365s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/vocabulary.py
+[3.374s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/voice_gate.py
+[3.382s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/roomba_driver.py
+[3.391s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/object_detector.py
+[3.405s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/camera_watchdog_node.py
+[3.417s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/obstacle_safety_node.py
+[3.432s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/arm_driver.py
+[3.441s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/arm_moveit_bridge.py
+[3.454s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/arm_scene_obstacles.py
+[3.468s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/pick_place_node.py
+[3.478s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/cluster_detector_node.py
+[3.491s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/system_metrics_node.py
+[3.499s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/joystick_estop_node.py
+[3.507s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/joy_cmd_gate_node.py
+[3.520s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/arm_joy_node.py
+[3.532s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/wake_word_node.py
+[3.541s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/stt_node.py
+[3.557s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/llm_bridge_node.py
+[3.572s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/vision_node.py
+[3.580s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/tts_node.py
+[3.588s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/task_planner_node.py
+[3.602s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/calibrate_odom.py
+[3.612s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/imu_node.py
+[3.626s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/rag_memory_node.py
+[3.636s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/doa_node.py
+[3.645s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/person_follower_node.py
+[3.657s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/apriltag_relocalizer.py
+[3.670s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/tracker_node.py
+[3.681s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/diarization_node.py
+[3.693s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/recovery_manager_node.py
+[3.701s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/obstacle_prediction_node.py
+[3.708s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/fall_monitor_node.py
+[3.723s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/situational_awareness_node.py
+[3.735s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/mission_executor_node.py
+[3.744s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/semantic_costmap_node.py
+[3.757s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/object_memory_node.py
+[3.766s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/face_detection_node.py
+[3.774s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/pose_node.py
+[3.791s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/gesture_node.py
+[3.806s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/proactive_observer_node.py
+[3.820s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/episodic_memory_node.py
+[3.834s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/open_vocab_detector.py
+[3.844s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/sound_event_node.py
+[3.856s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/face_identity_node.py
+[3.868s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/self_diagnosis_node.py
+[3.877s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/slip_monitor_node.py
+[3.887s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/hand_gesture_node.py
+[3.898s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/people_node.py
+[3.906s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/acoustic_map_node.py
+[3.916s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/tactile_node.py
+[3.931s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/echo_node.py
+[3.941s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/nerf_capture_node.py
+[3.949s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/goto_room.py
+[3.957s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/room_tour.py
+[3.969s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/record_location.py
+[3.978s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/collect_keepout_clicks.py
+[3.990s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/pose_saver_node.py
+[4.002s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/room_markers_node.py
+[4.012s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/global_localizer_node.py
+[4.026s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/explore_manager_node.py
+[4.035s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/web_dashboard_node.py
+[4.046s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/goal_pose_bridge.py
+[4.066s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/odom_tf_broadcaster.py
+[4.076s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/trail_publisher_node.py
+[4.088s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/yolo11n.pt
+[4.100s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/yolo11n-seg.pt
+[4.108s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/yolo11n-pose.pt
+[4.119s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/yolo11n_int8.onnx
+[4.133s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/yolo11n_pose_int8.onnx
+[4.142s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/yolo11n_seg_int8.onnx
+[4.150s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/yunet_int8.onnx
+[4.159s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/__pycache__/arm_moveit.launch.cpython-312.pyc
+[4.170s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/__pycache__/bringup.launch.cpython-312.pyc
+[4.179s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/__pycache__/handeye_calibrate.launch.cpython-312.pyc
+[4.192s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/__pycache__/lidar.launch.cpython-312.pyc
+[4.204s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/__pycache__/localize.launch.cpython-312.pyc
+[4.213s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/__pycache__/map_mode_localize.launch.cpython-312.pyc
+[4.221s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/__pycache__/map_mode_slam.launch.cpython-312.pyc
+[4.233s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/__pycache__/perception_clusters.launch.cpython-312.pyc
+[4.243s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/__pycache__/rtabmap.launch.cpython-312.pyc
+[4.257s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/__pycache__/sim.launch.cpython-312.pyc
+[4.271s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/__pycache__/slam_only.launch.cpython-312.pyc
+[4.281s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/__pycache__/view_map.launch.cpython-312.pyc
+[4.290s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/arm_moveit.launch.py
+[4.300s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/bringup.launch.py
+[4.308s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/handeye_calibrate.launch.py
+[4.318s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/lidar.launch.py
+[4.333s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/localize.launch.py
+[4.342s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/map_mode_localize.launch.py
+[4.355s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/map_mode_slam.launch.py
+[4.365s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/perception_clusters.launch.py
+[4.373s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/rtabmap.launch.py
+[4.382s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/sim.launch.py
+[4.401s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/slam_only.launch.py
+[4.411s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/view_map.launch.py
+[4.430s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/99-robot-devices.rules
+[4.439s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/apriltag.yaml
+[4.449s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/arm_joy_ps5.yaml
+[4.466s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/arm_model.json
+[4.476s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/behavior_trees/navigate_to_pose_w_replanning_and_recovery.xml
+[4.488s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/ekf.yaml
+[4.497s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/explore.yaml
+[4.504s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/keepout_mask.pgm
+[4.512s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/keepout_mask.yaml
+[4.524s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/keepout_zones.yaml
+[4.536s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/lidar_arm_filter.yaml
+[4.545s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/locations.yaml
+[4.556s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/lukas.rviz
+[4.565s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/models/hey_robot.onnx
+[4.574s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/models/piper/el_GR-rapunzelina-low.onnx
+[4.588s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/models/piper/el_GR-rapunzelina-low.onnx.json
+[4.604s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/nav2_params.yaml
+[4.614s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/pcl_filter_params.yaml
+[4.626s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/robot.rviz
+[4.638s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/robot_scan.glb
+[4.648s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/robot_scan_uncropped.glb
+[4.662s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/sort_rules.yaml
+[4.675s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/teleop_twist_joy_ps5.yaml
+[4.690s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/RUNBOOK_remap.md
+[4.699s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/RUNBOOK_spin_retest.md
+[4.707s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/apply_handeye_calibration.cpython-312.pyc
+[4.716s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/auto_rooms.cpython-312.pyc
+[4.731s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/brc_line_probe.cpython-312.pyc
+[4.741s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/build_arm_model.cpython-312.pyc
+[4.749s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/bump_test.cpython-312-pytest-7.4.4.pyc
+[4.757s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/bump_test.cpython-312.pyc
+[4.768s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/calibrate_arm_base.cpython-312.pyc
+[4.777s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/calibrate_odom.cpython-312.pyc
+[4.789s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/check_gemini_quota.cpython-312.pyc
+[4.802s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/collect_keepout_clicks.cpython-312.pyc
+[4.812s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/crop_robot_scan.cpython-312.pyc
+[4.826s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/derive_dock_pose.cpython-312.pyc
+[4.835s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/doorway_probe.cpython-312.pyc
+[4.845s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/draw_keepout.cpython-312.pyc
+[4.853s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/drive_to_open.cpython-312.pyc
+[4.863s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/fetch_sim.cpython-312.pyc
+[4.876s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/fetch_sim_gazebo.cpython-312.pyc
+[4.896s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/hand_eye_probe.cpython-312.pyc
+[4.908s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/ir_diagnose.cpython-312.pyc
+[4.919s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/localize_in_room.cpython-312.pyc
+[4.934s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/make_room_mask.cpython-312.pyc
+[4.942s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/map_clearance.cpython-312.pyc
+[4.953s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/map_downsample.cpython-312.pyc
+[4.964s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/map_to_world.cpython-312.pyc
+[4.972s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/measure_camera_pitch.cpython-312.pyc
+[4.980s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/measure_person_distance.cpython-312.pyc
+[4.994s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/nerf_smoke_test.cpython-312.pyc
+[5.005s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/passive_arm_limits.cpython-312.pyc
+[5.016s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/path_block.cpython-312.pyc
+[5.029s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/ply_to_map.cpython-312.pyc
+[5.038s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/power_blackbox.cpython-312.pyc
+[5.048s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/roomba_awake.cpython-312.pyc
+[5.064s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/roomba_keepalive.cpython-312.pyc
+[5.075s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/sim_place_objects.cpython-312.pyc
+[5.086s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/straighten_map_display.cpython-312.pyc
+[5.102s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/tidy_sim.cpython-312.pyc
+[5.111s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/tool_ab.cpython-312.pyc
+[5.124s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/tool_multi.cpython-312.pyc
+[5.137s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/tool_repeat.cpython-312.pyc
+[5.146s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/train_nerf.cpython-312.pyc
+[5.159s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/usdz_to_glb.cpython-312.pyc
+[5.171s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/apply_handeye_calibration.py
+[5.178s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/apply_keepout_toggle.sh
+[5.185s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/apply_skirt_margin.sh
+[5.195s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/auto_rooms.py
+[5.208s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/brc_line_probe.py
+[5.223s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/build_arm_model.py
+[5.233s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/bump_test.py
+[5.243s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/calibrate_arm_base.py
+[5.257s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/calibrate_odom.py
+[5.270s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/check_gemini_quota.py
+[5.280s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/collect_keepout_clicks.py
+[5.292s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/crop_robot_scan.py
+[5.300s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/derive_dock_pose.py
+[5.308s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/doorway_probe.py
+[5.318s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/draw_keepout.py
+[5.337s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/drive_to_open.py
+[5.349s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/ensure_nav_active.sh
+[5.366s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/fetch_perception_models.sh
+[5.375s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/fetch_sim.py
+[5.386s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/fetch_sim_gazebo.py
+[5.401s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/fetch_tts_fallback.sh
+[5.412s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/fetch_vendored.sh
+[5.425s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/gui_session.sh
+[5.436s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/hand_eye_probe.py
+[5.445s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/install_power_smooth.sh
+[5.458s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/install_usb_power.sh
+[5.473s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/ir_diagnose.py
+[5.486s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/localize_in_room.py
+[5.498s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/make_room_mask.py
+[5.507s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/map_clearance.py
+[5.516s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/map_downsample.py
+[5.537s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/map_session.sh
+[5.549s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/map_to_world.py
+[5.568s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/measure_camera_pitch.py
+[5.577s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/measure_person_distance.py
+[5.593s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/nerf_smoke_test.py
+[5.606s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/passive_arm_limits.py
+[5.615s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/path_block.py
+[5.625s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/ply_to_map.py
+[5.638s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/power-blackbox.service
+[5.652s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/power-smooth.service
+[5.667s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/power_blackbox.py
+[5.678s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/power_smooth.sh
+[5.691s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/power_smooth_sys.sh
+[5.702s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/preflight.sh
+[5.710s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/quantize_npu_models.sh
+[5.725s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/record_nav_test.sh
+[5.741s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/reset_rtabmap.sh
+[5.759s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/roomba_awake.py
+[5.775s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/roomba_keepalive.py
+[5.786s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/save_map.sh
+[5.804s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/sim_place_objects.py
+[5.815s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/straighten_map_display.py
+[5.830s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/switch_map_mode.sh
+[5.841s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/tidy_sim.py
+[5.852s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/tool_ab.py
+[5.867s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/tool_multi.py
+[5.878s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/tool_repeat.py
+[5.891s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/train_nerf.py
+[5.900s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/usb_power.sh
+[5.907s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/usdz_to_glb.py
+[5.916s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/vendor_easy_handeye2.sh
+[5.931s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/vendor_roarm_moveit.sh
+[5.941s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/firmware/bno085_imu/bno085_imu.ino
+[5.952s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/firmware/i2c_scan/i2c_scan.ino
+[5.971s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/.gitkeep
+[5.981s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/1.glb
+[5.997s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/auto_20260818_2018.data
+[6.007s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/auto_20260818_2018.posegraph
+[6.017s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/d1.glb
+[6.029s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/iphone_house.glb
+[6.038s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/lukas.data
+[6.048s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/lukas.posegraph
+[6.063s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/room2.glb
+[6.074s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/room2_doors.yaml
+[6.084s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/room2_floorplan.jpg
+[6.095s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/room2_floorplan.yaml
+[6.103s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/room3.glb
+[6.111s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/room4.data
+[6.124s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/room4.glb
+[6.137s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/room4.pgm
+[6.146s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/room4.posegraph
+[6.156s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/room4.yaml
+[6.167s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/room4_room_colors.yaml
+[6.176s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/room4_room_mask.png
+[6.189s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/weights/clip/ViT-B-32.pt
+[6.207s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/yolov8s-worldv2.pt
+[6.228s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/worlds/dimi.world
+[6.238s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/worlds/kela3.world
+[6.248s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/worlds/malou.world
+[6.263s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/worlds/malou2.world
+[6.274s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/worlds/malou2.world.objects.json
+[6.285s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/description/robot_sim.urdf.xacro
+[6.297s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/ament_index/resource_index/package_run_dependencies/home_robot
+[6.305s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/ament_index/resource_index/parent_prefix_path/home_robot
+[6.313s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/environment/ament_prefix_path.sh
+[6.328s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/environment/ament_prefix_path.dsv
+[6.339s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/environment/path.sh
+[6.348s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/environment/path.dsv
+[6.361s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/local_setup.bash
+[6.371s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/local_setup.sh
+[6.381s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/local_setup.zsh
+[6.400s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/local_setup.dsv
+[6.412s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/package.dsv
+[6.430s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/ament_index/resource_index/packages/home_robot
+[6.441s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/cmake/home_robotConfig.cmake
+[6.453s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/cmake/home_robotConfig-version.cmake
+[6.470s] -- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/package.xml
+[6.671s] Listing '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot'...
+[6.671s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/__init__.py'...
+[6.671s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/acoustic_map.py'...
+[6.671s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/api_keys.py'...
+[6.671s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/arm_motion.py'...
+[6.671s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/arm_settings.py'...
+[6.671s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/collision_skirt.py'...
+[6.671s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/compass.py'...
+[6.671s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/dashboard_i18n.py'...
+[6.671s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/desktop.py'...
+[6.671s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/diagnostics.py'...
+[6.671s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/dock_geometry.py'...
+[6.671s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/echo.py'...
+[6.671s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/episodic.py'...
+[6.671s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/face_identity.py'...
+[6.671s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/fall_detect.py'...
+[6.671s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/fetch_planner.py'...
+[6.671s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/gesture.py'...
+[6.671s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/gesture_bindings.py'...
+[6.672s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/gesture_vocab.py'...
+[6.672s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/grasp_geometry.py'...
+[6.672s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/hand_gestures.py'...
+[6.672s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/ir_homing.py'...
+[6.672s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/joy_cmd_gate.py'...
+[6.672s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/keepout_files.py'...
+[6.672s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/keepout_toggle.py'...
+[6.672s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/llm_quota.py'...
+[6.672s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/map_straighten.py'...
+[6.672s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/map_walls3d.py'...
+[6.672s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/mic_settings.py'...
+[6.672s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/motion_confirm.py'...
+[6.672s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nerf.py'...
+[6.672s] Listing '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes'...
+[6.672s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/acoustic_map_node.py'...
+[6.672s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/apriltag_relocalizer.py'...
+[6.672s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/arm_driver.py'...
+[6.672s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/arm_joy_node.py'...
+[6.672s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/arm_moveit_bridge.py'...
+[6.672s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/arm_scene_obstacles.py'...
+[6.672s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/calibrate_odom.py'...
+[6.672s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/camera_watchdog_node.py'...
+[6.672s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/cluster_detector_node.py'...
+[6.672s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/diarization_node.py'...
+[6.672s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/doa_node.py'...
+[6.672s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/echo_node.py'...
+[6.672s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/episodic_memory_node.py'...
+[6.672s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/explore_manager_node.py'...
+[6.673s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/face_detection_node.py'...
+[6.673s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/face_identity_node.py'...
+[6.673s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/fall_monitor_node.py'...
+[6.673s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/gesture_node.py'...
+[6.673s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/global_localizer_node.py'...
+[6.673s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/goal_pose_bridge.py'...
+[6.673s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/goto_room.py'...
+[6.673s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/hand_gesture_node.py'...
+[6.673s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/imu_node.py'...
+[6.673s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/joy_cmd_gate_node.py'...
+[6.673s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/joystick_estop_node.py'...
+[6.673s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/llm_bridge_node.py'...
+[6.673s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/mission_executor_node.py'...
+[6.673s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/nerf_capture_node.py'...
+[6.673s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/object_detector.py'...
+[6.673s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/object_memory_node.py'...
+[6.836s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/obstacle_prediction_node.py'...
+[6.836s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/obstacle_safety_node.py'...
+[6.836s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/odom_tf_broadcaster.py'...
+[6.836s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/open_vocab_detector.py'...
+[6.836s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/people_node.py'...
+[6.836s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/person_follower_node.py'...
+[6.837s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/pick_place_node.py'...
+[6.837s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/pose_node.py'...
+[6.837s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/pose_saver_node.py'...
+[6.837s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/proactive_observer_node.py'...
+[6.837s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/rag_memory_node.py'...
+[6.837s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/record_location.py'...
+[6.837s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/recovery_manager_node.py'...
+[6.837s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/room_markers_node.py'...
+[6.837s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/room_tour.py'...
+[6.837s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/roomba_driver.py'...
+[6.837s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/self_diagnosis_node.py'...
+[6.837s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/semantic_costmap_node.py'...
+[6.837s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/situational_awareness_node.py'...
+[6.837s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/slip_monitor_node.py'...
+[6.837s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/sound_event_node.py'...
+[6.837s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/stt_node.py'...
+[6.837s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/system_metrics_node.py'...
+[6.837s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/tactile_node.py'...
+[6.837s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/task_planner_node.py'...
+[6.837s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/tracker_node.py'...
+[6.837s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/trail_publisher_node.py'...
+[6.837s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/tts_node.py'...
+[6.837s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/vision_node.py'...
+[6.837s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/wake_word_node.py'...
+[6.837s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/web_dashboard_node.py'...
+[6.837s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/object_memory.py'...
+[6.837s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/obstacle_prediction.py'...
+[6.838s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/pcl_clusters.py'...
+[6.838s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/people.py'...
+[6.838s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/proactive.py'...
+[6.838s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/room_files.py'...
+[6.838s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/room_segment.py'...
+[6.838s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/routines.py'...
+[6.838s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/safety_settings.py'...
+[6.838s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/servo_filter.py'...
+[6.838s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/simple_commands.py'...
+[6.838s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/slip_detect.py'...
+[6.838s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/slip_map.py'...
+[6.838s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/sort_planner.py'...
+[6.838s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/sound_events.py'...
+[6.838s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/speaker_fusion.py'...
+[6.838s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/status_query.py'...
+[6.838s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/stop_command.py'...
+[6.838s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/stt_postprocess.py'...
+[6.838s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/system_settings.py'...
+[6.838s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/tactile.py'...
+[6.838s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/tool_router.py'...
+[6.838s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/tts_fallback.py'...
+[6.838s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/vocabulary.py'...
+[6.838s] Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/voice_gate.py'...
+[6.854s] Invoked command in '/home/dimi/robot_ws/src/home_robot/build/home_robot' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/dimi/robot_ws/install/easy_handeye2:/opt/ros/jazzy /usr/bin/cmake --install /home/dimi/robot_ws/src/home_robot/build/home_robot

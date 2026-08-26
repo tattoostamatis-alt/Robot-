@@ -43,6 +43,10 @@ class TTSNode(Node):
         # el-GR-AthinaNeural (female) by user preference 2026-07-25; the male
         # el-GR-NestorasNeural is the only other Greek edge-tts voice.
         self.declare_parameter('voice', 'el-GR-AthinaNeural')
+        # `robot max` overrides this to piper: one consistent, offline Greek
+        # female voice with no network wait. Keep edge available as an explicit
+        # option for future comparisons.
+        self.declare_parameter('backend', 'edge')
         self.declare_parameter('rate', '+0%')
         self.declare_parameter('volume', '+0%')
         self.declare_parameter('device_index', 7)  # pulse — works with any PulseAudio output
@@ -73,7 +77,7 @@ class TTSNode(Node):
         #
         # ‼️ DISABLED BY DEFAULT since 2026-08-01, at the user's request. The
         # fallback worked, and that was the problem: piper's voice
-        # (el_GR-rapunzelina-low) is a different Greek woman from edge-tts's
+        # (el_GR-joy-medium) is a different Greek woman from edge-tts's
         # Athina, so an answer that fell back sounded like a second person
         # joining the conversation. The user reported it as "sometimes two
         # women with different voices answer me" and chose one consistent
@@ -97,6 +101,7 @@ class TTSNode(Node):
         self.declare_parameter('synth_attempts', 4)
 
         self.voice = self.get_parameter('voice').value
+        self.backend = self.get_parameter('backend').value.strip().lower()
         self.rate = self.get_parameter('rate').value
         self.volume = self.get_parameter('volume').value
         self.device_index = self.get_parameter('device_index').value
@@ -136,7 +141,10 @@ class TTSNode(Node):
         # Barge-in: abort the current utterance and drop anything queued.
         self.create_subscription(Bool, STOP_TOPIC, self._on_stop, 10)
 
-        self.get_logger().info(f'TTS node started — voice={self.voice}')
+        active_voice = ('Piper el_GR-joy-medium'
+                        if self.backend == 'piper' else self.voice)
+        self.get_logger().info(
+            f'TTS node started — backend={self.backend} voice={active_voice}')
 
     def _find_output(self, hint: str) -> int:
         """Index of the first output device whose name contains `hint`.
@@ -215,20 +223,26 @@ class TTSNode(Node):
         # Rate is per-utterance because the local fallback speaks at its own
         # (16 kHz for the Greek piper voice, vs edge-tts's 24 kHz).
         rate = SAMPLE_RATE
-        try:
-            mp3 = asyncio.run(self._synthesize(text))
-            pcm = self._decode_mp3(mp3)
-            audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
-        except Exception as e:                              # noqa: BLE001
+        if self.backend == 'piper':
+            local = self._fallback.synthesize(text) if self._fallback else None
+            if local is None:
+                raise RuntimeError('Piper backend requested but the voice is unavailable')
+            audio, rate = local
+        else:
+            try:
+                mp3 = asyncio.run(self._synthesize(text))
+                pcm = self._decode_mp3(mp3)
+                audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+            except Exception as e:                          # noqa: BLE001
             # Network TTS is out. Falling back matters more than it sounds:
             # everything upstream worked and only the audio is missing, so
             # staying silent here reads to the user as "the robot is broken".
-            local = self._fallback.synthesize(text) if self._fallback else None
-            if local is None:
-                raise
-            audio, rate = local
-            self.get_logger().warn(
-                f'edge-tts unavailable ({e}) — speaking with the local voice')
+                local = self._fallback.synthesize(text) if self._fallback else None
+                if local is None:
+                    raise
+                audio, rate = local
+                self.get_logger().warn(
+                    f'edge-tts unavailable ({e}) — speaking with the local voice')
 
         if self._interrupted:   # barge-in landed during synthesis — don't start playing
             return

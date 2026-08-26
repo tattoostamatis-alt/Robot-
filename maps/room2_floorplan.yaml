@@ -1,0 +1,18 @@
+# Registers maps/room2_floorplan.jpg's own pixel space to the map frame
+# (map_x=usd_x, map_y=-usd_z — see usdz_to_glb.py), so the 2D canvas can
+# draw AMCL pose / lidar scan / trail / goal correctly on top of the user's
+# own floorplan image instead of the procedural pgm rendering.
+#
+# map_x = a * pixel_x + b
+# map_y = c * pixel_y + d
+#
+# Fitted 2026-08-18 from the floorplan image's own content bounding box
+# (2676x2976 source, content at px [198,2477]x[221,2754]) against the real
+# floor/wall extent from the SAME source USD scan (map_x in [-4.410,4.410],
+# map_y in [-4.909,4.909]) — both images are renders of the identical
+# geometry, so a uniform scale + translate (no rotation) lines them up
+# (verified: opposite-corner round-trip error < 2cm).
+a: 0.0038731356953505525
+b: -5.17689186767941
+c: -0.0038731356953505525
+d: 5.764984988672472

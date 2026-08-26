@@ -65,7 +65,13 @@ def _page_html():
         html = html.replace(token, value)
     left = re.findall(r'__[A-Z_]+__', html)
     assert not left, f'unsubstituted placeholders, this harness is stale: {left}'
-    return html
+    # The photorealistic-scan viewer is a type="module" script importing "three"
+    # through an importmap of ABSOLUTE server paths. set_content() serves the
+    # page from about:blank, where /vendor/… resolves to nothing and the import
+    # throws before the rest of the page's script gets to run. Nothing this file
+    # tests lives in that module, so it is dropped rather than stubbed.
+    return re.sub(r'<script type="(?:module|importmap)">.*?</script>', '',
+                  html, flags=re.S)
 
 
 @pytest.fixture(scope='module')

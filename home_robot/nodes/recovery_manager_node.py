@@ -53,7 +53,13 @@ class RecoveryManagerNode(Node):
 
         self.declare_parameter('stuck_timeout',    5.0)   # seconds with cmd_vel but no movement
         self.declare_parameter('min_displacement', 0.03)  # meters — less than this = not moving
+        self.declare_parameter('min_rotation',     0.05)  # radians — rotation-in-place is movement too
         self.declare_parameter('cmd_threshold',    0.01)  # m/s or rad/s — above = motion commanded
+        # Tiny controller settling commands near a goal are not evidence that
+        # the chassis should be moving.  Auto-recovery there can cancel a
+        # successful approach and nudge the robot away from the object.
+        self.declare_parameter('stuck_linear_cmd_threshold',  0.04)
+        self.declare_parameter('stuck_angular_cmd_threshold', 0.15)
         self.declare_parameter('max_attempts',     3)
         # 0.25/0.15 originally — dropped 2026-08-09 after a live stuck event
         # where a requested BackUp/DriveOnHeading as small as 8cm still hit
@@ -110,7 +116,10 @@ class RecoveryManagerNode(Node):
 
         self._stuck_timeout   = self.get_parameter('stuck_timeout').value
         self._min_disp        = self.get_parameter('min_displacement').value
+        self._min_rotation    = self.get_parameter('min_rotation').value
         self._cmd_thr         = self.get_parameter('cmd_threshold').value
+        self._stuck_linear_cmd = self.get_parameter('stuck_linear_cmd_threshold').value
+        self._stuck_angular_cmd = self.get_parameter('stuck_angular_cmd_threshold').value
         self._max_attempts    = self.get_parameter('max_attempts').value
         self._backup_dist     = self.get_parameter('backup_distance').value
         # Divisors when the time allowance is computed; 0 would crash the
@@ -138,12 +147,18 @@ class RecoveryManagerNode(Node):
         self._reissue_odom: tuple | None = None   # odom (x,y) at the last re-issue
         # bt_navigator's own number_of_recoveries feedback — see _on_nav_feedback.
         self._last_num_recoveries: int | None = None
+        self._nav_feedback_goal_id: bytes | None = None
 
-        # Sliding window: deque of (timestamp_sec, x, y)
+        # Sliding window: deque of (timestamp_sec, x, y, yaw).  Translation
+        # alone cannot distinguish a legitimately rotating robot from a stuck
+        # one, which used to cancel valid Nav2 goals after five seconds of an
+        # initial in-place turn.
         self._positions: deque = deque(maxlen=40)   # ~20s at 0.5Hz check
         self._cmd_active = False   # True when cmd_vel_smoothed magnitude > threshold
         self._cmd_active_since: float | None = None
         self._cmd_last_rx: float | None = None  # last cmd_vel_smoothed arrival
+        self._cmd_linear = 0.0
+        self._cmd_angular = 0.0
         # Per-CURRENT-goal: has cmd_vel EVER gone active since bt_navigator
         # started counting recoveries from 0? Reset on that edge in
         # _on_nav_feedback, not on cmd_vel going idle — see _on_nav_feedback.
@@ -231,7 +246,10 @@ class RecoveryManagerNode(Node):
         t = self.get_clock().now().nanoseconds / 1e9
         x = msg.pose.pose.position.x
         y = msg.pose.pose.position.y
-        self._positions.append((t, x, y))
+        q = msg.pose.pose.orientation
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                         1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        self._positions.append((t, x, y, yaw))
 
     def _on_scan(self, msg: LaserScan):
         self._scan = msg
@@ -242,6 +260,8 @@ class RecoveryManagerNode(Node):
         now = self.get_clock().now().nanoseconds / 1e9
         with self._lock:
             self._cmd_last_rx = now
+            self._cmd_linear = math.hypot(msg.linear.x, msg.linear.y)
+            self._cmd_angular = abs(msg.angular.z)
             if active:
                 self._cmd_ever_active_this_goal = True
             if active and not self._cmd_active:
@@ -273,16 +293,32 @@ class RecoveryManagerNode(Node):
         # possibly near-exhausted count from an unrelated earlier goal and
         # can give up on a fresh goal almost immediately (seen 2026-08-09:
         # "attempt 4/4" on the very first stuck event of a brand-new goal).
-        if prev is None or self._pose_dist(prev.pose, goal.pose) > self._reissue_prog:
+        changed = prev is None or self._pose_dist(prev.pose, goal.pose) > self._reissue_prog
+        if changed:
             self._reissue_count = 0
             self._reissue_odom = None
             self._last_num_recoveries = None
+            # A mission owner may react to our cancelled NavigateToPose by
+            # choosing a different target (retry, delivery, or next room)
+            # before this recovery thread has completed all of its physical
+            # steps.  That new plan supersedes the old recovery.  Without this
+            # guard the stale thread can cancel or nudge underneath the new
+            # goal — observed in Room4 when a fetch started returning home.
+            if prev is not None and self._status in (STATUS_STUCK, STATUS_RECOVERING):
+                self._supersede_recovery()
 
     @staticmethod
     def _pose_dist(a, b) -> float:
         return math.hypot(a.position.x - b.position.x, a.position.y - b.position.y)
 
     def _on_nav_feedback(self, msg):
+        goal_id = bytes(msg.goal_id.uuid)
+        previous_goal_id = self._nav_feedback_goal_id
+        self._nav_feedback_goal_id = goal_id
+        if (previous_goal_id is not None and goal_id != previous_goal_id
+                and self._status in (STATUS_STUCK, STATUS_RECOVERING)):
+            self._supersede_recovery()
+
         # /plan only republishes on a SUCCESSFUL compute_path_to_pose, so a
         # goal stuck in repeated planning failures (see above) never refreshes
         # _last_goal_rx there. This feedback arrives for the goal regardless —
@@ -352,6 +388,19 @@ class RecoveryManagerNode(Node):
         if had_goal or gh is not None:
             self.get_logger().info('Navigation cancelled — dropping the goal, not re-issuing')
 
+    def _supersede_recovery(self):
+        """Stop recovery work belonging to a navigation goal that was replaced."""
+        self._cancelled = True
+        gh = self._active_behavior
+        if gh is not None:
+            try:
+                gh.cancel_goal_async()
+            except Exception as exc:                      # noqa: BLE001
+                self.get_logger().warn(
+                    f'could not stop superseded recovery behavior: {exc!r}')
+        self._nudge_pub.publish(Twist())
+        self.get_logger().info('New navigation target superseded the in-flight recovery')
+
     def _on_trigger(self, msg: Bool):
         if msg.data and self._status == STATUS_IDLE:
             self.get_logger().info('Manual recovery trigger received')
@@ -382,16 +431,41 @@ class RecoveryManagerNode(Node):
             return
 
         # Compute displacement over the stuck window
-        window = [(t, x, y) for t, x, y in self._positions if t >= since]
+        window = [(t, x, y, yaw) for t, x, y, yaw in self._positions if t >= since]
         if len(window) < 2:
             return
 
         xs = [p[1] for p in window]
         ys = [p[2] for p in window]
         disp = math.sqrt((max(xs) - min(xs))**2 + (max(ys) - min(ys))**2)
+        # Sum wrapped yaw deltas instead of max-min: crossing +pi/-pi must not
+        # look like a 2*pi jump, and a turn that changes direction still counts.
+        yaw_motion = sum(abs(math.atan2(math.sin(b[3] - a[3]),
+                                        math.cos(b[3] - a[3])))
+                         for a, b in zip(window, window[1:]))
+        with self._lock:
+            wants_linear = self._cmd_linear >= self._stuck_linear_cmd
+            wants_rotation = self._cmd_angular >= self._stuck_angular_cmd
 
-        if disp < self._min_disp:
-            self._declare_stuck(f'{elapsed:.1f}s with cmd_vel, displacement={disp:.3f}m')
+        if not wants_linear and not wants_rotation:
+            # MPPI often emits a few hundredths near its final tolerance.  Do
+            # not turn that harmless settling into a physical recovery move.
+            with self._lock:
+                self._cmd_active_since = now
+            return
+
+        progressed = ((wants_linear and disp >= self._min_disp) or
+                      (wants_rotation and yaw_motion >= self._min_rotation))
+        if progressed:
+            # Start a fresh window.  Keeping the original start forever makes
+            # old motion mask a later genuine stall during one continuous goal.
+            with self._lock:
+                self._cmd_active_since = now
+            return
+
+        self._declare_stuck(
+            f'{elapsed:.1f}s with cmd_vel, displacement={disp:.3f}m, '
+            f'rotation={yaw_motion:.3f}rad')
 
     def _declare_stuck(self, reason: str):
         """Shared entry point for both stuck-detection paths.
@@ -505,6 +579,8 @@ class RecoveryManagerNode(Node):
         with self._lock:
             self._cmd_active = False
             self._cmd_active_since = None
+            self._cmd_linear = 0.0
+            self._cmd_angular = 0.0
 
     def _maybe_reissue_goal(self):
         """Re-send the cancelled navigation goal (learned from /plan) so a
@@ -703,7 +779,8 @@ class RecoveryManagerNode(Node):
 
     def _has_moved_recently(self, window: float, threshold: float) -> bool:
         now = self.get_clock().now().nanoseconds / 1e9
-        recent = [(t, x, y) for t, x, y in self._positions if t >= now - window]
+        recent = [(t, x, y) for t, x, y, _yaw in self._positions
+                  if t >= now - window]
         if len(recent) < 2:
             return False
         xs = [p[1] for p in recent]

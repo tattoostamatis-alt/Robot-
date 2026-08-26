@@ -27,6 +27,7 @@ import numpy as np
 
 import rclpy
 from rclpy.node import Node
+from rcl_interfaces.msg import SetParametersResult
 from sensor_msgs.msg import Image, CameraInfo
 from visualization_msgs.msg import MarkerArray, Marker
 from std_msgs.msg import String
@@ -97,7 +98,34 @@ class ObjectDetector(Node):
         self.objects_pub = self.create_publisher(String,      'detected_objects', 10)
         self.markers_pub = self.create_publisher(MarkerArray, 'object_markers',   10)
 
+        # ‼️ Without this, `ros2 param set /object_detector confidence 0.3`
+        # reports "Set parameter successful" and changes nothing — the values
+        # above are read once at construction and cached on self. That cost a
+        # live debugging session on 2026-08-19: a bottle YOLO scored 0.39-0.57
+        # sat right on the 0.5 default, /detected_objects flickered empty, and
+        # every attempt to lower the threshold was silently ignored.
+        self.add_on_set_parameters_callback(self._on_set_params)
+
         self.get_logger().info('Object detector ready — waiting for camera topics...')
+
+    def _on_set_params(self, params):
+        for p in params:
+            if p.name == 'confidence':
+                if not 0.0 < p.value <= 1.0:
+                    return SetParametersResult(
+                        successful=False,
+                        reason='confidence must be in (0.0, 1.0]')
+                self.conf = p.value
+            elif p.name == 'process_every_n':
+                if p.value < 1:
+                    return SetParametersResult(
+                        successful=False, reason='process_every_n must be >= 1')
+                self.process_every_n = p.value
+            elif p.name == 'grasp_use_3d':
+                self._grasp_use_3d = p.value
+            # 'device' is deliberately not live-settable: the model is already
+            # loaded and .to() mid-callback would race _detect_cb.
+        return SetParametersResult(successful=True)
 
     def _load_model(self):
         # Import here (background thread) so torch/ROCm init never blocks node startup.
@@ -171,10 +199,24 @@ class ObjectDetector(Node):
 
             bx = (x1 + x2) // 2
             by = (y1 + y2) // 2
-            depth_m     = float(depth_img[by, bx])
             box_distance = self._box_distance(depth_img, x1, y1, x2, y2, img_w, img_h)
 
-            if depth_m <= 0.1 or depth_m > 5.0:
+            # ‼️ Never trust the single centre pixel. The D435 drops depth on
+            # transparent, reflective and thin surfaces, and the centre of a
+            # bottle is exactly where it drops it: measured 2026-08-19 on a
+            # clear PET bottle at 0.65 m, depth_img[by, bx] came back 0 on 9 of
+            # 12 consecutive frames while the median over the box was valid on
+            # 12/12 and stable to 5 mm (0.653-0.658 m). Reading one pixel and
+            # `continue`-ing on 0 silently threw away 75% of a perfectly good
+            # detection stream, so /detected_objects flickered empty and
+            # pick_place_node.py's target kept evaporating mid-approach.
+            # Widen to a patch, then fall back to the box median we already
+            # compute for metadata.
+            depth_m = self._patch_depth(depth_img, bx, by, img_w, img_h)
+            if depth_m is None:
+                depth_m = box_distance
+
+            if depth_m is None or depth_m <= 0.1 or depth_m > 5.0:
                 continue
 
             px = (bx - self._cx) * depth_m / self._fx
@@ -240,6 +282,22 @@ class ObjectDetector(Node):
         except Exception as e:            # noqa: BLE001 — geometry is best-effort
             self.get_logger().debug(f'grasp estimate failed: {e}')
             return None
+
+    @staticmethod
+    def _patch_depth(depth_m_img, bx, by, width, height, half=7):
+        """Median of the valid depths in a (2*half+1)^2 patch around (bx, by),
+        or None if the whole patch is dropped. Small enough to stay on the
+        object at grasping range, big enough to bridge the D435's speckle of
+        zeros on transparent surfaces."""
+        px1, py1 = max(bx - half, 0), max(by - half, 0)
+        px2, py2 = min(bx + half + 1, width), min(by + half + 1, height)
+        if px2 <= px1 or py2 <= py1:
+            return None
+        patch = depth_m_img[py1:py2, px1:px2]
+        valid = patch[patch > 0]
+        if valid.size == 0:
+            return None
+        return float(np.median(valid))
 
     @staticmethod
     def _box_distance(depth_m_img, x1, y1, x2, y2, width, height):

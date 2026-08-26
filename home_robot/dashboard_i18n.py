@@ -25,6 +25,10 @@ TRANSLATIONS = {
     'Σκούπα':            ('Vacuum', 'Sauger'),
     'Σύστημα':           ('System', 'System'),
     'Ρύθμιση':           ('Settings', 'Einstellung'),
+    'Χάρτες & χώρος':    ('Maps & space', 'Karten & Raum'),
+    'Όραση & αντίληψη':  ('Vision & perception', 'Sehen & Wahrnehmung'),
+    'Κίνηση & χειρισμός': ('Motion & control', 'Bewegung & Steuerung'),
+    'Τεχνικά':           ('Technical', 'Technik'),
 
     # ── map pane ──────────────────────────────────────────────────────────
     'ΧΑΡΤΗΣ · κλικ για πλοήγηση': ('MAP · click to navigate',
@@ -77,23 +81,38 @@ TRANSLATIONS = {
     '■ Σταμάτα να ακολουθείς': ('■ Stop following', '■ Nicht mehr folgen'),
     'Τα πράσινα πλαίσια είναι άνθρωποι, τα πορτοκαλί αντικείμενα· ο κίτρινος '
     'σκελετός είναι 17 σημεία COCO. Κλικ πάνω σε ένα πορτοκαλί αντικείμενο '
-    'στέλνει τον βραχίονα να το πιάσει. ‼️ Χρειάζονται τα perception nodes — '
+    'κάνει το ρομπότ να το πλησιάσει και μετά ο βραχίονας το πιάνει. ‼️ '
+    'Χρειάζονται τα perception nodes — '
     'ξεκίνα με «robot max use_perception:=true», αλλιώς η εικόνα μένει καθαρή '
     'και ο μετρητής στο 0. Το «Ακολούθησέ με» σταματά μόνο του μετά από 30 '
     'δευτερόλεπτα.':
         ('Green boxes are people, orange ones objects; the yellow skeleton is 17 '
-         'COCO keypoints. Clicking an orange object sends the arm to pick it up. '
+         'COCO keypoints. Clicking an orange object makes the robot approach it '
+         'and then the arm picks it up. '
          '‼️ Needs the perception nodes — start with "robot max '
          'use_perception:=true", otherwise the picture stays clean and the '
          'counter sits at 0. "Follow me" stops by itself after 30 seconds.',
          'Grüne Rahmen sind Menschen, orange sind Objekte; das gelbe Skelett '
-         'sind 17 COCO-Punkte. Klick auf ein orangenes Objekt schickt den Arm, '
-         'es zu greifen. ‼️ Braucht die Perception-Nodes — starte mit '
+         'sind 17 COCO-Punkte. Klick auf ein oranges Objekt lässt den Roboter '
+         'hinfahren und anschließend mit dem Arm zugreifen. ‼️ Braucht die '
+         'Perception-Nodes — starte mit '
          '„robot max use_perception:=true", sonst bleibt das Bild sauber und '
          'der Zähler auf 0. „Folge mir" stoppt nach 30 Sekunden von selbst.'),
 
     # ── camera pane: click-to-pick feedback ─────────────────────────────────
-    'Πάω να πιάσω: ':    ('Going to grab: ', 'Ich greife: '),
+    'Πηγαίνω προς: ':    ('Approaching: ', 'Ich fahre zu: '),
+    'Το εντοπίζω: ':     ('Locating: ', 'Ich lokalisiere: '),
+    'Το προσέγγισα — επιστρέφω':
+        ('Approached it — returning', 'Ziel erreicht — ich kehre zurück'),
+    'Ολοκληρώθηκε: ':    ('Completed: ', 'Abgeschlossen: '),
+    'Δεν μπόρεσα να πλησιάσω: ':
+        ('Could not approach: ', 'Annäherung fehlgeschlagen: '),
+    'Ακυρώθηκε: ':       ('Cancelled: ', 'Abgebrochen: '),
+    'Δεν επιτρέπεται πιάσιμο ανθρώπου ή ζώου.':
+        ('Picking up a person or animal is not allowed.',
+         'Menschen oder Tiere dürfen nicht gegriffen werden.'),
+    'Πλησιάζω: ':        ('Approaching: ', 'Ich nähere mich: '),
+    ' (στα 0.4 m)':      (' (to 0.4 m)', ' (bis auf 0,4 m)'),
 
     # ── camera pane: on-demand Pose/AprilTag toggles ────────────────────────
     'Πρόσθετη αντίληψη': ('Additional perception', 'Zusätzliche Wahrnehmung'),
@@ -353,18 +372,6 @@ TRANSLATIONS = {
          'Baut eine 3D-Karte der Wohnung aus der D435. Fahre langsam und richte '
          'die Kamera auf die Wände — die Karte wächst nur in Bewegung. Sie '
          'stört die Navigation NICHT: kein TF, eigener Namespace.'),
-    'Ο χάρτης αποθηκεύεται μόνος του στο ~/.home_robot/rtabmap/house.db. Για '
-    'εξαγωγή σε .ply/.obj χρησιμόποιησε File → Export στο ίδιο το RTAB-Map '
-    'παραπάνω. ‼️ Το «Νέος χάρτης» ξεκινά καθαρή συνεδρία — ό,τι έχεις '
-    'χαρτογραφήσει ως τώρα μένει στη βάση αλλά βγαίνει από τον τρέχοντα χάρτη.':
-        ('The map saves itself to ~/.home_robot/rtabmap/house.db. To export a '
-         '.ply/.obj use File → Export in RTAB-Map itself above. ‼️ "New map" '
-         'starts a clean session — what you have mapped so far stays in the '
-         'database but leaves the current map.',
-         'Die Karte speichert sich selbst unter ~/.home_robot/rtabmap/house.db. '
-         'Zum Export als .ply/.obj nutze File → Export in RTAB-Map oben. '
-         '‼️ „Neue Karte" startet eine saubere Sitzung — das bisher Kartierte '
-         'bleibt in der Datenbank, verlässt aber die aktuelle Karte.'),
 
     # ── NeRF pane ─────────────────────────────────────────────────────────
     'Καταγραφή':         ('Capture', 'Aufnahme'),
@@ -374,9 +381,6 @@ TRANSLATIONS = {
     '■ Σταμάτα':         ('■ Stop', '■ Stopp'),
     'καταγράφει':        ('recording', 'nimmt auf'),
     'Εκπαίδευση':        ('Training', 'Training'),
-    'Η εκπαίδευση τρέχει ΞΕΧΩΡΙΣΤΑ, από τερματικό:':
-        ('Training runs SEPARATELY, from a terminal:',
-         'Das Training läuft SEPARAT, im Terminal:'),
     'Καταγράφει εικόνες μαζί με τις ΜΕΤΡΗΜΕΝΕΣ πόζες της κάμερας από το TF — '
     "γι' αυτό δεν χρειάζεται COLMAP, που είναι το αργό και εύθραυστο μισό κάθε "
     'NeRF. Οδήγησε αργά γύρω από τον χώρο κοιτώντας τον από πολλές γωνίες. '
@@ -392,21 +396,6 @@ TRANSLATIONS = {
          'NeRF. Fahre langsam umher und blicke aus vielen Winkeln. Bilder werden '
          'nur gespeichert, wenn sich die Kamera wirklich bewegt hat (12 cm oder '
          '8°); sonst lehren 30 identische Aufnahmen pro Sekunde nichts.'),
-    '‼️ ΔΕΝ μπορεί να μοιραστεί το iGPU με το perception. Με το object_detector '
-    'και το pose_node ενεργά, η εκπαίδευση ΡΙΧΝΕΙ την ουρά του ROCm (memory '
-    'aperture violation) — δεν είναι έλλειψη μνήμης, μετρήθηκαν 5.9GB ελεύθερα. '
-    'Σταμάτα πρώτα το perception· το script αρνείται να ξεκινήσει και μόνο του. '
-    'Μετρημένη ταχύτητα: ~310ms/βήμα, άρα ένα δωμάτιο θέλει 45 λεπτά έως 2 ώρες.':
-        ('‼️ It CANNOT share the iGPU with perception. With object_detector and '
-         'pose_node running, training brings down the ROCm queue (memory '
-         'aperture violation) — not a memory shortage, 5.9 GB was free. Stop '
-         'perception first; the script also refuses to start on its own. '
-         'Measured speed: ~310 ms/step, so one room takes 45 minutes to 2 hours.',
-         '‼️ Es kann die iGPU NICHT mit der Perception teilen. Mit laufendem '
-         'object_detector und pose_node bricht das Training die ROCm-Queue ab '
-         '(memory aperture violation) — kein Speichermangel, 5,9 GB waren frei. '
-         'Stoppe zuerst die Perception; das Skript verweigert den Start auch '
-         'selbst. Gemessen: ~310 ms/Schritt, ein Raum dauert 45 Min bis 2 Std.'),
 
     # ── vacuum base pane ──────────────────────────────────────────────────
     'Βάση Roomba 879':   ('Roomba 879 base', 'Roomba-879-Basis'),
@@ -457,22 +446,11 @@ TRANSLATIONS = {
 
     # ── room colours (map pane) ───────────────────────────────────────────
     'Χρώματα':           ('Colours', 'Farben'),
-    '💾 Αποθήκευση ονομάτων/χρωμάτων':
-        ('💾 Save names/colours', '💾 Namen/Farben speichern'),
     'Αποτυχία.':         ('Failed.', 'Fehlgeschlagen.'),
-    '🖱️ Κλικ στον χάρτη επιλέγει δωμάτιο (αντί να στέλνει το ρομπότ εκεί)':
-        ('🖱️ Click on the map picks a room (instead of sending the robot there)',
-         '🖱️ Klick auf die Karte wählt einen Raum (statt den Roboter dorthin zu schicken)'),
     'Δεν βρέθηκε δωμάτιο εκεί.':
         ('No room found there.', 'Dort wurde kein Raum gefunden.'),
-    '(κανένα δωμάτιο εδώ)':
-        ('(no room here)', '(kein Raum hier)'),
     'm² χάρτης':          ('m² map', 'm² Karte'),
     'τρέχον δωμάτιο':     ('current room', 'aktueller Raum'),
-    '➕ Κλικ στον χάρτη ΠΡΟΣΘΕΤΕΙ δωμάτιο εδώ, με το όνομα/χρώμα από κάτω':
-        ('➕ Click on the map ADDS a room here, with the name/colour below',
-         '➕ Klick auf die Karte FÜGT hier einen Raum hinzu, mit Name/Farbe unten'),
-    'π.χ. κρεβατοκάμαρα': ('e.g. bedroom', 'z.B. Schlafzimmer'),
     'Δώσε πρώτα όνομα δωματίου.':
         ('Give the room a name first.', 'Gib dem Raum zuerst einen Namen.'),
     'Τοποθέτηση…':        ('Placing…', 'Platziere…'),
@@ -519,10 +497,11 @@ TRANSLATIONS = {
 
     # ── 3D floorplan (walls extruded from the 2D map) ──────────────────────
     'Τοίχοι 3D':         ('Walls 3D', '3D-Wände'),
+    '🧱 Τοίχοι':         ('🧱 Walls', '🧱 Wände'),
     'τοίχοι':            ('walls', 'Wände'),
-    'Σύρε για περιστροφή · ροδέλα για ζουμ · από τον καθαρό (τετραγωνισμένο) 2D χάρτη':
-        ('Drag to rotate · wheel to zoom · from the clean (squared) 2D map',
-         'Ziehen zum Drehen · Rad zum Zoomen · aus der bereinigten (quadrierten) 2D-Karte'),
+    'Σύρε για περιστροφή · ροδέλα για ζουμ · δάπεδο χρωματισμένο ανά δωμάτιο, όπως στον 2D χάρτη':
+        ('Drag to rotate · wheel to zoom · floor coloured per room, same as the 2D map',
+         'Ziehen zum Drehen · Rad zum Zoomen · Boden pro Raum eingefärbt, wie auf der 2D-Karte'),
 
     # ── who is speaking ───────────────────────────────────────────────────
     'Ποιος μιλάει':      ('Who is speaking', 'Wer spricht'),
@@ -707,41 +686,7 @@ TRANSLATIONS = {
     'Αποθήκευση…':       ('Saving…', 'Speichere…'),
     'Αποθηκεύτηκε':      ('Saved', 'Gespeichert'),
     'Απέτυχε':           ('Failed', 'Fehlgeschlagen'),
-    '🧹 Καθαρή εκδοχή — ισιώνει τα σκαλοπάτια των τοίχων.':
-        ('🧹 Clean version — straightens the wall staircasing.',
-         '🧹 Saubere Version — begradigt die Treppenstufen der Wände.'),
-    'Μόνο εμφάνιση':     ('Display only', 'Nur Anzeige'),
-    'μέχρι να διαλέξεις: μπορεί να μετατοπίσει τοίχους λίγα εκατοστά ή να '
-    'αφαιρέσει ένα πραγματικό εμπόδιο που έμοιαζε με θόρυβο σάρωσης — σύγκρινε '
-    'οπτικά πριν διαλέξεις.':
-        ('until you choose: it can shift walls by a few centimetres or remove '
-         'a real obstacle that looked like scan noise — compare visually '
-         'before choosing.',
-         'bis du dich entscheidest: sie kann Wände um ein paar Zentimeter '
-         'verschieben oder ein echtes Hindernis entfernen, das wie '
-         'Scan-Rauschen aussah — vergleiche visuell, bevor du dich '
-         'entscheidest.'),
-    'Καθαρή εκδοχή':     ('Clean version', 'Saubere Version'),
-    'Πρωτότυπο':         ('Original', 'Original'),
-    'Ισιωμένο':          ('Straightened', 'Begradigt'),
-    'Κράτησε το πρωτότυπο': ('Keep the original', 'Original behalten'),
-    'Χρήση ισιωμένης εκδοχής':
-        ('Use the straightened version', 'Begradigte Version verwenden'),
-    'Θα αντικαταστήσει τον χάρτη':
-        ('This will replace the map', 'Das ersetzt die Karte'),
-    'με την ισιωμένη εκδοχή (κρατά αντίγραφο ασφαλείας). Αν αυτός ο '
-    'χάρτης είναι ήδη ενεργός, θέλει "Ενεργοποίηση" για να φανεί η '
-    'αλλαγή. Να συνεχίσω;':
-        ('with the straightened version (a backup copy is kept). If this map '
-         'is already active, it needs "Activate" for the change to show. '
-         'Continue?',
-         'durch die begradigte Version (eine Sicherungskopie wird behalten). '
-         'Wenn diese Karte bereits aktiv ist, braucht es "Aktivieren", damit '
-         'die Änderung sichtbar wird. Fortfahren?'),
-    'Εφαρμογή ισιωμένης εκδοχής…':
-        ('Applying the straightened version…', 'Wende begradigte Version an…'),
     'Έγινε':             ('Done', 'Erledigt'),
-    'αντίγραφο ασφαλείας': ('backup', 'Sicherungskopie'),
 
     # ── GUI session tabs (RViz / MoveIt / Gazebo) ─────────────────────────
     'Η ίδια συνεδρία :2 που ανοίγει το <code>robot max</code> — και αυτή που '
@@ -829,66 +774,23 @@ TRANSLATIONS = {
     'και ευθυγραμμισμένο βάθος.': ('and aligned depth.',
                                    'und ausgerichtete Tiefe.'),
 
-    # ── observations pane ─────────────────────────────────────────────────
-    'Πρόσεξα':           ('Noticed', 'Bemerkt'),
-    'Τι πρόσεξε':        ('What it noticed', 'Was aufgefallen ist'),
-    'Καμία παρατήρηση ακόμη.': ('No observations yet.',
-                                'Noch keine Beobachtungen.'),
-    'γνωστά αντικείμενα': ('known objects', 'bekannte Objekte'),
-    'Πώς μαθαίνει':      ('How it learns', 'So lernt er'),
-    'Το ρομπότ χτίζει μόνο του μια βάση αναφοράς: πού «ζει» κανονικά κάθε '
-    'αντικείμενο. Ένα αντικείμενο μετράει ως μόνιμο μόνο αφού το δει στο ίδιο '
-    'σημείο σε ΞΕΧΩΡΙΣΤΕΣ επισκέψεις, με απόσταση μεταξύ τους — αλλιώς μια '
-    'παρατεταμένη ματιά σε ένα δωμάτιο θα γινόταν «κανονικότητα» και όλα μετά '
-    'θα έμοιαζαν μετακινημένα.':
-        ('The robot builds its own baseline of where each object normally '
-         'lives. An object counts as settled only after being seen in the same '
-         'spot on SEPARATE visits, well apart in time — otherwise one long look '
-         'at a room would become "normal" and everything after it would look '
-         'moved.',
-         'Der Roboter baut selbst eine Referenz auf, wo jedes Objekt '
-         'normalerweise liegt. Ein Objekt gilt erst als fest, wenn es an '
-         'derselben Stelle bei GETRENNTEN Besuchen gesehen wurde — sonst würde '
-         'ein einziger langer Blick in einen Raum zur „Normalität“ und alles '
-         'Spätere sähe verschoben aus.'),
-    'Σε καινούριο χάρτη θα σιωπά για μέρες. Αυτό είναι το σωστό: δεν ξέρει '
-    'ακόμη τι σημαίνει «κανονικά». Μιλάει ΜΟΝΟ όταν υπάρχει άνθρωπος μπροστά '
-    'του, το πολύ 4 φορές την ώρα, ποτέ 23:00–08:00, και ποτέ την ίδια '
-    'παρατήρηση δύο φορές σε 2 ώρες.':
-        ('On a fresh map it will stay silent for days. That is correct: it does '
-         'not yet know what "normal" means. It speaks ONLY with a person in '
-         'view, at most 4 times an hour, never between 23:00 and 08:00, and '
-         'never the same remark twice within 2 hours.',
-         'Auf einer neuen Karte schweigt er tagelang. Das ist richtig: er weiß '
-         'noch nicht, was „normal“ heißt. Er spricht NUR, wenn eine Person zu '
-         'sehen ist, höchstens 4-mal pro Stunde, nie zwischen 23:00 und 08:00, '
-         'und nie dieselbe Bemerkung zweimal in 2 Stunden.'),
-
-    # ── object memory pane ────────────────────────────────────────────────
-    'Αντικείμενα':       ('Objects', 'Objekte'),
-    'Πού είναι τα πράγματα': ('Where things are', 'Wo die Dinge sind'),
-    'Τίποτα γνωστό ακόμη.': ('Nothing known yet.', 'Noch nichts bekannt.'),
-    'αντικείμενα':       ('objects', 'Objekte'),
-    'άγνωστο δωμάτιο':   ('unknown room', 'unbekannter Raum'),
-    'Το ρομπότ θυμάται πού είδε τελευταία κάθε αντικείμενο, από την κάμερα — '
-    'η ίδια μνήμη που χρησιμοποιεί το «φέρε μου το Χ». Ένα αντικείμενο '
-    'μπαίνει εδώ μόνο αφού επιβεβαιωθεί σε αρκετές ξεχωριστές παρατηρήσεις, '
-    'όχι από μία ματιά.':
-        ('The robot remembers where it last saw each object, from the camera '
-         '— the same memory "bring me the X" uses. An object only appears '
-         'here once confirmed across several separate observations, not from '
-         'a single glance.',
-         'Der Roboter merkt sich, wo er jedes Objekt zuletzt gesehen hat, '
-         'über die Kamera — dasselbe Gedächtnis, das „bring mir das X" nutzt. '
-         'Ein Objekt erscheint hier erst, nachdem es in mehreren getrennten '
-         'Beobachtungen bestätigt wurde, nicht nach einem einzigen Blick.'),
-
-    # ── timeline pane ─────────────────────────────────────────────────────
-    'Χρονολόγιο':        ('Timeline', 'Zeitleiste'),
-    'Χρονικό':           ('Timeline', 'Verlauf'),
     'Χέρι':              ('Arm', 'Arm'),
     'Σπίτι 3D':          ('House 3D', 'Haus 3D'),
     'Φωνή':              ('Voice', 'Sprache'),
+    'Ζωντανό μικρόφωνο': ('Live microphone', 'Live-Mikrofon'),
+    'αναμονή':           ('waiting', 'wartet'),
+    'ακούει':            ('listening', 'hört zu'),
+    'μεταγράφει':        ('transcribing', 'transkribiert'),
+    'άκουσε':            ('heard', 'gehört'),
+    'Περιμένω να πεις «ρομπότ»…':
+        ('Waiting for you to say “robot”…',
+         'Warte darauf, dass du „Roboter“ sagst …'),
+    'Ακούω τη φράση σου…':
+        ('Listening to your phrase…', 'Ich höre deinen Satz …'),
+    'Το Whisper μεταγράφει τη φράση…':
+        ('Whisper is transcribing the phrase…',
+         'Whisper transkribiert den Satz …'),
+    'Συνομιλία LLM':     ('LLM conversation', 'LLM-Unterhaltung'),
 
     # ── compass ───────────────────────────────────────────────────────────
     'Πυξίδα':            ('Compass', 'Kompass'),
@@ -934,18 +836,6 @@ TRANSLATIONS = {
          'Roboter nach Norden und drücke die Taste — einmal pro Karte. Wenn du '
          'weißt, dass er anders steht, wähle die Richtung aus der Liste. '
          '‼️ Benötigt Lokalisierung: ohne AMCL gibt es keinen Winkel.'),
-    'Ρώτα τη μνήμη':     ('Ask the memory', 'Frag das Gedächtnis'),
-    'Ρώτα':              ('Ask', 'Fragen'),
-    'π.χ. τι έγινε σήμερα το πρωί;': ('e.g. what happened this morning?',
-                                      'z.B. was ist heute Morgen passiert?'),
-    'γεγονότα':          ('events', 'Ereignisse'),
-    'Άδειο.':            ('Empty.', 'Leer.'),
-    # The chips display these but SEND the Greek — parse_time_window is Greek.
-    'σήμερα':            ('today', 'heute'),
-    'σήμερα το πρωί':    ('this morning', 'heute Morgen'),
-    'χθες':              ('yesterday', 'gestern'),
-    'πριν από 2 ώρες':   ('2 hours ago', 'vor 2 Stunden'),
-
     # ── open-vocabulary search pane ───────────────────────────────────────
     'Ψάξε':              ('Search', 'Suchen'),
     'Ψάξε ό,τι θέλεις':  ('Search for anything', 'Suche irgendetwas'),
@@ -1836,6 +1726,261 @@ TRANSLATIONS = {
     'σε': ('across', 'über'),
     'κατευθύνσεις': ('directions', 'Richtungen'),
     'κανένα': ('none', 'keines'),
+    # ── Map tab · scan/upload, saved-map sheet, room manager ─────────────
+    # Room names double as the PRESETS the room manager offers, so a
+    # German UI both suggests and saves "Schlafzimmer".
+    'Φωτορεαλιστικό σάρωμα': ('Photorealistic scan', 'Fotorealistischer Scan'),
+    'Σύρε για περιστροφή · ροδέλα για ζουμ · κλικ πάνω στο σπίτι στέλνει το '
+    'ρομπότ εκεί · πραγματικό υφασμένο mesh (τηλέφωνο), όχι το occupancy grid'
+    ' — το AMCL εντοπίζεται στον 2D χάρτη, εδώ βλέπεις μόνο την ίδια θέση '
+    'πάνω στην πραγματική όψη':
+        ('Drag to rotate · wheel to zoom · clicking on the house sends the '
+         'robot there · a real textured mesh (from the phone), not the '
+         'occupancy grid — AMCL localises on the 2D map, here you only see '
+         'the same position on the real thing',
+         'Ziehen zum Drehen · Rad zum Zoomen · ein Klick auf das Haus schickt'
+         ' den Roboter dorthin · ein echtes texturiertes Mesh (vom Handy), '
+         'nicht das Occupancy Grid — AMCL lokalisiert auf der 2D-Karte, hier '
+         'siehst du nur dieselbe Position auf der echten Ansicht'),
+    '⬆️ Ανέβασμα σάρωσης 3D': ('⬆️ Upload a 3D scan', '⬆️ 3D-Scan hochladen'),
+    'Σάρωσε το σπίτι με το κινητό (π.χ. 3D Scanner App / Scaniverse) και '
+    'ανέβασε εδώ το εξαγόμενο PLY — γίνεται αυτόματα νέος χάρτης. Πρόσθεσε '
+    'και το GLB της ίδιας σάρωσης (προαιρετικό) για το φωτορεαλιστικό '
+    '«Σάρωμα» από πάνω.':
+        ('Scan the house with your phone (e.g. 3D Scanner App / Scaniverse) '
+         'and upload the exported PLY here — it automatically becomes a new '
+         'map. Add the GLB of the same scan (optional) for the photorealistic'
+         ' "Scan" view above.',
+         'Scanne das Haus mit dem Handy (z. B. 3D Scanner App / Scaniverse) '
+         'und lade die exportierte PLY hier hoch — daraus wird automatisch '
+         'eine neue Karte. Füge die GLB desselben Scans hinzu (optional) für '
+         'die fotorealistische Ansicht „Scan" oben.'),
+    'PLY (σάρωση)': ('PLY (scan)', 'PLY (Scan)'),
+    'GLB (προαιρετικό)': ('GLB (optional)', 'GLB (optional)'),
+    '⬆️ Μετατροπή σε χάρτη':
+        ('⬆️ Convert into a map',
+         '⬆️ In Karte umwandeln'),
+    'Μετονομασία': ('Rename', 'Umbenennen'),
+    'Αντίγραφο ασφαλείας': ('Backup', 'Sicherung'),
+    'Επαναφορά': ('Restore', 'Wiederherstellen'),
+    'Χωρισμός Δωματίων': ('Room partition', 'Raumaufteilung'),
+    'Απαγορευμένη Ζώνη': ('No-go zone', 'Sperrzone'),
+    'Χάρτης κάλυψης': ('Coverage map', 'Abdeckungskarte'),
+    "Κάθε πράσινη κουκκίδα είναι μια θέση απ' όπου κρατήθηκε καρέ (πάνοψη, "
+    "x/y). Η πορτοκαλί είναι η πιο πρόσφατη. Βοηθά να δεις ΕΝ ΚΙΝΗΣΕΙ αν "
+    "καλύπτεις όλο το δωμάτιο πριν πατήσεις «Σταμάτα». Καθαρίζει αυτόματα "
+    "όταν ξεκινά νέα καταγραφή.":
+        ('Every green dot is a position a frame was kept from (top view, '
+         'x/y). The orange one is the most recent. It helps you see WHILE '
+         'DRIVING whether you are covering the whole room before pressing '
+         '"Stop". It clears itself when a new capture starts.',
+         'Jeder grüne Punkt ist eine Position, von der ein Bild behalten '
+         'wurde (Draufsicht, x/y). Der orange ist der neueste. So siehst du '
+         'WÄHREND DER FAHRT, ob du den ganzen Raum abdeckst, bevor du „Stopp"'
+         ' drückst. Beim Start einer neuen Aufnahme wird er automatisch '
+         'gelöscht.'),
+    'Βήμα': ('Step', 'Schritt'),
+    'Χρόνος / ETA': ('Time / ETA', 'Zeit / ETA'),
+    '▶ Ξεκίνα εκπαίδευση': ('▶ Start training', '▶ Training starten'),
+    'Σταμάτα αντίληψη και ξαναδοκίμασε':
+        ('Stop perception and try again',
+         'Wahrnehmung stoppen und erneut versuchen'),
+    '‼️ ΔΕΝ μπορεί να μοιραστεί το iGPU με το perception. Με το '
+    'object_detector και το pose_node ενεργά, η εκπαίδευση ΡΙΧΝΕΙ την ουρά '
+    'του ROCm (memory aperture violation) — δεν είναι έλλειψη μνήμης, '
+    'μετρήθηκαν 5.9GB ελεύθερα. Το «Σταμάτα αντίληψη» σβήνει ΜΟΝΟ τα 3 nodes '
+    'που χρησιμοποιούν το iGPU (object_detector, pose_node, '
+    'open_vocab_detector) — το ρομπότ συνεχίζει να οδηγεί/εντοπίζεται '
+    'κανονικά, απλά τυφλώνεται μέχρι το επόμενο «robot max». Μετρημένη '
+    'ταχύτητα: ~310ms/βήμα, άρα ένα δωμάτιο θέλει 45 λεπτά έως 2 ώρες. '
+    'Αποθηκεύει checkpoint κάθε 200 βήματα — «Σταμάτα» και ξανά «Ξεκίνα» '
+    'συνεχίζει από εκεί, δεν ξαναρχίζει από την αρχή.':
+        ('‼️ It CANNOT share the iGPU with perception. With object_detector '
+         'and pose_node running, training BRINGS DOWN the ROCm queue (memory '
+         'aperture violation) — it is not a lack of memory, 5.9 GB were '
+         'measured free. "Stop perception" kills ONLY the 3 nodes that use '
+         'the iGPU (object_detector, pose_node, open_vocab_detector) — the '
+         'robot keeps driving and localising normally, it just goes blind '
+         'until the next "robot max". Measured speed: ~310 ms/step, so one '
+         'room takes 45 minutes to 2 hours. It saves a checkpoint every 200 '
+         'steps — "Stop" and "Start" again continues from there, it does not '
+         'start over.',
+         '‼️ Sie kann die iGPU NICHT mit der Wahrnehmung teilen. Mit aktivem '
+         'object_detector und pose_node BRINGT das Training die ROCm-Queue '
+         'zum Absturz (memory aperture violation) — es fehlt nicht an '
+         'Speicher, 5,9 GB waren frei. „Wahrnehmung stoppen" beendet NUR die '
+         '3 Nodes, die die iGPU nutzen (object_detector, pose_node, '
+         'open_vocab_detector) — der Roboter fährt und lokalisiert weiter '
+         'normal, er ist nur blind bis zum nächsten „robot max". Gemessene '
+         'Geschwindigkeit: ~310 ms/Schritt, ein Raum braucht also 45 Minuten '
+         'bis 2 Stunden. Alle 200 Schritte wird ein Checkpoint gespeichert — '
+         '„Stopp" und wieder „Start" macht dort weiter und fängt nicht von '
+         'vorn an.'),
+    'Περιστροφή αριστερά': ('Rotate left', 'Nach links drehen'),
+    'Περιστροφή δεξιά': ('Rotate right', 'Nach rechts drehen'),
+    'Αποθηκευμένοι χάρτες': ('Saved maps', 'Gespeicherte Karten'),
+    'Επεξεργασία χάρτη': ('Edit the map', 'Karte bearbeiten'),
+    'όνομα νέου χάρτη': ('new map name', 'Name der neuen Karte'),
+    'Ο χάρτης αποθηκεύεται μόνος του στο ~/.home_robot/rtabmap/house.db. Για '
+    'εξαγωγή σε .ply/.obj χρησιμόποιησε File → Export στο ίδιο το RTAB-Map '
+    'παραπάνω. ‼️ Το «Νέος χάρτης» ξεκινά καθαρή συνεδρία — ό,τι έχεις '
+    'χαρτογραφήσει ως τώρα μένει στη βάση αλλά βγαίνει από τον τρέχοντα '
+    'χάρτη. Το «💾 Αποθήκευση» παίρνει ένα στιγμιότυπο του μέχρι τώρα χάρτη σε'
+    ' ξεχωριστό αρχείο, χωρίς να διακόψει τη χαρτογράφηση.':
+        ('The map saves itself into ~/.home_robot/rtabmap/house.db. To export'
+         ' it to .ply/.obj use File → Export in RTAB-Map itself above. ‼️ '
+         '"New map" starts a clean session — whatever you have mapped so far '
+         'stays in the database but leaves the current map. "💾 Save" takes a '
+         'snapshot of the map so far into a separate file, without '
+         'interrupting the mapping.',
+         'Die Karte speichert sich selbst in ~/.home_robot/rtabmap/house.db. '
+         'Für den Export nach .ply/.obj nutze File → Export in RTAB-Map oben.'
+         ' ‼️ „Neue Karte" startet eine saubere Sitzung — das bisher '
+         'Kartierte bleibt in der Datenbank, verlässt aber die aktuelle '
+         'Karte. „💾 Speichern" legt eine Momentaufnahme der bisherigen Karte '
+         'in einer eigenen Datei ab, ohne die Kartierung zu unterbrechen.'),
+    '«Προβολή» χτίζει αυτόματα το συναρμολογημένο 3D cloud σε νέα καρτέλα '
+    '(~15s) — η πρόοδος φαίνεται live.':
+        ('"View" automatically builds the assembled 3D cloud in a new tab '
+         '(~15 s) — the progress is shown live.',
+         '„Ansehen" baut die zusammengesetzte 3D-Punktwolke automatisch in '
+         'einem neuen Tab (~15 s) — der Fortschritt wird live angezeigt.'),
+    'Αποθήκευση σε εξέλιξη…': ('Saving…', 'Speichern läuft…'),
+    'Η αποθήκευση απέτυχε — δες τα logs.':
+        ('Saving failed — check the logs.',
+         'Speichern fehlgeschlagen — siehe Logs.'),
+    'Δεν υπάρχουν ακόμα αποθηκευμένοι χάρτες.':
+        ('No saved maps yet.',
+         'Noch keine gespeicherten Karten.'),
+    '👁 Προβολή': ('👁 View', '👁 Ansehen'),
+    'Άνοιγμα…': ('Opening…', 'Wird geöffnet…'),
+    'Άνοιγμα απέτυχε:': ('Opening failed:', 'Öffnen fehlgeschlagen:'),
+    'Άνοιγμα απέτυχε.': ('Opening failed.', 'Öffnen fehlgeschlagen.'),
+    'εκπαιδεύεται': ('training', 'trainiert'),
+    'σφάλμα': ('error', 'Fehler'),
+    'κανένας ενεργός χάρτης': ('no active map', 'keine aktive Karte'),
+    'Κανένας ενεργός χάρτης': ('No active map', 'Keine aktive Karte'),
+    'Νέο όνομα για': ('New name for', 'Neuer Name für'),
+    'Μετονομασία…': ('Renaming…', 'Wird umbenannt…'),
+    'Αντίγραφο ασφαλείας…': ('Backing up…', 'Sicherung läuft…'),
+    'Αποθηκεύτηκε ως': ('Saved as', 'Gespeichert als'),
+    'Διάλεξε πρώτα το αρχείο PLY της σάρωσης':
+        ("Pick the scan's PLY file first",
+         'Wähle zuerst die PLY-Datei des Scans'),
+    'Ανεβαίνει και μετατρέπεται… μπορεί να πάρει λίγα λεπτά':
+        ('Uploading and converting… this can take a few minutes',
+         'Wird hochgeladen und umgewandelt… das kann einige Minuten dauern'),
+    'έτοιμο': ('done', 'fertig'),
+    'δεν υπάρχει σάρωμα για αυτόν τον χάρτη':
+        ('there is no scan for this map',
+         'für diese Karte gibt es keinen Scan'),
+    '🏠 Δωμάτια': ('🏠 Rooms', '🏠 Räume'),
+    '🧭 Μετάβαση σε δωμάτιο': ('🧭 Go to a room', '🧭 Zu einem Raum fahren'),
+    '🏠 Διαχείριση δωματίων (όνομα, χρώμα, διαίρεση, συγχώνευση)':
+        ('🏠 Manage rooms (name, colour, divide, merge)',
+         '🏠 Räume verwalten (Name, Farbe, Teilen, Zusammenführen)'),
+    'Επιλογή': ('Select', 'Auswählen'),
+    'Νέο': ('New', 'Neu'),
+    'Διαίρεση': ('Divide', 'Teilen'),
+    'Συγχώνευση': ('Merge', 'Zusammenführen'),
+    'Αποθήκευση': ('Save', 'Speichern'),
+    'Διαγραφή': ('Delete', 'Löschen'),
+    'Πήγαινε': ('Go there', 'Hinfahren'),
+    'Άκυρο': ('Cancel', 'Abbrechen'),
+    'Δωμάτιο': ('Room', 'Raum'),
+    'Χωρίς όνομα': ('Unnamed', 'Ohne Namen'),
+    'όνομα δωματίου': ('room name', 'Raumname'),
+    'Άγγιξε ένα δωμάτιο στον χάρτη (ή μια κάρτα) για όνομα και χρώμα.':
+        ('Touch a room on the map (or a card) to set its name and colour.',
+         'Tippe einen Raum auf der Karte (oder eine Karte) an für Name und '
+         'Farbe.'),
+    'Άγγιξε μια περιοχή χωρίς χρώμα — γίνεται νέο δωμάτιο, μέχρι τους τοίχους'
+    ' της.':
+        ('Touch an area with no colour — it becomes a new room, out to its '
+         'walls.',
+         'Tippe eine Fläche ohne Farbe an — sie wird ein neuer Raum, bis zu '
+         'ihren Wänden.'),
+    'Δύο αγγίγματα στον χάρτη τραβούν τη γραμμή που κόβει το δωμάτιο στα δύο.':
+        ('Two taps on the map draw the line that cuts the room in two.',
+         'Zwei Tipper auf der Karte ziehen die Linie, die den Raum in zwei '
+         'Teile schneidet.'),
+    'Άγγιξε το δεύτερο δωμάτιο: ενώνεται με το επιλεγμένο σε ένα.':
+        ('Touch the second room: it joins the selected one into a single '
+         'room.',
+         'Tippe den zweiten Raum an: er wird mit dem ausgewählten zu einem '
+         'vereint.'),
+    '➕ Άγγιξε μια περιοχή για νέο δωμάτιο':
+        ('➕ Touch an area to make a new room',
+         '➕ Tippe eine Fläche für einen neuen Raum an'),
+    '✂️ Δύο αγγίγματα τραβούν τη γραμμή':
+        ('✂️ Two taps draw the line',
+         '✂️ Zwei Tipper ziehen die Linie'),
+    '🔗 Άγγιξε δύο δωμάτια για να ενωθούν':
+        ('🔗 Touch two rooms to join them',
+         '🔗 Tippe zwei Räume an, um sie zu verbinden'),
+    '🏠 Άγγιξε ένα δωμάτιο': ('🏠 Touch a room', '🏠 Tippe einen Raum an'),
+    'Τώρα τράβα τη γραμμή: δύο αγγίγματα.':
+        ('Now draw the line: two taps.',
+         'Jetzt die Linie ziehen: zwei Tipper.'),
+    'Διάλεξε πρώτα δωμάτιο.':
+        ('Pick a room first.',
+         'Wähle zuerst einen Raum.'),
+    '…και το δεύτερο σημείο.':
+        ('…and now the second point.',
+         '…und jetzt der zweite Punkt.'),
+    'Δώσε όνομα στο νέο κομμάτι.':
+        ('Name the new piece.',
+         'Benenne das neue Teil.'),
+    'Διαίρεση…': ('Dividing…', 'Wird geteilt…'),
+    'Τώρα άγγιξε το δεύτερο δωμάτιο.':
+        ('Now touch the second room.',
+         'Tippe jetzt den zweiten Raum an.'),
+    'Κανένα δωμάτιο ακόμη — πάτα «Νέο» και άγγιξε τον χάρτη.':
+        ('No rooms yet — press "New" and touch the map.',
+         'Noch keine Räume — auf „Neu" tippen und die Karte berühren.'),
+    'Επιλεγμένο:': ('Selected:', 'Ausgewählt:'),
+    'άγγιξε τώρα το δεύτερο δωμάτιο.':
+        ('now touch the second room.',
+         'tippe jetzt den zweiten Raum an.'),
+    'Άγγιξε πρώτα το δωμάτιο που κρατάει το όνομά του.':
+        ('Touch the room that keeps its name first.',
+         'Tippe zuerst den Raum an, der seinen Namen behält.'),
+    'Διαίρεση του': ('Dividing', 'Teilen von'),
+    'το νέο κομμάτι:': ('the new piece:', 'das neue Teil:'),
+    'Διάλεξε πρώτα το δωμάτιο που θα κοπεί.':
+        ('Pick the room to be cut first.',
+         'Wähle zuerst den Raum, der geteilt wird.'),
+    'Το νέο δωμάτιο:': ('The new room:', 'Der neue Raum:'),
+    'Άγγιξε ένα δωμάτιο στον χάρτη ή μια κάρτα παραπάνω.':
+        ('Touch a room on the map, or a card above.',
+         'Tippe einen Raum auf der Karte oder eine Karte oben an.'),
+    'Δώσε όνομα δωματίου.':
+        ('Give the room a name.',
+         'Gib dem Raum einen Namen.'),
+    'Να αφαιρεθεί το δωμάτιο': ('Remove the room', 'Raum entfernen'),
+    'Ο χάρτης και το πάτωμα δεν αλλάζουν — μόνο το χρώμα και το όνομα '
+    'φεύγουν.':
+        ('The map and the floor do not change — only the colour and the name '
+         'go away.',
+         'Karte und Boden ändern sich nicht — nur Farbe und Name '
+         'verschwinden.'),
+    'Συγχώνευση…': ('Merging…', 'Wird zusammengeführt…'),
+    'Δεν ξέρω πού είναι αυτό το δωμάτιο.':
+        ("I don't know where that room is.",
+         'Ich weiß nicht, wo dieser Raum ist.'),
+    'Πάω…': ('On my way…', 'Fahre hin…'),
+    'Σαλόνι': ('Living room', 'Wohnzimmer'),
+    'Κουζίνα': ('Kitchen', 'Küche'),
+    'Υπνοδωμάτιο': ('Bedroom', 'Schlafzimmer'),
+    'Παιδικό': ("Kids' room", 'Kinderzimmer'),
+    'Μπάνιο': ('Bathroom', 'Badezimmer'),
+    'Τραπεζαρία': ('Dining room', 'Esszimmer'),
+    'Γραφείο': ('Office', 'Arbeitszimmer'),
+    'Χολ': ('Hallway', 'Diele'),
+    'Διάδρομος': ('Corridor', 'Gang'),
+    'Μπαλκόνι': ('Balcony', 'Balkon'),
+    'Πλυσταριό': ('Laundry', 'Waschküche'),
+    'Αποθήκη': ('Storage', 'Abstellraum'),
 }
 
 

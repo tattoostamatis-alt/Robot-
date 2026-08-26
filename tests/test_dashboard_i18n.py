@@ -13,6 +13,7 @@ import json
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -196,8 +197,18 @@ LANG = 'el';
 out.push(t('Χάρτης'));
 console.log(JSON.stringify(out));
 '''
-    r = subprocess.run(['node', '-e', script], capture_output=True, text=True,
-                       timeout=30)
+    # Through a FILE, not `node -e`: the table is well past the kernel's
+    # 128 KB limit on a single argument, and passing it inline failed with
+    # "Argument list too long" as soon as the table grew.
+    with tempfile.NamedTemporaryFile('w', suffix='.js', encoding='utf-8',
+                                     delete=False) as f:
+        f.write(script)
+        path = f.name
+    try:
+        r = subprocess.run(['node', path], capture_output=True, text=True,
+                           timeout=30)
+    finally:
+        Path(path).unlink(missing_ok=True)
     assert r.returncode == 0, r.stderr
     got = json.loads(r.stdout)
     assert got[0] == 'Karte'

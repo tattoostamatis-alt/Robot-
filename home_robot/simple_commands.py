@@ -20,7 +20,6 @@ have it.
 """
 import re
 
-from home_robot import arm_motion
 from home_robot.stop_command import strip_accents
 
 __all__ = ['parse_simple_motion', 'parse_arm_command']
@@ -87,8 +86,8 @@ _ARM_OTHER_TOOL_RE = re.compile(
 # Exact accent-stripped match, not a stem: these are adverbs ("πάνω", "λίγο")
 # that do not inflect, so a truncated stem would only add false-positive risk
 # (e.g. an "εξ" stem for "έξω" matching "εξερεύνηση") for no benefit.
-_ARM_DIRECTION_STEMS = {strip_accents(d): d for d in arm_motion.DIRECTIONS}
-_ARM_AMOUNT_STEMS = {strip_accents(a): a for a in arm_motion.AMOUNTS}
+_ARM_DIRECTION_STEMS = {}
+_ARM_AMOUNT_STEMS = {}
 
 # Verbs that imply a direction on their own — "σήκωσε τον βραχίονα" ("lift
 # the arm") never says the word "πάνω", but it means exactly that. Checked

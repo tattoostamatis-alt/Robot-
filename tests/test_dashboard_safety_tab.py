@@ -85,7 +85,13 @@ def _page_html():
         html = html.replace(token, value)
     left = re.findall(r'__[A-Z_]+__', html)
     assert not left, f'unsubstituted placeholders, this harness is stale: {left}'
-    return html
+    # The photorealistic-scan viewer is a type="module" script importing "three"
+    # through an importmap of ABSOLUTE server paths. set_content() serves the
+    # page from about:blank, where /vendor/… resolves to nothing and the import
+    # throws before the rest of the page's script gets to run. Nothing this file
+    # tests lives in that module, so it is dropped rather than stubbed.
+    return re.sub(r'<script type="(?:module|importmap)">.*?</script>', '',
+                  html, flags=re.S)
 
 
 @pytest.fixture(scope='module')
@@ -151,10 +157,14 @@ def test_the_help_text_is_below_the_label_not_beside_it(page):
     assert abs(help_left - lab_left) < 2, 'the help text is in its own column'
 
 
-def test_the_tab_is_in_the_bar(page):
-    labels = page.evaluate(
-        "Array.from(document.querySelectorAll('.tab')).map(t => t.dataset.pane)")
-    assert 'safe' in labels, 'the safety tab did not render into the tab bar'
+def test_the_tab_is_reachable(page):
+    """The bar itself is down to the day-to-day tabs (CORE_TAB_IDS); safety
+    lives one tap further, under Ρύθμιση → "Περισσότερα εργαλεία". Either place
+    counts — what must not happen is a pane nothing can open."""
+    panes = page.evaluate(
+        "Array.from(document.querySelectorAll('.tab, .mt-row'))"
+        ".map(t => t.dataset.pane)")
+    assert 'safe' in panes, 'nothing on the page opens the safety pane'
 
 
 def test_every_spec_has_a_row_and_a_control(page):

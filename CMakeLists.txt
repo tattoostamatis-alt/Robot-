@@ -12,14 +12,10 @@ install(PROGRAMS
   home_robot/nodes/object_detector.py
   home_robot/nodes/camera_watchdog_node.py
   home_robot/nodes/obstacle_safety_node.py
-  home_robot/nodes/arm_driver.py
-  home_robot/nodes/arm_moveit_bridge.py
-  home_robot/nodes/arm_scene_obstacles.py
-  home_robot/nodes/pick_place_node.py
   home_robot/nodes/cluster_detector_node.py
   home_robot/nodes/system_metrics_node.py
   home_robot/nodes/joystick_estop_node.py
-  home_robot/nodes/arm_joy_node.py
+  home_robot/nodes/joy_cmd_gate_node.py
   home_robot/nodes/wake_word_node.py
   home_robot/nodes/stt_node.py
   home_robot/nodes/llm_bridge_node.py

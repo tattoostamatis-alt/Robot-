@@ -1,4 +1,0 @@
-# Keepout zones for this map — areas the robot must NOT navigate (map frame).
-# Edited from the dashboard's Χάρτες tab, or by hand here.
-# Shapes: rect (x,y=centre, width,height) | circle (x,y,radius), metres.
-zones: {}

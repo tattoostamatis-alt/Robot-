@@ -31,6 +31,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo, PointCloud2, PointField
 from std_msgs.msg import String
+from nav2_msgs.srv import ClearEntireCostmap
 
 import tf2_ros
 from geometry_msgs.msg import PointStamped
@@ -108,6 +109,13 @@ class SemanticCostmapNode(Node):
         self.create_subscription(String, 'detected_objects', self._on_detected, 10)
 
         self._pub = self.create_publisher(PointCloud2, '/semantic_obstacles', 10)
+        self._clear_local = self.create_client(
+            ClearEntireCostmap, '/local_costmap/clear_entirely_local_costmap')
+        self._clear_global = self.create_client(
+            ClearEntireCostmap, '/global_costmap/clear_entirely_global_costmap')
+        # Start true so a node restart while detections are already empty also
+        # removes semantic marks left in Nav2 by the previous process.
+        self._had_semantic_points = True
 
         self.get_logger().info(
             f'Semantic costmap node ready — person_r={self._person_r}m '
@@ -189,7 +197,21 @@ class SemanticCostmapNode(Node):
                     pass
 
         if all_pts:
+            self._had_semantic_points = True
             self._pub.publish(_make_pc2(all_pts, self._target_frame, stamp))
+        elif self._had_semantic_points:
+            # semantic_obstacles is deliberately marking-only: raytracing a
+            # synthetic cylinder would erase real scan obstacles between the
+            # camera and the object. Consequently Nav2 cannot clear a vanished
+            # semantic object by itself. Clear once on the nonempty->empty
+            # edge; the live scan immediately repopulates genuine obstacles.
+            self._had_semantic_points = False
+            request = ClearEntireCostmap.Request()
+            for client in (self._clear_local, self._clear_global):
+                if client.service_is_ready():
+                    client.call_async(request)
+            self.get_logger().info(
+                'Semantic detections cleared — removed stale costmap marks')
 
 
 def main():

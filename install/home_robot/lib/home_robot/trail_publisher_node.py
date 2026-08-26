@@ -1,0 +1,1 @@
+/home/dimi/robot_ws/src/home_robot/home_robot/nodes/trail_publisher_node.py

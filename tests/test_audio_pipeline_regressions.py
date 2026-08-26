@@ -420,6 +420,24 @@ def test_mp3_decode_is_bounded():
 
 # ── arm_driver ──────────────────────────────────────────────────────────────
 
+def _arm_modules(serial_mod):
+    return {
+        'serial': serial_mod,
+        'rclpy': _mod('rclpy', init=lambda *a, **k: None,
+                      spin=lambda *a, **k: None, ok=lambda: True,
+                      try_shutdown=lambda *a, **k: None),
+        'rclpy.node': _mod('rclpy.node', Node=_BaseNode),
+        'sensor_msgs': _mod('sensor_msgs'),
+        'sensor_msgs.msg': _mod('sensor_msgs.msg',
+                                JointState=lambda: _ns(header=_ns(stamp=None),
+                                                       name=[], position=[])),
+        'std_msgs': _mod('std_msgs'),
+        'std_msgs.msg': _mod('std_msgs.msg',
+                             String=lambda data='': _ns(data=data),
+                             Float32=lambda data=0.0: _ns(data=data)),
+    }
+
+
 @pytest.fixture
 def arm(monkeypatch):
     class _SerialException(Exception):
@@ -450,22 +468,8 @@ def arm(monkeypatch):
             pass
 
     serial_mod = _mod('serial', Serial=_Port, SerialException=_SerialException)
-    mods = {
-        'serial': serial_mod,
-        'rclpy': _mod('rclpy', init=lambda *a, **k: None,
-                      spin=lambda *a, **k: None, ok=lambda: True,
-                      try_shutdown=lambda *a, **k: None),
-        'rclpy.node': _mod('rclpy.node', Node=_BaseNode),
-        'sensor_msgs': _mod('sensor_msgs'),
-        'sensor_msgs.msg': _mod('sensor_msgs.msg',
-                                JointState=lambda: _ns(header=_ns(stamp=None),
-                                                       name=[], position=[])),
-        'std_msgs': _mod('std_msgs'),
-        'std_msgs.msg': _mod('std_msgs.msg',
-                             String=lambda data='': _ns(data=data),
-                             Float32=lambda data=0.0: _ns(data=data)),
-    }
-    mod = _load(f'{PKG}/home_robot/nodes/arm_driver.py', mods)
+    mod = _load(f'{PKG}/home_robot/nodes/arm_driver.py',
+                _arm_modules(serial_mod))
     return mod, mod.ArmDriver(), opened
 
 
@@ -512,3 +516,88 @@ def test_arm_write_failure_does_not_raise(arm):
     node.ser.dead = True
     node._send_json({'T': 105})      # must not raise
     assert node.ser is None
+
+
+def test_arm_can_start_unplugged_and_reconnect_later():
+    class _SerialException(Exception):
+        pass
+
+    attempts = []
+
+    class _Port:
+        def __init__(self, *a, **k):
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise _SerialException('not plugged in')
+
+        @property
+        def in_waiting(self):
+            return 0
+
+        def close(self):
+            pass
+
+    serial_mod = _mod('serial', Serial=_Port,
+                      SerialException=_SerialException)
+    mod = _load(f'{PKG}/home_robot/nodes/arm_driver.py',
+                _arm_modules(serial_mod))
+
+    node = mod.ArmDriver()            # must not raise when /dev/arm is absent
+    assert node.ser is None
+    node._reopen_at = 0.0
+    node._read_serial()
+    assert node.ser is not None
+    assert len(attempts) == 2
+
+
+def test_arm_rejects_nonfinite_joint_and_gripper_commands(arm):
+    mod, node, opened = arm
+    node._current_joints = {
+        'base': 0.0, 'shoulder': 0.0, 'elbow': 1.0,
+        'wrist': 0.0, 'roll': 0.0, 'hand': 2.0,
+    }
+    sent = []
+    node._send_json = sent.append
+
+    node._joint_cmd_cb(_ns(name=['base'], position=[float('nan')]))
+    node._gripper_cb(_ns(data=float('inf')))
+    node._raw_cmd_cb(_ns(data='{"T":104,"x":NaN,"y":0,"z":100}'))
+
+    assert sent == []
+
+
+def test_arm_driver_is_the_final_cartesian_unit_guard(arm):
+    mod, node, opened = arm
+    sent = []
+    node._send_json = sent.append
+
+    # Metres accidentally sent to firmware as millimetres: inside the base.
+    node._raw_cmd_cb(_ns(data='{"T":104,"x":0.3,"y":0,"z":0.1}'))
+    # Impossible for this arm, usually a bad frame or unit conversion.
+    node._raw_cmd_cb(_ns(data='{"T":104,"x":1000,"y":0,"z":0}'))
+    assert sent == []
+
+    node._raw_cmd_cb(_ns(data='{"T":104,"x":300,"y":0,"z":100}'))
+    assert len(sent) == 1
+
+
+def test_arm_rejects_impossible_feedback_pose(arm):
+    mod, node, opened = arm
+    node._home_pending = False
+    feedback = {
+        'v': 1318, 'b': 0.0, 's': 0.0, 'e': -1.0,
+        't': 0.0, 'r': 0.0, 'g': 2.0,
+    }
+
+    node._parse_feedback(feedback)
+
+    assert node._current_joints is None
+    assert node.pubs['arm/joint_states'].sent == []
+
+
+def test_arm_limits_cannot_escape_mechanical_range(arm):
+    mod, node, opened = arm
+    node._params['limit_base'] = [10.0, 20.0]
+
+    assert node.limits('base') == (mod.MECH_LIMITS['base'][1],) * 2
+    assert node._clamp('base', 15.0) == mod.MECH_LIMITS['base'][1]

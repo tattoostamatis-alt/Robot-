@@ -15,8 +15,8 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/config/models/piper"
-VOICE="el_GR-rapunzelina-low"
-BASE="https://huggingface.co/rhasspy/piper-voices/resolve/main/el/el_GR/rapunzelina/low"
+VOICE="el_GR-joy-medium"
+BASE="https://huggingface.co/rhasspy/piper-voices/resolve/main/el/el_GR/joy/medium"
 
 mkdir -p "$DIR"
 # HF_HUB_DISABLE_XET: Xet-backed downloads stall at 0 progress on this network.

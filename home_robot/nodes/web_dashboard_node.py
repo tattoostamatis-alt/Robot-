@@ -8,7 +8,7 @@ Started automatically by `robot max` (use_dashboard:=false to skip it).
 
 Two kinds of panel live here:
 
-  * Native panels rendered from ROS topics — map, camera, arm, vacuum, voice,
+  * Native panels rendered from ROS topics — map, camera, vacuum, voice,
     system.  Cheap, phone-friendly, and they work with nothing else running.
 
   * The real Qt GUIs — RViz, MoveIt, Gazebo — streamed as pixels from headless
@@ -68,14 +68,13 @@ from action_msgs.srv import CancelGoal
 from std_srvs.srv import Empty
 
 from home_robot.compass import offset_from_known_bearing
-from home_robot import (arm_settings, collision_skirt, keepout_files,
-                        keepout_toggle, map_straighten, map_walls3d,
+from home_robot import (collision_skirt, keepout_files,
+                        keepout_toggle, map_walls3d,
                         mic_settings, room_files, room_segment, safety_settings)
 from home_robot.system_settings import (
     bt_args, parse_bt_devices, parse_devices, parse_volume, parse_wifi_list,
     volume_args, wifi_connect_args)
 from home_robot.dashboard_i18n import LANGUAGES, as_js_table
-from home_robot.status_query import room_el
 
 import uvicorn
 from fastapi import FastAPI, File, Form, Request, UploadFile, WebSocket, WebSocketDisconnect
@@ -132,7 +131,6 @@ USB_DEVICES = {
     'lidar':  '📡 Lidar',
     'mic':    '🎙️ Μικρόφωνο',
     'imu':    '🧭 IMU',
-    'arm':    '🦾 Βραχίονας',
     'roomba': '🧹 Σκούπα',
 }
 # The root-owned copy, not the one in the source tree. A NOPASSWD sudoers entry
@@ -140,7 +138,7 @@ USB_DEVICES = {
 USB_HELPER = '/usr/local/sbin/robot-usb-power'
 
 # Must match the display map in scripts/gui_session.sh.
-VNC_PORTS = {'rviz': 5902, 'gazebo': 5903, 'moveit': 5904, 'rtabmap': 5905,
+VNC_PORTS = {'rviz': 5902, 'gazebo': 5903, 'rtabmap': 5905,
              'rtabview': 5907}
 # TigerVNC sessions authenticate from ~/.vnc/passwd, which we cannot read back
 # (it is DES-obfuscated).  The browser side needs the cleartext to answer the
@@ -151,15 +149,8 @@ VNC_PASSWORD = os.environ.get('HOME_ROBOT_VNC_PASSWORD', 'RobotView1')
 # 2026-07-31 with the torque cut.  Keep in sync with arm_driver's limit_*
 # parameters in bringup.launch.py and with config/arm_joy_ps5.yaml.
 # ‼️ On the shoulder, UP is the NEGATIVE direction: `lo` is how high it may go.
-ARM_LIMITS = {
-    'base':     [-3.015, 0.016],
-    'shoulder': [-0.169, 1.570],
-    'elbow':    [0.141, 3.079],
-    'wrist':    [-1.143, 1.407],
-    'roll':     [-1.165, 1.372],
-    'hand':     [1.080, 3.140],
-}
-ARM_JOINTS = ['base', 'shoulder', 'elbow', 'wrist', 'roll']
+ARM_LIMITS = {}
+ARM_JOINTS = []
 
 # ── Access token ───────────────────────────────────────────────────────────────
 # ‼️ This dashboard binds 0.0.0.0 and hands out full teleop, click-to-navigate,
@@ -306,15 +297,45 @@ def _smooth_map_edges(img: np.ndarray, factor: int = 4, sigma: float = 2.8) -> n
     Upscales with nearest-neighbour (so colours stay exact), Gaussian-blurs
     the corners round, then downsamples back to the original resolution —
     net effect is anti-aliasing, not blur, since the output size is
-    unchanged. Runs on the fully composited image (walls + tinted rooms) so
-    every boundary — wall/free, room/room, room/unknown — gets the same
-    treatment. Costs ~3x the PNG bytes (blurred edges compress worse than
-    flat colour runs) which is trivial at typical home-map sizes.
+    unchanged. Runs on the free/room/unknown fill BEFORE _draw_wall_lines
+    draws the wall strokes on top (see call order in _cb_map) — those stay
+    crisp vector lines instead of getting blurred along with everything
+    else. Costs ~3x the PNG bytes (blurred edges compress worse than flat
+    colour runs) which is trivial at typical home-map sizes.
     """
     h, w = img.shape[:2]
     up = cv2.resize(img, (w * factor, h * factor), interpolation=cv2.INTER_NEAREST)
     up = cv2.GaussianBlur(up, (0, 0), sigmaX=sigma)
     return cv2.resize(up, (w, h), interpolation=cv2.INTER_AREA)
+
+
+def _draw_wall_lines(img: np.ndarray, grid_flipped: np.ndarray,
+                      color=(50, 50, 50), thickness: int = 2) -> np.ndarray:
+    """"Floorplan" style: trace the wall mask's outline as a thin drawn
+    stroke instead of filling its true (sensor-measured) thickness as a
+    solid grey block. A raw SLAM wall is a several-pixel-wide band of noisy
+    occupied cells; a blueprint draws a wall as one clean line regardless of
+    how thick the real wall is, and that's the biggest single lever for
+    "looks like an architectural floorplan" vs "looks like a raster grid".
+
+    findContours traces both sides of that band (so a thick wall reads as
+    a double line, same as a real floorplan would draw it); approxPolyDP
+    straightens the per-cell staircase into clean polyline segments, which
+    also kills jagged diagonals here without blurring the line the way
+    _smooth_map_edges does for the softer fills underneath.
+    """
+    walls = (grid_flipped == 100).astype(np.uint8)
+    if not walls.any():
+        return img
+    contours, _ = cv2.findContours(walls, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    out = img.copy()
+    for cnt in contours:
+        if cv2.arcLength(cnt, True) < 6:
+            continue   # a stray cell or two, not a real wall
+        simplified = cv2.approxPolyDP(cnt, 1.6, True)
+        cv2.polylines(out, [simplified], isClosed=True, color=color,
+                      thickness=thickness, lineType=cv2.LINE_AA)
+    return out
 
 
 def _crop_to_content(img: np.ndarray, grid_flipped: np.ndarray,
@@ -345,6 +366,34 @@ def _crop_to_content(img: np.ndarray, grid_flipped: np.ndarray,
 
     new_origin = [ox + left * res, oy + (h - bottom) * res]
     return img[top:bottom, left:right], right - left, bottom - top, new_origin
+
+
+def _upscale_for_display(img: np.ndarray, width: int, height: int,
+                          resolution: float, factor: int = 2):
+    """Native SLAM resolution (typically ~5 cm/px, so a small house is only a
+    few hundred px across) is far coarser than #map-wrap gets stretched to on
+    screen (up to 560px tall, more on a desktop pane) — most of what the
+    "resolution" on screen actually was, was the BROWSER's own bilinear
+    stretch of a small image, which reads as soft/smeared ("δεν φαίνεται
+    καθαρός"). Rendering at 2x here and sending that means the browser has
+    much less stretching left to do, so detail — room edges, the wall lines
+    from _draw_wall_lines — reads crisp instead of blurred, at the SAME
+    on-screen size (the map pane's CSS size is untouched).
+
+    INTER_CUBIC, not NEAREST: this scales the already-anti-aliased
+    composited picture (soft room fills + crisp AA wall strokes), not raw
+    blocky grid cells, so it stays smooth rather than pixelating further.
+
+    Returns (image, width, height, resolution) — resolution is halved (twice
+    the pixels now cover the same metre), which is what the client's
+    w2c()/c2w() need to keep click-to-navigate and the robot/laser overlays
+    aligned to the bigger image. NOT the same value as self._full_map_info /
+    the room mask — those stay at the true SLAM resolution, since they index
+    room_mask.png, which this upscale never touches.
+    """
+    img = cv2.resize(img, (width * factor, height * factor),
+                      interpolation=cv2.INTER_CUBIC)
+    return img, width * factor, height * factor, resolution / factor
 
 # ── Shared state (thread-safe) ─────────────────────────────────────────────────
 
@@ -424,6 +473,21 @@ class State:
             return
         asyncio.run_coroutine_threadsafe(
             self._bcast_bytes(list(targets), payload), self._loop)
+
+    def send_json(self, targets, msg: dict):
+        """Send transient telemetry to a subset of authenticated sockets."""
+        if self._loop is None or not targets:
+            return
+        asyncio.run_coroutine_threadsafe(
+            self._bcast_text(list(targets), json.dumps(msg)), self._loop)
+
+    async def _bcast_text(self, clients, payload: str):
+        for ws in clients:
+            try:
+                await ws.send_text(payload)
+            except Exception:
+                with self._lock:
+                    self._clients.discard(ws)
 
     async def _bcast_bytes(self, clients, payload: bytes):
         for ws in clients:
@@ -616,6 +680,8 @@ class DashboardNode(Node):
         # Tabs currently listening to the microphone. Per socket, like the
         # cloud stream: two phones listening must not switch each other off.
         self._listen_ws: Set[object] = set()
+        # Voice-tab viewers receive only a live level, never raw mic audio.
+        self._voice_ws: Set[object] = set()
         self._mic_sub = None
         self._cloud_last = 0.0
         # _set_camera_pointcloud turns the D435's pointcloud filter on for as
@@ -648,7 +714,7 @@ class DashboardNode(Node):
         self._room_seg_cache = None            # see _segmentation_for()
         self._rooms_tinted = True              # toggled from the map tab
         self._last_map = None                  # so the toggle can redraw
-        self._full_map_info = None             # see _room_at_xy()
+        self._full_map_info = None             # see _room_centers()
         # Room-tab code (dispatch(), on the asyncio event loop) needs to know
         # the active map's name, but active_map() shells out to `ros2 param
         # get` on a cache miss (~1-2s, up to a 10s timeout) — blocking that
@@ -725,6 +791,7 @@ class DashboardNode(Node):
         # ── Voice / LLM ─────────────────────────────────────────────────────
         self.create_subscription(String, '/speech_text', self._cb_heard, 10)
         self.create_subscription(String, '/speech_response', self._cb_said, 10)
+        self.create_subscription(String, '/stt/state', self._cb_stt_state, 10)
         self.create_subscription(String, '/wake_word', self._cb_wake, 10)
         self.create_subscription(Bool, '/tts/speaking', self._cb_speaking, 10)
         self.create_subscription(String, '/situation_context', self._cb_situation, 10)
@@ -740,8 +807,6 @@ class DashboardNode(Node):
         # feature, and _cb_mic's own `if not self._listen_ws: return` never
         # stopped rclpy paying to deserialise and dispatch each one first.
         self.create_subscription(String, '/gesture_status', self._cb_gesture, 10)
-        self.create_subscription(String, '/observations', self._cb_observations, 10)
-        self.create_subscription(String, '/object_memory', self._cb_object_memory, 5)
         self.create_subscription(String, '/vocab/state', self._cb_vocab, latch)
         self.create_subscription(String, '/hand_gesture', self._cb_hand, latch)
         self.create_subscription(String, '/people', self._cb_people, latch)
@@ -758,11 +823,6 @@ class DashboardNode(Node):
                                              **json.loads(m.data)}), latch)
         self.create_subscription(String, '/llm_quota', self._cb_quota, latch)
         self.create_subscription(String, '/sound_events', self._cb_sound, latch)
-        # Both latched by their publishers, so a tab opened long after the fact
-        # still paints a full timeline instead of an empty list.
-        self.create_subscription(String, '/episodic/timeline', self._cb_timeline, latch)
-        self.create_subscription(String, '/episodic/answer',
-                                 self._cb_episodic_answer, 10)
 
         # ── Publishers ──────────────────────────────────────────────────────
         # ‼️ cmd_vel_safe, NOT cmd_vel — the D-pad published to /cmd_vel and the
@@ -803,11 +863,9 @@ class DashboardNode(Node):
         # The signal recovery_manager listens to so it drops the goal instead of
         # re-issuing it. A human cancel is the one case its re-issue must lose to.
         self._cancel_pub = self.create_publisher(String, '/mission/cancel', 10)
-        # The gesture "go" button and the timeline search box. Same topics the
-        # `goto_pointed` and `recall` voice tools use, so button and voice take
-        # one code path.
+        # The gesture "go" button. Same topic the `goto_pointed` voice tool
+        # uses, so button and voice take one code path.
         self._gesture_go_pub = self.create_publisher(EmptyMsg, "/gesture_go", 10)
-        self._recall_pub = self.create_publisher(String, '/episodic/query', 10)
         self._vocab_pub = self.create_publisher(String, '/vocab/set', 10)
         self._enrol_pub = self.create_publisher(String, '/faces/enrol', 10)
         self._forget_pub = self.create_publisher(String, '/faces/forget', 10)
@@ -892,19 +950,6 @@ class DashboardNode(Node):
         self._skirt_margin_mm = collision_skirt.MARGIN_DEFAULT_MM
         self._skirt_margin_at = None
         self.create_timer(3.0, self._safety_tick)
-
-        # ── arm envelope + speed ──────────────────────────────────────────────
-        # Same reasoning as the safety timer above: arm_driver/arm_joy can come
-        # up after the dashboard, or restart on their own (USB glitch), and
-        # each time they do they boot with only bringup.launch.py's/
-        # arm_joy_ps5.yaml's baked-in values until this pushes what the user
-        # actually asked for.
-        self._arm_settings = arm_settings.load()
-        self._arm_set: dict = {}
-        self._arm_get: dict = {}
-        self._arm_applied: set = set()
-        self._arm_live: dict = {}        # (node, param) -> value, as reported
-        self.create_timer(3.0, self._arm_tick)
 
         # ── microphone settings ────────────────────────────────────────────────
         # Same tick/apply/payload shape as safety_settings above — one Spec
@@ -1184,127 +1229,6 @@ class DashboardNode(Node):
         self._skirt_margin_at = stamp
         return self._skirt_margin_mm
 
-    # ── arm envelope + speed ──────────────────────────────────────────────────
-
-    def _arm_tick(self):
-        for node, params in arm_settings.all_targets(self._arm_settings).items():
-            cli = self._safety_client(self._arm_set, SetParameters,
-                                      node, 'set_parameters')
-            if not cli.service_is_ready():
-                self._arm_applied.discard(node)
-                continue
-            if node not in self._arm_applied:
-                self._arm_applied.add(node)
-                cli.call_async(self._arm_request(params))
-        self._arm_read()
-        self._state.broadcast({'type': 'arm_settings', 'v': self._arm_payload()})
-
-    @staticmethod
-    def _arm_request(params: dict) -> SetParameters.Request:
-        """Unlike _safety_request: also carries integer (accel) and
-        double-array (limit_<joint>, a [lo, hi] pair) parameter types."""
-        req = SetParameters.Request()
-        for name, value in params.items():
-            if isinstance(value, (list, tuple)):
-                pv = ParameterValue(type=ParameterType.PARAMETER_DOUBLE_ARRAY,
-                                    double_array_value=[float(v) for v in value])
-            elif isinstance(value, int) and not isinstance(value, bool):
-                pv = ParameterValue(type=ParameterType.PARAMETER_INTEGER,
-                                    integer_value=value)
-            else:
-                pv = ParameterValue(type=ParameterType.PARAMETER_DOUBLE,
-                                    double_value=float(value))
-            req.parameters.append(Parameter(name=name, value=pv))
-        return req
-
-    def _arm_read(self):
-        """Read back arm_driver's limit_* + accel. arm_driver, not arm_joy, is
-        authoritative for what is actually in force: it is the node that
-        refuses an out-of-range command; arm_joy only stops its own jog
-        integrator winding up to one (see arm_driver.limits()' docstring)."""
-        names = [f'limit_{j}' for j in arm_settings.MECH_LIMITS] + ['accel']
-        cli = self._safety_client(self._arm_get, GetParameters,
-                                  '/arm_driver', 'get_parameters')
-        if not cli.service_is_ready():
-            for name in names:
-                self._arm_live.pop(('/arm_driver', name), None)
-            return
-        req = GetParameters.Request()
-        req.names = names
-        fut = cli.call_async(req)
-        fut.add_done_callback(lambda f, ns=names: self._arm_got(ns, f))
-
-    def _arm_got(self, names, fut):
-        try:
-            values = fut.result().values
-        except Exception:                                     # noqa: BLE001
-            return
-        for name, val in zip(names, values):
-            if val.type == ParameterType.PARAMETER_DOUBLE_ARRAY:
-                self._arm_live[('/arm_driver', name)] = list(val.double_array_value)
-            elif val.type == ParameterType.PARAMETER_INTEGER:
-                self._arm_live[('/arm_driver', name)] = val.integer_value
-            elif val.type == ParameterType.PARAMETER_DOUBLE:
-                self._arm_live[('/arm_driver', name)] = val.double_value
-
-    def _arm_payload(self) -> dict:
-        live_accel = self._arm_live.get(('/arm_driver', 'accel'))
-        limits = {}
-        for j in arm_settings.MECH_LIMITS:
-            key = f'limit_{j}'
-            limits[j] = {
-                'set': self._arm_settings.get(key, list(arm_settings.DEFAULT_LIMITS[j])),
-                'live': self._arm_live.get(('/arm_driver', key)),
-                'mech': list(arm_settings.MECH_LIMITS[j]),
-            }
-        return {
-            'limits': limits,
-            'speed': self._arm_settings.get('speed', arm_settings.SPEED_DEFAULT),
-            'speed_live': arm_settings.speed_from_accel(live_accel),
-            'nodes': 1 if live_accel is not None else 0,
-        }
-
-    def _arm_apply_speed(self, pct):
-        clamped = arm_settings.clamp_speed(pct)
-        if clamped is None:
-            return
-        self._arm_settings['speed'] = clamped
-        try:
-            arm_settings.save(self._arm_settings)
-        except OSError as exc:
-            self.get_logger().warn(f'could not save arm settings: {exc}')
-        for node, params in arm_settings.speed_targets(clamped).items():
-            cli = self._safety_client(self._arm_set, SetParameters,
-                                      node, 'set_parameters')
-            if cli.service_is_ready():
-                cli.call_async(self._arm_request(params))
-        self.get_logger().info(f'arm speed = {clamped}')
-        self._state.broadcast({'type': 'arm_settings', 'v': self._arm_payload()})
-
-    def _arm_apply_limit(self, joint, lo, hi):
-        clamped = arm_settings.clamp_limit(joint, lo, hi)
-        if clamped is None:
-            return
-        self._arm_settings[f'limit_{joint}'] = list(clamped)
-        try:
-            arm_settings.save(self._arm_settings)
-        except OSError as exc:
-            self.get_logger().warn(f'could not save arm settings: {exc}')
-        for node, params in arm_settings.limit_targets(joint, *clamped).items():
-            cli = self._safety_client(self._arm_set, SetParameters,
-                                      node, 'set_parameters')
-            if cli.service_is_ready():
-                cli.call_async(self._arm_request(params))
-        self.get_logger().info(f'arm limit_{joint} = {list(clamped)}')
-        self._state.broadcast({'type': 'arm_settings', 'v': self._arm_payload()})
-
-    def _arm_reset(self):
-        for key, value in arm_settings.defaults().items():
-            if key == 'speed':
-                self._arm_apply_speed(value)
-            else:
-                self._arm_apply_limit(key[len('limit_'):], value[0], value[1])
-
     # ── ROS callbacks ────────────────────────────────────────────────────────
 
     def _cb_map(self, msg: OccupancyGrid):
@@ -1314,33 +1238,49 @@ class DashboardNode(Node):
         # Cosmetic pass on a COPY — Nav2/slam_toolbox still get msg.data raw
         # via their own /map subscription, this only affects what gets drawn.
         grid = _despeckle_grid(grid)
-        img = np.full((msg.info.height, msg.info.width, 3), 180, dtype=np.uint8)
-        img[grid == 0]   = [230, 230, 230]
-        img[grid == 100] = [50,  50,  50]
-        img[grid == -1]  = [160, 160, 160]
+        # "Floorplan" style (requested to replace the old raster-block look):
+        # walls are NOT filled here — _draw_wall_lines below draws them as a
+        # thin schematic stroke instead, so a wall pixel's own fill is
+        # whatever the surrounding floor is (white, or a room's tint). Free
+        # space is near-white paper rather than mid-grey, and unknown is a
+        # faint wash instead of a heavy block, so the sheet reads clean.
+        # Raw occupancy-grid look (2026-08-18, user request: "like in rtabmap")
+        # — walls filled solid instead of traced as a floorplan stroke, no
+        # anti-aliased rounding. _smooth_map_edges/_draw_wall_lines above
+        # still exist for the earlier "Dreame/Roborock" blueprint style, just
+        # not called from here anymore.
+        # Colours match RViz's own "map" Color Scheme (config/robot.rviz) —
+        # 2026-08-18, user request: the web map looked different from RViz's
+        # (near-white unknown space, dark-grey walls) side by side. RViz maps
+        # free/occupied linearly to white/black and unknown to a flat mid-grey
+        # (128); matched here exactly so the two views agree.
+        img = np.full((msg.info.height, msg.info.width, 3), 255, dtype=np.uint8)
+        img[grid == -1]  = [128, 128, 128]
+        img[grid == 100] = [0, 0, 0]
         img = cv2.flip(img, 0)
         grid_flipped = cv2.flip(grid, 0)
         # Tint the free space with each room's colour, so "πήγαινε στην κουζίνα"
         # can be checked against something visible instead of a uniform grey
-        # field. Only free cells are tinted: walls stay black or the map stops
-        # reading as a floor plan.
+        # field. Only free cells are tinted: walls stay unfilled or the map
+        # stops reading as a floor plan.
         img = self._tint_rooms(img, grid_flipped)
-        img = _smooth_map_edges(img)
         # room_mask.png is pixel-aligned to this FULL, uncropped grid — kept
-        # for _room_at_xy() (map-tab click-to-pick-room), which must do the
-        # same origin/resolution math _tint_rooms/_room_from_mask do, not the
+        # for _room_centers() and _place_room(), which must do the same
+        # origin/resolution math _tint_rooms/_room_from_mask do, not the
         # cropped-and-shifted origin below.
         self._full_map_info = (msg.info.origin.position.x,
                                msg.info.origin.position.y, msg.info.resolution)
         # room_mask.png must match the FULL, uncropped map (see _tint_rooms),
         # so the crop happens last, after tinting.
         img, width, height, origin = _crop_to_content(img, grid_flipped, msg.info)
+        img, width, height, resolution = _upscale_for_display(
+            img, width, height, msg.info.resolution)
         _, png = cv2.imencode('.png', img)
         self._state.map_png = png.tobytes()
         info = {
             'width':      width,
             'height':     height,
-            'resolution': msg.info.resolution,
+            'resolution': resolution,
             'origin':     origin,
             # Free (drivable) cell count, not the raster's bounding box — the
             # map tab's stats row wants the m2 actually reachable, and the
@@ -1437,41 +1377,23 @@ class DashboardNode(Node):
                       + bgr[paint] * self.ROOM_TINT)
         return out.astype(np.uint8)
 
-    def _room_at_xy(self, x: float, y: float):
-        """Which room name is painted at this map-frame (x, y), or None.
-
-        Same pixel math and nearest-colour match as room_markers_node's
-        `_room_from_mask` — kept independent rather than imported so this file
-        does not need that node's ROS-only module just for two lines of math.
-        Used by the map tab's "click picks a room" toggle, so clicking a
-        colour on the map can jump straight to that room's row in the editor
-        instead of hunting for it by eye in a name-sorted list.
-        """
-        bgr, alpha, names = self._load_room_mask()
-        if bgr is None or not names or self._full_map_info is None:
-            return None
-        ox, oy, res = self._full_map_info
-        h, w = bgr.shape[:2]
-        col = int((x - ox) / res)
-        row = h - 1 - int((y - oy) / res)      # mask is stored image-side up
-        if not (0 <= col < w and 0 <= row < h) or not alpha[row, col]:
-            return None
-        b, g, r = bgr[row, col]
-        best, best_d = None, float('inf')
-        for name, rgb in names.items():
-            d = (int(r) - rgb[0]) ** 2 + (int(g) - rgb[1]) ** 2 + (int(b) - rgb[2]) ** 2
-            if d < best_d:
-                best_d, best = d, name
-        return best
-
     def _room_centers(self):
-        """name -> [x, y] map-frame centroid of each room's painted pixels.
+        """name -> [x, y, area_m2] map-frame centroid of each room's painted
+        pixels, plus its floor area — so the map tab can print each room's
+        name AND size on the map, like "Σαλόνι · 21 m²" on a real floorplan
+        (requested after a reference screenshot with per-room areas).
 
-        Same mask/colour-match as _room_at_xy, run the other direction (over
-        the whole mask instead of one pixel) so the map tab can print each
+        Exact-matches each room's known colour against every pixel in the
+        mask (whole mask, not a single point) so the map tab can print each
         room's name ON the map — a click-and-hunt-the-legend UI is exactly
         what "δεν είναι σαφές ποιο δωμάτιο επιλέχθηκε" was about; a name
         sitting on top of its own coloured blob cannot be ambiguous.
+
+        ‼️ [x, y, area_m2], not a 4th dict key: the client already indexes
+        this by position (wc[0]/wc[1]) rather than destructuring a fixed
+        shape, so appending stays backward compatible with every existing
+        reader instead of needing a parallel areas map plumbed through the
+        four broadcast call sites that set this.
         """
         bgr, alpha, names = self._load_room_mask()
         if bgr is None or not names or self._full_map_info is None:
@@ -1487,7 +1409,8 @@ class DashboardNode(Node):
                 continue
             wx = ox + float(xs.mean()) * res
             wy = oy + (h - 1 - float(ys.mean())) * res
-            centers[name] = [round(wx, 3), round(wy, 3)]
+            area_m2 = round(len(xs) * res * res, 1)
+            centers[name] = [round(wx, 3), round(wy, 3), area_m2]
         return centers
 
     def _save_rooms(self, edits):
@@ -1521,7 +1444,14 @@ class DashboardNode(Node):
             except OSError:
                 pass
 
-            new_colours = {}
+            # ‼️ Starts from a COPY of every existing room, not {} — `edits`
+            # only ever carries the room(s) actually touched (one, since the
+            # map tab's editor shows a single selected room at a time), and
+            # this file gets fully overwritten below. Starting empty silently
+            # dropped every OTHER room from the map the moment any one room
+            # was saved — lost 5 of 8 rooms' names/colours on room4 in
+            # production before this was caught (2026-08-18).
+            new_colours = dict(current)
             seen = set()
             repaints = []   # (match-mask, new_rgb) pairs, applied after the loop
             source = mask_arr.copy() if mask_arr is not None else None
@@ -1546,6 +1476,8 @@ class DashboardNode(Node):
                              & (source[:, :, 2] == old_rgb[2])
                              & (source[:, :, 3] > 50))
                     repaints.append((match, rgb))
+                if name != old:
+                    new_colours.pop(old, None)   # renamed — drop the old key
                 new_colours[name] = rgb
 
             if not new_colours:
@@ -1566,6 +1498,16 @@ class DashboardNode(Node):
                                    'error': str(exc)})
             return
 
+        self._rooms_changed(f'rooms saved on {map_name}: {list(new_colours)}')
+
+    def _rooms_changed(self, note: str):
+        """Shared tail of every room-editing tool: drop the mask cache, repaint
+        and rebroadcast the map (or just the legend, if no /map has arrived
+        yet), and ack the edit so the browser's status line can say so.
+
+        Every tool that writes <map>_room_mask.png / _room_colors.yaml ends
+        here, so "what the tab shows" cannot depend on WHICH tool wrote.
+        """
         self._room_mask_key = None     # force _load_room_mask() to reread
         if self._last_map is not None:
             self._cb_map(self._last_map)   # repaints the tinted picture too
@@ -1575,8 +1517,194 @@ class DashboardNode(Node):
             self._state.map_room_centers = self._room_centers()
             self._state.broadcast({'type': 'map_rooms', 'rooms': self._state.map_rooms,
                                    'centers': self._state.map_room_centers})
-        self.get_logger().info(f'rooms saved on {map_name}: {list(new_colours)}')
+        self.get_logger().info(note)
         self._state.broadcast({'type': 'room_saved', 'ok': True})
+
+    def _open_rooms_for_edit(self):
+        """(map_name, rgba mask array, colours dict, mask_path, colours_path)
+        for the ACTIVE map, or raise with a message the tab can show.
+
+        Every editing tool below (delete/merge/split) needs exactly this, and
+        all three must fail the same way on a map that has no rooms painted
+        yet — an empty mask silently written back would erase the file.
+        """
+        map_name = self.active_map()
+        if not map_name:
+            raise ValueError('κανένας αποθηκευμένος χάρτης ενεργός')
+        mask_path, colours_path = room_files.paths_for(map_name)
+        from PIL import Image
+        try:
+            mask_arr = np.array(Image.open(mask_path).convert('RGBA'))
+        except OSError:
+            raise ValueError('δεν υπάρχουν χρωματισμένα δωμάτια σε αυτόν τον χάρτη')
+        try:
+            with open(colours_path) as f:
+                colours = yaml.safe_load(f) or {}
+        except OSError:
+            colours = {}
+        if not colours:
+            raise ValueError('δεν υπάρχουν χρωματισμένα δωμάτια σε αυτόν τον χάρτη')
+        return map_name, mask_arr, colours, mask_path, colours_path
+
+    @staticmethod
+    def _pixels_of(mask_arr, rgb):
+        """Boolean mask of the pixels painted EXACTLY rgb (and not transparent)
+        — the one and only way a room is identified in the file, see
+        _room_centers/_save_rooms."""
+        return ((mask_arr[:, :, 0] == rgb[0])
+                & (mask_arr[:, :, 1] == rgb[1])
+                & (mask_arr[:, :, 2] == rgb[2])
+                & (mask_arr[:, :, 3] > 50))
+
+    def _write_rooms(self, mask_arr, colours, mask_path, colours_path):
+        from PIL import Image
+        Image.fromarray(mask_arr).save(mask_path)
+        with open(colours_path, 'w') as f:
+            yaml.safe_dump(colours, f, allow_unicode=True)
+
+    def _delete_room(self, name):
+        """Un-assign a room: clear its pixels back to unpainted and drop its
+        name. The floor stays drivable — this is the mask, not the map — so
+        the area simply stops being called anything, which is what "delete
+        room" means in every robot-vacuum app.
+        """
+        try:
+            name = str(name).strip()
+            map_name, mask_arr, colours, mask_path, colours_path = \
+                self._open_rooms_for_edit()
+            if name not in colours:
+                raise ValueError(f'άγνωστο δωμάτιο: {name}')
+            mask_arr[self._pixels_of(mask_arr, list(colours[name])), 3] = 0
+            colours.pop(name, None)
+            self._write_rooms(mask_arr, colours, mask_path, colours_path)
+        except Exception as exc:
+            self.get_logger().warn(f'delete_room: {exc!r}')
+            self._state.broadcast({'type': 'room_saved', 'ok': False,
+                                   'error': str(exc)})
+            return
+        self._rooms_changed(f'room deleted on {map_name}: {name}')
+
+    def _merge_rooms(self, names):
+        """Fold several rooms into the first one: its name and colour win, the
+        others' pixels are repainted to it and their names dropped.
+
+        Deliberately not geometric — two rooms that a doorway split in the
+        auto-segmentation are still two colour patches in the mask, and
+        repainting is exactly what joining them into one room means. No
+        adjacency check: rooms on opposite sides of the house merging into one
+        oddly-shaped room is a legitimate (if unusual) thing to want, and the
+        user can see the result immediately.
+        """
+        try:
+            if not isinstance(names, list):
+                names = []
+            names = [str(n).strip() for n in names if str(n).strip()]
+            # dict.fromkeys, not set(): the FIRST name is the one that survives,
+            # so the order the tab sent them in has to be preserved.
+            names = list(dict.fromkeys(names))
+            if len(names) < 2:
+                raise ValueError('διάλεξε τουλάχιστον δύο δωμάτια')
+            map_name, mask_arr, colours, mask_path, colours_path = \
+                self._open_rooms_for_edit()
+            unknown = [n for n in names if n not in colours]
+            if unknown:
+                raise ValueError(f'άγνωστο δωμάτιο: {unknown[0]}')
+            keep = names[0]
+            rgb = [int(v) for v in colours[keep]]
+            for other in names[1:]:
+                other_rgb = [int(v) for v in colours[other]]
+                paint = self._pixels_of(mask_arr, other_rgb)
+                mask_arr[paint, 0] = rgb[0]
+                mask_arr[paint, 1] = rgb[1]
+                mask_arr[paint, 2] = rgb[2]
+                mask_arr[paint, 3] = 255
+                colours.pop(other, None)
+            self._write_rooms(mask_arr, colours, mask_path, colours_path)
+        except Exception as exc:
+            self.get_logger().warn(f'merge_rooms: {exc!r}')
+            self._state.broadcast({'type': 'room_saved', 'ok': False,
+                                   'error': str(exc)})
+            return
+        self._rooms_changed(f'rooms merged on {map_name}: {names} -> {names[0]}')
+
+    def _mask_frame(self, map_name):
+        """(origin_x, origin_y, resolution) of the frame <map>_room_mask.png is
+        pixel-aligned to — the FULL, uncropped occupancy grid.
+
+        Prefers the live /map's own numbers (_full_map_info, what
+        _room_centers/_tint_rooms use) and falls back to the saved .yaml, so a
+        room can still be split right after a map switch, before the first
+        /map of the new map has arrived.
+        """
+        if self._full_map_info is not None:
+            return self._full_map_info
+        with open(os.path.join(SRC_MAPS_DIR, f'{map_name}.yaml')) as f:
+            meta = yaml.safe_load(f)
+        return (float(meta['origin'][0]), float(meta['origin'][1]),
+                float(meta['resolution']))
+
+    def _split_room(self, name, x1, y1, x2, y2, new_name, color):
+        """Cut one room in two along the line the user drew across it (map
+        frame), Roborock/Dreame's "divide room" gesture.
+
+        Whichever side of the line is LEFT of (p1 -> p2) keeps the original
+        name and colour; the other side becomes `new_name`/`color`. Pixels
+        only — the floor is untouched — so a bad cut is undone by merging the
+        two halves back together.
+        """
+        try:
+            name = str(name).strip()
+            new_name = str(new_name).strip()
+            if not new_name:
+                raise ValueError('όνομα νέου δωματίου κενό')
+            if not (isinstance(color, list) and len(color) == 3):
+                raise ValueError('άκυρο χρώμα')
+            rgb_new = [max(0, min(255, int(v))) for v in color]
+            map_name, mask_arr, colours, mask_path, colours_path = \
+                self._open_rooms_for_edit()
+            if name not in colours:
+                raise ValueError(f'άγνωστο δωμάτιο: {name}')
+            if new_name in colours and new_name != name:
+                raise ValueError(f'υπάρχει ήδη δωμάτιο «{new_name}»')
+            if rgb_new == [int(v) for v in colours[name]]:
+                raise ValueError('διάλεξε διαφορετικό χρώμα για το νέο κομμάτι')
+
+            ox, oy, res = self._mask_frame(map_name)
+            h, _w = mask_arr.shape[:2]
+            # Same image-side-up convention as _room_centers/_place_room.
+            def to_px(x, y):
+                return ((float(x) - ox) / res, (h - 1) - (float(y) - oy) / res)
+            px1, py1 = to_px(x1, y1)
+            px2, py2 = to_px(x2, y2)
+            dx, dy = px2 - px1, py2 - py1
+            if abs(dx) < 1 and abs(dy) < 1:
+                raise ValueError('η γραμμή είναι πολύ κοντή')
+
+            room = self._pixels_of(mask_arr, [int(v) for v in colours[name]])
+            ys, xs = np.nonzero(room)
+            if len(xs) == 0:
+                raise ValueError('το δωμάτιο δεν έχει χρωματισμένα σημεία')
+            side = (xs - px1) * dy - (ys - py1) * dx      # >0 on one side
+            # A cut that leaves a sliver is a misdrawn line, not a room: both
+            # halves have to be big enough to be somewhere you could stand.
+            min_px = max(30, int(0.4 / (res * res)))      # ≈0.4 m²
+            if int((side > 0).sum()) < min_px or int((side <= 0).sum()) < min_px:
+                raise ValueError('η γραμμή δεν χωρίζει το δωμάτιο στα δύο — '
+                                 'τράβα την από άκρη σε άκρη')
+            cut = np.zeros_like(room)
+            cut[ys[side > 0], xs[side > 0]] = True
+            mask_arr[cut, 0] = rgb_new[0]
+            mask_arr[cut, 1] = rgb_new[1]
+            mask_arr[cut, 2] = rgb_new[2]
+            mask_arr[cut, 3] = 255
+            colours[new_name] = rgb_new
+            self._write_rooms(mask_arr, colours, mask_path, colours_path)
+        except Exception as exc:
+            self.get_logger().warn(f'split_room: {exc!r}')
+            self._state.broadcast({'type': 'room_saved', 'ok': False,
+                                   'error': str(exc)})
+            return
+        self._rooms_changed(f'room split on {map_name}: {name} -> {new_name}')
 
     def _segmentation_for(self, map_name: str):
         """Shape-only room labels for map_name (see room_segment.py), cached
@@ -1633,7 +1761,7 @@ class DashboardNode(Node):
             labels, res, (ox, oy) = self._segmentation_for(map_name)
             h, w = labels.shape
             col = int((x - ox) / res)
-            row = h - 1 - int((y - oy) / res)     # image-side up, same as _room_at_xy
+            row = h - 1 - int((y - oy) / res)     # image-side up, same as _room_centers
             if not (0 <= col < w and 0 <= row < h):
                 raise ValueError('εκτός χάρτη')
             label_id = int(labels[row, col])
@@ -1671,119 +1799,7 @@ class DashboardNode(Node):
                                    'error': str(exc)})
             return
 
-        self._room_mask_key = None
-        if self._last_map is not None:
-            self._cb_map(self._last_map)
-        else:
-            _, _, names = self._load_room_mask()
-            self._state.map_rooms = {n: list(c) for n, c in (names or {}).items()}
-            self._state.map_room_centers = self._room_centers()
-            self._state.broadcast({'type': 'map_rooms', 'rooms': self._state.map_rooms,
-                                   'centers': self._state.map_room_centers})
-        self.get_logger().info(f'room placed on {map_name}: {name} ({label_id})')
-        self._state.broadcast({'type': 'room_saved', 'ok': True})
-
-    def _place_room_rect(self, x1, y1, x2, y2, name, color):
-        """Draw-a-rectangle version of _place_room, for spaces
-        room_segment.segment's distance-transform watershed can't cleanly
-        separate — open-plan areas with no doorway pinch point, where a
-        single click either grabs the whole open area or nothing. Same
-        two-opposite-corners convention as _add_keepout_zone, but paints
-        <map>_room_mask.png pixels directly instead of adding a vector zone:
-        rooms have no polygon format anywhere in this file (see
-        room_files.py) — a flat pixel mask is what rendering/picking/the
-        room list already read, so a raw rectangle rasterizes straight into
-        it, no intersection with the flood-fill segmentation needed.
-
-        Unlike _place_room, this does NOT stay inside one recognised blob —
-        it is the deliberately blunt tool for when the room shape isn't one.
-        It still skips occupied (wall) pixels within the rectangle so a
-        painted room doesn't tint the walls bounding it.
-        """
-        try:
-            name = str(name).strip()
-            if not name:
-                raise ValueError('όνομα δωματίου κενό')
-            if not (isinstance(color, list) and len(color) == 3):
-                raise ValueError('άκυρο χρώμα')
-            rgb = [max(0, min(255, int(v))) for v in color]
-            x1, y1, x2, y2 = float(x1), float(y1), float(x2), float(y2)
-            if abs(x2 - x1) < 0.10 or abs(y2 - y1) < 0.10:
-                raise ValueError('πολύ μικρό τετράγωνο — μάλλον misclick')
-
-            map_name = self.active_map()
-            if not map_name:
-                raise ValueError('κανένας αποθηκευμένος χάρτης ενεργός')
-
-            yaml_path = os.path.join(SRC_MAPS_DIR, f'{map_name}.yaml')
-            with open(yaml_path) as f:
-                meta = yaml.safe_load(f)
-            res = float(meta['resolution'])
-            ox, oy = float(meta['origin'][0]), float(meta['origin'][1])
-            w_px, h_px = self._map_pgm_shape(map_name)
-
-            def to_px(x, y):
-                col = int((x - ox) / res)
-                row = h_px - 1 - int((y - oy) / res)   # image-side up, same as _place_room
-                return col, row
-
-            c1, r1 = to_px(x1, y1)
-            c2, r2 = to_px(x2, y2)
-            c_lo, c_hi = sorted((c1, c2))
-            r_lo, r_hi = sorted((r1, r2))
-            c_lo, c_hi = max(0, c_lo), min(w_px, c_hi + 1)
-            r_lo, r_hi = max(0, r_lo), min(h_px, r_hi + 1)
-            if c_hi <= c_lo or r_hi <= r_lo:
-                raise ValueError('εκτός χάρτη')
-
-            from PIL import Image
-            pgm_path = os.path.join(SRC_MAPS_DIR, f'{map_name}.pgm')
-            gray = np.array(Image.open(pgm_path))
-            if gray.ndim == 3:
-                gray = gray[:, :, 0]
-            not_wall = gray[r_lo:r_hi, c_lo:c_hi] > 50   # exclude occupied/near-black cells
-
-            mask_path, colours_path = room_files.paths_for(map_name)
-            mask_arr = None
-            if os.path.exists(mask_path):
-                mask_arr = np.array(Image.open(mask_path).convert('RGBA'))
-                if mask_arr.shape[:2] != (h_px, w_px):
-                    mask_arr = None    # stale mask from a different map size
-            if mask_arr is None:
-                mask_arr = np.zeros((h_px, w_px, 4), np.uint8)
-            try:
-                with open(colours_path) as f:
-                    colours = yaml.safe_load(f) or {}
-            except OSError:
-                colours = {}
-
-            region = mask_arr[r_lo:r_hi, c_lo:c_hi]
-            region[not_wall, 0] = rgb[0]
-            region[not_wall, 1] = rgb[1]
-            region[not_wall, 2] = rgb[2]
-            region[not_wall, 3] = 255
-            colours[name] = rgb
-
-            Image.fromarray(mask_arr).save(mask_path)
-            with open(colours_path, 'w') as f:
-                yaml.safe_dump(colours, f, allow_unicode=True)
-        except Exception as exc:
-            self.get_logger().warn(f'place_room_rect: {exc!r}')
-            self._state.broadcast({'type': 'room_saved', 'ok': False,
-                                   'error': str(exc)})
-            return
-
-        self._room_mask_key = None
-        if self._last_map is not None:
-            self._cb_map(self._last_map)
-        else:
-            _, _, names = self._load_room_mask()
-            self._state.map_rooms = {n: list(c) for n, c in (names or {}).items()}
-            self._state.map_room_centers = self._room_centers()
-            self._state.broadcast({'type': 'map_rooms', 'rooms': self._state.map_rooms,
-                                   'centers': self._state.map_room_centers})
-        self.get_logger().info(f'room rect placed on {map_name}: {name}')
-        self._state.broadcast({'type': 'room_saved', 'ok': True})
+        self._rooms_changed(f'room placed on {map_name}: {name} ({label_id})')
 
     # ── keepout zones ────────────────────────────────────────────────────
     # Areas Nav2 must not enter — see home_robot/keepout_files.py for why the
@@ -3055,6 +3071,9 @@ class DashboardNode(Node):
     def _cb_said(self, msg: String):
         self._state.add_chat('robot', msg.data)
 
+    def _cb_stt_state(self, msg: String):
+        self._state.broadcast({'type': 'stt_state', 'state': msg.data})
+
     def _cb_wake(self, msg: String):
         self._state.add_chat('wake', msg.data or 'wake')
 
@@ -3106,8 +3125,7 @@ class DashboardNode(Node):
         self._state.broadcast({'type': 'compass', 'offset': self._compass_offset})
 
     def _set_mic_sub(self, on: bool):
-        """Subscribe to /mic/audio only while _listen_ws is non-empty — see
-        the comment where the (removed) unconditional subscription was."""
+        """Subscribe only while a live-audio or Voice-tab viewer needs it."""
         if on and self._mic_sub is None:
             self._mic_sub = self.create_subscription(
                 Int16MultiArray, '/mic/audio', self._cb_mic, 30)
@@ -3122,10 +3140,18 @@ class DashboardNode(Node):
         ~1600 samples, and base64 in a JSON envelope would roughly double the
         bytes and cost a parse per chunk at 10 Hz per client.
         """
-        if not self._listen_ws:
+        if not self._listen_ws and not self._voice_ws:
             return    # defensive only, see _set_mic_sub
-        self._state.send_bytes(self._listen_ws,
-                               np.asarray(msg.data, dtype=np.int16).tobytes())
+        pcm = np.asarray(msg.data, dtype=np.int16)
+        if self._listen_ws:
+            self._state.send_bytes(self._listen_ws, pcm.tobytes())
+        if self._voice_ws and pcm.size:
+            scaled = pcm.astype(np.float32) / 32768.0
+            self._state.send_json(self._voice_ws, {
+                'type': 'mic_live',
+                'rms': float(np.sqrt(np.mean(scaled * scaled))),
+                'peak': float(np.max(np.abs(scaled))),
+            })
 
     def _cb_gesture(self, msg: String):
         """Live pointing state. Broadcast as-is; the pane renders the ring."""
@@ -3134,34 +3160,6 @@ class DashboardNode(Node):
         except json.JSONDecodeError:
             return
         self._state.broadcast({'type': 'gesture', **data})
-
-    def _cb_observations(self, msg: String):
-        try:
-            data = json.loads(msg.data)
-        except json.JSONDecodeError:
-            return
-        self._state.broadcast({'type': 'observations', **data})
-
-    def _cb_timeline(self, msg: String):
-        try:
-            data = json.loads(msg.data)
-        except json.JSONDecodeError:
-            return
-        self._state.broadcast({'type': 'timeline', **data})
-
-    def _cb_object_memory(self, msg: String):
-        """/object_memory carries only CONFIRMED instances already, sorted
-        newest-first (object_memory_node.py) — nothing to filter or sort here.
-        The room key ('saloni') is translated to a bare Greek noun the same way
-        the acoustic map does, so the pane never has to show a raw map key."""
-        try:
-            items = json.loads(msg.data)
-        except json.JSONDecodeError:
-            return
-        for it in items:
-            room = it.get('room')
-            it['room_el'] = room_el(room) if room else None
-        self._state.broadcast({'type': 'object_memory', 'items': items})
 
     def _cb_quota(self, msg: String):
         """How many Gemini requests are left today. Latched by llm_bridge, so a
@@ -3338,12 +3336,6 @@ class DashboardNode(Node):
         except json.JSONDecodeError:
             return
         self._state.broadcast({'type': 'diagnostics', **data})
-
-    def _cb_episodic_answer(self, msg: String):
-        # Not remembered: an answer belongs to the question that was just asked,
-        # so replaying it to a tab that connects later would be confusing.
-        self._state.broadcast({'type': 'recall_answer', 'text': msg.data},
-                              remember=False)
 
     # ── System panel ─────────────────────────────────────────────────────────
 
@@ -3654,7 +3646,8 @@ class DashboardNode(Node):
         # Same for a tab that was listening: a closed phone must not leave the
         # microphone streaming to nobody.
         self._listen_ws.discard(client)
-        self._set_mic_sub(bool(self._listen_ws))
+        self._voice_ws.discard(client)
+        self._set_mic_sub(bool(self._listen_ws or self._voice_ws))
         # A tab closed on the 3D pane never sends its 'off', so the camera would
         # keep building pointclouds for nobody.
         self._fuse_ws.discard(client)
@@ -3785,11 +3778,20 @@ class DashboardNode(Node):
                              args=(msg.get('x'), msg.get('y'),
                                    msg.get('name', ''), msg.get('color')),
                              daemon=True).start()
-        elif t == 'place_room_rect':
-            threading.Thread(target=self._place_room_rect,
-                             args=(msg.get('x1'), msg.get('y1'),
+        # The three room-management tools every robot-vacuum app has next to
+        # "add a room" — same threading reasoning as the two above.
+        elif t == 'delete_room':
+            threading.Thread(target=self._delete_room,
+                             args=(msg.get('name', ''),), daemon=True).start()
+        elif t == 'merge_rooms':
+            threading.Thread(target=self._merge_rooms,
+                             args=(msg.get('names', []),), daemon=True).start()
+        elif t == 'split_room':
+            threading.Thread(target=self._split_room,
+                             args=(msg.get('name', ''),
+                                   msg.get('x1'), msg.get('y1'),
                                    msg.get('x2'), msg.get('y2'),
-                                   msg.get('name', ''), msg.get('color')),
+                                   msg.get('new_name', ''), msg.get('color')),
                              daemon=True).start()
         elif t == 'add_keepout_zone':
             threading.Thread(target=self._add_keepout_zone,
@@ -3803,12 +3805,6 @@ class DashboardNode(Node):
         elif t == 'keepout_activate':
             threading.Thread(target=self._keepout_activate,
                              args=(bool(msg.get('on')),), daemon=True).start()
-        elif t == 'pick_room':
-            try:
-                name = self._room_at_xy(float(msg.get('x', 0)), float(msg.get('y', 0)))
-            except (TypeError, ValueError):
-                name = None
-            self._state.broadcast({'type': 'room_picked', 'name': name}, remember=False)
         elif t == 'set_backend':
             threading.Thread(target=self._switch_backend,
                              args=(str(msg.get('backend', '')),),
@@ -3831,15 +3827,20 @@ class DashboardNode(Node):
             # gesture_node holds the point; it re-checks that one exists, so an
             # eager click before any gesture is a logged warning, not a goal.
             self._gesture_go_pub.publish(EmptyMsg())
-        elif t == 'recall':
-            self._recall_pub.publish(String(data=str(msg.get('when', ''))))
         elif t == 'listen':
             if client is not None:
                 if msg.get('on'):
                     self._listen_ws.add(client)
                 else:
                     self._listen_ws.discard(client)
-                self._set_mic_sub(bool(self._listen_ws))
+                self._set_mic_sub(bool(self._listen_ws or self._voice_ws))
+        elif t == 'voice_live':
+            if client is not None:
+                if msg.get('on'):
+                    self._voice_ws.add(client)
+                else:
+                    self._voice_ws.discard(client)
+                self._set_mic_sub(bool(self._listen_ws or self._voice_ws))
         elif t == 'sys_rotate_token':
             # Writing the file is enough: the node reads it at startup, so the
             # new token takes effect on the next restart and the current tab
@@ -3939,22 +3940,17 @@ class DashboardNode(Node):
             self._safety_apply(str(msg.get('key', '')), msg.get('value'))
         elif t == 'safety_reset':
             self._safety_reset()
-        elif t == 'arm_limit_set':
-            joint = str(msg.get('joint', ''))
-            if joint in arm_settings.MECH_LIMITS:
-                self._arm_apply_limit(joint, msg.get('lo'), msg.get('hi'))
-        elif t == 'arm_speed_set':
-            self._arm_apply_speed(msg.get('value'))
-        elif t == 'arm_reset':
-            self._arm_reset()
         elif t == 'pick':
-            # Click-to-pick: the client hit-tests the click against the same
-            # detection boxes _draw_overlay burns into the frame (see the
-            # camera tab's click handler) and sends back just the label —
-            # pick_place_node re-detects it itself, this is only a trigger.
+            # Click-to-approach: the client hit-tests against the same boxes
+            # the server burns into the camera JPEG, and a tap means "go stand
+            # next to that thing", not "try to grab it from here". The mission
+            # executor already knows how to park short of the target and face
+            # it, using the same remembered/live object location path as fetch.
             label = str(msg.get('label', '')).strip()
-            if label:
-                self._pick_pub.publish(String(data=json.dumps({'label': label})))
+            unsafe_grasps = {'person', 'dog', 'cat', 'horse', 'sheep', 'cow',
+                             'elephant', 'bear', 'zebra', 'giraffe'}
+            if label and label.lower() not in unsafe_grasps and ':' not in label:
+                self._mission_pub.publish(String(data=f'goto_object:{label}'))
         elif t == 'mic_set':
             self._mic_apply(str(msg.get('key', '')), msg.get('value'))
         elif t == 'mic_reset':
@@ -4020,17 +4016,6 @@ class DashboardNode(Node):
                                   daemon=True).start()
         elif t == 'dock':
             self._dock_pub.publish(Bool(data=bool(msg.get('on', True))))
-        elif t == 'arm_joint':
-            js = JointState()
-            js.name     = [str(msg['joint'])]
-            js.position = [float(msg['pos'])]
-            self._arm_cmd_pub.publish(js)
-        elif t == 'gripper':
-            self._gripper_pub.publish(Float32(data=float(msg['pos'])))
-        elif t == 'arm_raw':
-            # T:210 cmd:0 cuts torque so the arm can be walked by hand; T:100
-            # re-inits. Free-form so the panel does not need a topic per command.
-            self._arm_raw_pub.publish(String(data=str(msg.get('cmd', ''))))
         elif t == 'ask':
             # Straight onto the STT's own topic, so a typed question takes
             # exactly the path a spoken one does — same gates, same tools.
@@ -4585,80 +4570,6 @@ def _delete_map(name: str) -> int:
     return removed
 
 
-@app.get('/maps/straighten/{name}')
-async def maps_straighten_preview(request: Request, name: str, t: str = ''):
-    """Side-by-side PNGs of the saved map as-is and cosmetically straightened —
-    lets the Χάρτες tab show a choice right after a save, without writing
-    anything. See home_robot/map_straighten.py for what "straightened" means
-    and why it must stay a display-only option until the user picks it.
-
-    ‼️ Must be registered BEFORE /maps/{action}/{name} below: both routes
-    match /maps/<seg>/<seg>, and FastAPI dispatches to whichever was added to
-    the app first. Defined after it, this 400'd on every call ("bad request"
-    from maps_action's action-not-in-(switch,save,new) check) and never ran.
-    """
-    if not _authorised(t, request.cookies):
-        return JSONResponse({'error': 'unauthorized'}, status_code=401)
-    if not re.fullmatch(r'[A-Za-z0-9_-]{1,40}', name):
-        return JSONResponse({'error': 'bad request'}, status_code=400)
-    pgm_path = _map_pgm_path(name)
-    if pgm_path is None:
-        return JSONResponse({'error': f'no such map: {name}'}, status_code=404)
-
-    def render():
-        gray = cv2.imread(pgm_path, cv2.IMREAD_GRAYSCALE)
-        if gray is None:
-            return None
-        cleaned = map_straighten.straighten(gray)
-        upscale = max(1, min(6, 900 // max(gray.shape)))
-        return (map_straighten.encode_png(gray, upscale),
-                map_straighten.encode_png(cleaned, upscale))
-
-    result = await asyncio.to_thread(render)
-    if result is None:
-        return JSONResponse({'error': f'could not read {name}.pgm'}, status_code=500)
-    original_png, straightened_png = result
-    return {'name': name,
-            'original': base64.b64encode(original_png).decode(),
-            'straightened': base64.b64encode(straightened_png).decode()}
-
-
-@app.get('/maps/straighten_apply/{name}')
-async def maps_straighten_apply(request: Request, name: str, t: str = ''):
-    """Replace <name>.pgm with the straightened version, after the user has
-    seen both previews and chosen. The old file is kept as a timestamped
-    .bak — nothing is destroyed, and restoring it is a plain file copy. Only
-    the image changes: resolution/origin/frame in the .yaml are untouched, so
-    a currently-active map still needs the existing "Ενεργοποίηση" (switch)
-    restart to pick up the new pixels — same rule as any other map edit here.
-    """
-    if not _authorised(t, request.cookies):
-        return JSONResponse({'error': 'unauthorized'}, status_code=401)
-    if not re.fullmatch(r'[A-Za-z0-9_-]{1,40}', name):
-        return JSONResponse({'error': 'bad request'}, status_code=400)
-    pgm_path = _map_pgm_path(name)
-    if pgm_path is None:
-        return JSONResponse({'error': f'no such map: {name}'}, status_code=404)
-
-    def apply():
-        gray = cv2.imread(pgm_path, cv2.IMREAD_GRAYSCALE)
-        if gray is None:
-            return None
-        cleaned = map_straighten.straighten(gray)
-        backup = pgm_path + '.bak-' + time.strftime('%Y%m%d-%H%M%S')
-        os.replace(pgm_path, backup)
-        ok = cv2.imwrite(pgm_path, cleaned)
-        if not ok:
-            os.replace(backup, pgm_path)  # restore rather than leave no map file
-            return None
-        return backup
-
-    backup = await asyncio.to_thread(apply)
-    if backup is None:
-        return JSONResponse({'error': f'could not straighten {name}.pgm'}, status_code=500)
-    return {'name': name, 'ok': True, 'backup': os.path.basename(backup)}
-
-
 @app.get('/maps/walls3d')
 async def maps_walls3d(request: Request, t: str = '', map: str = ''):
     """Wall footprints for the map tab's 3D view: the active map's clean
@@ -4692,6 +4603,85 @@ async def maps_walls3d(request: Request, t: str = '', map: str = ''):
     if result is None:
         return JSONResponse({'error': f'could not read {name}.pgm'}, status_code=500)
     return result
+
+
+@app.get('/maps/floorplan')
+async def maps_floorplan(request: Request, t: str = '', map: str = ''):
+    """The user's OWN floorplan image (e.g. exported from the phone's room-
+    scanning app), shown VERBATIM in the map tab's 2D view in place of the
+    procedural pgm-derived rendering — added 2026-08-18 after repeated
+    'βάλε αυτό που σου έστειλα όπως είναι' (put what I sent you as it is):
+    the room-tint/label/door-arc reconstruction was a reasonable-looking
+    but NOT faithful stand-in, and that was the actual complaint. This
+    endpoint does no processing at all, just serves the file back.
+    """
+    if not _authorised(t, request.cookies):
+        return Response('Unauthorized', status_code=401)
+    name = map or (await asyncio.to_thread(ros_node.active_map) if ros_node else None)
+    if not name:
+        return JSONResponse({'error': 'no active map'}, status_code=404)
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,40}', name):
+        return JSONResponse({'error': 'bad request'}, status_code=400)
+    for ext in ('.jpg', '.jpeg', '.png'):
+        path = os.path.join(SRC_MAPS_DIR, name + '_floorplan' + ext)
+        if os.path.exists(path):
+            media = 'image/png' if ext == '.png' else 'image/jpeg'
+            with open(path, 'rb') as f:
+                return Response(f.read(), media_type=media,
+                                headers={'Cache-Control': 'no-store'})
+    return JSONResponse({'error': f'no floorplan image for {name}'}, status_code=404)
+
+
+@app.get('/maps/floorplan_reg')
+async def maps_floorplan_reg(request: Request, t: str = '', map: str = ''):
+    """Pixel<->map affine for the user's own floorplan image (see
+    /maps/floorplan) — {a,b,c,d}: map_x=a*px_x+b, map_y=c*px_y+d. Lets the
+    2D canvas draw the live AMCL pose / lidar scan / trail / goal directly
+    on top of that image instead of only the pgm-derived one.
+    """
+    if not _authorised(t, request.cookies):
+        return JSONResponse({'error': 'unauthorized'}, status_code=401)
+    name = map or (await asyncio.to_thread(ros_node.active_map) if ros_node else None)
+    if not name:
+        return JSONResponse({'error': 'no active map'}, status_code=404)
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,40}', name):
+        return JSONResponse({'error': 'bad request'}, status_code=400)
+    path = os.path.join(SRC_MAPS_DIR, name + '_floorplan.yaml')
+    if not os.path.exists(path):
+        return JSONResponse({'error': f'no floorplan registration for {name}'}, status_code=404)
+
+    def read():
+        with open(path) as f:
+            return yaml.safe_load(f) or {}
+
+    return await asyncio.to_thread(read)
+
+
+@app.get('/maps/doors')
+async def maps_doors(request: Request, t: str = '', map: str = ''):
+    """Door swing arcs for the 2D canvas: <name>_doors.yaml, {x1,y1,x2,y2}
+    door-width segments in map metres (map_x=usd_x, map_y=-usd_z — see
+    usdz_to_glb.py) — extracted once from a RoomPlan scan's own door mesh
+    transforms (scripts/usdz_extract_tris.py's sibling, not run live),
+    dropped in next to <name>.pgm/.yaml like the optional .glb. Not every
+    map has one; 404s cleanly like /maps/scan.glb's missing-file case.
+    """
+    if not _authorised(t, request.cookies):
+        return JSONResponse({'error': 'unauthorized'}, status_code=401)
+    name = map or (await asyncio.to_thread(ros_node.active_map) if ros_node else None)
+    if not name:
+        return JSONResponse({'error': 'no active map'}, status_code=404)
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,40}', name):
+        return JSONResponse({'error': 'bad request'}, status_code=400)
+    path = os.path.join(SRC_MAPS_DIR, name + '_doors.yaml')
+    if not os.path.exists(path):
+        return JSONResponse({'error': f'no door data for {name}'}, status_code=404)
+
+    def read():
+        with open(path) as f:
+            return yaml.safe_load(f) or {}
+
+    return await asyncio.to_thread(read)
 
 
 @app.get('/maps/scan.glb')
@@ -4831,6 +4821,54 @@ async def rtabmap_delete(request: Request, name: str, t: str = ''):
     if not ok:
         return JSONResponse({'error': f'no such snapshot: {name}'}, status_code=404)
     return {'name': name, 'ok': True}
+
+
+def _rename_map(old: str, new: str) -> int:
+    """Rename every file `old`'s name owns to `new` — same file set
+    _delete_map enumerates (core yaml/pgm/slam-toolbox pair, per-map rooms,
+    keepout zones, Gazebo low-res companion), minus the .bak snapshots (a
+    straighten .bak is a backup of a specific past edit; renaming would just
+    make it silently stop matching anything). Returns how many files moved.
+    """
+    suffixes = [
+        '.yaml', '.pgm', '.data', '.posegraph',
+        '_room_mask.png', '_room_colors.yaml',
+        '_keepout_zones.yaml', '_lo.yaml', '_lo.pgm',
+    ]
+    moved = 0
+    for suf in suffixes:
+        src = os.path.join(SRC_MAPS_DIR, old + suf)
+        if os.path.exists(src):
+            try:
+                os.rename(src, os.path.join(SRC_MAPS_DIR, new + suf))
+                moved += 1
+            except OSError:
+                pass
+    return moved
+
+
+@app.get('/maps/rename/{old}/{new}')
+async def maps_rename(request: Request, old: str, new: str, t: str = ''):
+    """Rename a saved map. Blocked on the active map — map_server/AMCL, the
+    dashboard's active_map() cache and any open file handles all still refer
+    to it by its old path, same reasoning as the delete guard below.
+    """
+    if not _authorised(t, request.cookies):
+        return JSONResponse({'error': 'unauthorized'}, status_code=401)
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,40}', old) or not re.fullmatch(r'[A-Za-z0-9_-]{1,40}', new):
+        return JSONResponse({'error': 'bad request'}, status_code=400)
+    existing = {m['name'] for m in _list_maps()}
+    if old not in existing:
+        return JSONResponse({'error': f'no such map: {old}'}, status_code=404)
+    if new in existing:
+        return JSONResponse({'error': f'"{new}" already exists'}, status_code=400)
+    active = await asyncio.to_thread(ros_node.active_map) if ros_node else None
+    if old == active:
+        return JSONResponse(
+            {'error': 'δεν μπορείς να μετονομάσεις τον ενεργό χάρτη — κάνε '
+                      'πρώτα εναλλαγή σε άλλον'}, status_code=400)
+    moved = await asyncio.to_thread(_rename_map, old, new)
+    return {'old': old, 'new': new, 'ok': moved > 0, 'result': f'{moved} files renamed'}
 
 
 @app.get('/maps/{action}/{name}')
@@ -5088,8 +5126,7 @@ def _make_html(rooms: list, token: str = '') -> str:
             # The servo's mechanical ceiling, not the tuned envelope above —
             # the limit sliders must be draggable all the way out to this,
             # not just back within whatever the envelope already is.
-            .replace('__ARM_MECH_LIMITS__', json.dumps(
-                {j: list(v) for j, v in arm_settings.MECH_LIMITS.items()}))
+            .replace('__ARM_MECH_LIMITS__', '{}')
             .replace('__HAS_NOVNC__', json.dumps(os.path.isdir(NOVNC_DIR)))
             # Sent from the server so the allowed names exist in exactly one
             # place — the browser cannot invent a seventh.
@@ -5193,18 +5230,28 @@ button{font:inherit;color:inherit}
   font-size:13px;color:var(--text-dim);border-radius:var(--radius-btn);user-select:none}
 .tab:hover{background:var(--bg);color:var(--text)}
 .tab.active{background:var(--accent-bg);color:var(--accent-strong);font-weight:600}
-.tab .ic{font-size:16px;width:20px;text-align:center}
+.tab .ic{font-size:16px;width:22px;height:22px;display:grid;place-items:center;
+  text-align:center;border-radius:7px;transition:background .12s}
+.tab.active .ic{background:rgba(59,130,246,.13)}
 /* ── "More tools" list, inside Ρυθμίσεις ──
    The bottom/side nav only shows the 7 tabs used day-to-day; everything else
    (RViz, MoveIt, Gazebo, point cloud, sensor fusion, logs, ...) still has a
    real pane, just reached from here instead of a 25-icon bar. Row list, not
    more tab icons, because there is no per-row width limit to fight here. */
-.mt-row{display:flex;align-items:center;gap:11px;padding:11px 4px;
+.mt-group{margin-top:18px}
+.mt-group:first-child{margin-top:0}
+.mt-group-title{font-size:10.5px;font-weight:700;letter-spacing:.8px;
+  text-transform:uppercase;color:var(--text-mute);padding:0 4px 6px}
+.mt-group-list{background:var(--bg);border:1px solid var(--border);
+  border-radius:13px;overflow:hidden}
+.mt-row{display:flex;align-items:center;gap:11px;padding:11px 10px;
   cursor:pointer;border-top:1px solid var(--border);color:var(--text);
-  font-size:13.5px;user-select:none}
+  font-size:13.5px;user-select:none;transition:background .12s}
 .mt-row:first-child{border-top:none}
-.mt-row:hover{background:var(--bg)}
-.mt-row .ic{font-size:17px;width:22px;text-align:center;flex:0 0 auto}
+.mt-row:hover{background:var(--surface)}
+.mt-row .ic{font-size:16px;width:30px;height:30px;border-radius:9px;
+  background:var(--surface);border:1px solid var(--border);display:grid;
+  place-items:center;flex:0 0 auto}
 .mt-row .mt-chev{margin-left:auto;color:var(--text-mute);font-size:15px}
 #panes{flex:1;position:relative;overflow:hidden;background:var(--bg)}
 .pane{position:absolute;inset:0;display:none;padding:10px;overflow:auto}
@@ -5262,11 +5309,6 @@ button{font:inherit;color:inherit}
 .btn.pri{background:var(--accent-strong);border-color:var(--accent-strong);color:#fff;box-shadow:none}
 .btn.pri:hover{background:#1e40af}
 .btn.warn{background:var(--warn-bg);border-color:#fde68a;color:#92400e}
-/* Flash the row a click-to-pick landed on, so the eye finds it in a list
-   sorted by name rather than by map position. Fade-out only (transition on
-   the base rule), instant on entry (transition:none on .picked itself). */
-#room-edit>[data-room]{transition:background-color 1.3s;border-radius:8px}
-#room-edit>[data-room].picked{background-color:var(--success-bg);transition:none}
 .grid2{display:grid;grid-template-columns:auto 1fr;gap:5px 14px;font-size:13px}
 .k{color:var(--text-dim)}.v{font-family:var(--mono);text-align:right;color:var(--text)}
 .pill{display:inline-block;padding:2px 10px;border-radius:var(--radius-pill);font-size:11px;
@@ -5394,7 +5436,108 @@ button{font:inherit;color:inherit}
   border-radius:18px;overflow:hidden;cursor:crosshair;flex:1;
   min-height:min(62vh,560px);box-shadow:var(--shadow-card)}
 #map-wrap .ovl{background:rgba(255,255,255,.88);color:#52525b}
-#map-canvas{width:100%;height:100%;display:block;touch-action:none}
+/* 'manipulation' (not 'none'): every canvas interaction is a bare tap (nav
+   goal, room-paint, keepout corners) — nothing drags — so there is no reason
+   to eat touch gestures wholesale. Doing so used to also eat the page's own
+   scroll the moment a finger landed on the map (2026-08-19, user report:
+   "can't scroll the page from my phone over the map"). */
+#map-canvas{width:100%;height:100%;display:block;touch-action:manipulation}
+/* Two round icon buttons stacked top-right of the map, opening the "Dreame-
+   style" edit sheet below — approximating the app's own view/pencil pair
+   (2026-08-18, user request, screenshots from the Dreame app attached). */
+.map-fabs{position:absolute;top:10px;right:10px;display:flex;flex-direction:column;
+  gap:8px;z-index:5}
+.map-fab{width:34px;height:34px;border-radius:50%;background:rgba(255,255,255,.92);
+  border:1px solid var(--border);box-shadow:var(--shadow-elev);cursor:pointer;
+  font-size:15px;display:flex;align-items:center;justify-content:center;
+  user-select:none;transition:transform .1s}
+.map-fab:active{transform:scale(.92)}
+.map-fab.on{background:var(--accent-strong);border-color:var(--accent-strong);color:#fff}
+/* ── Room manager (🏠 fab / "Χωρισμός δωματίων") ────────────────────────────
+   Floats OVER the map, not inside the edit sheet: every one of its tools is
+   finished by touching the map itself, and a bottom sheet slides off-screen
+   the moment that happens. Shaped like the room-editing panel Roborock and
+   Dreame both use — a mode strip on top, the room list as cards, and the
+   selected room's own editor underneath. */
+#room-mgr{position:absolute;left:8px;right:8px;bottom:8px;z-index:6;
+  background:rgba(255,255,255,.96);border:1px solid var(--border);
+  border-radius:16px;box-shadow:var(--shadow-elev);padding:10px 12px 12px;
+  max-height:min(68%,400px);overflow-y:auto;-webkit-overflow-scrolling:touch;
+  backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)}
+/* Armed tools are finished by touching the map, so the panel gets out of the
+   way while one is armed — on a phone the full-height version covers most of
+   the floor plan it is asking you to tap. Same shrink both apps do. */
+#room-mgr.compact{max-height:min(52%,270px)}
+#room-mgr .rm-head{display:flex;align-items:center;gap:8px;font-size:13px;
+  font-weight:600;margin-bottom:8px}
+.rm-modes{display:flex;gap:6px;overflow-x:auto;padding-bottom:2px;scrollbar-width:none}
+.rm-modes::-webkit-scrollbar{display:none}
+.rm-mode{flex:0 0 auto;display:flex;align-items:center;gap:5px;cursor:pointer;
+  padding:6px 10px;border-radius:var(--radius-pill);border:1px solid var(--border);
+  background:var(--surface);font-size:11.5px;color:var(--text);user-select:none}
+.rm-mode.on{background:var(--accent-strong);border-color:var(--accent-strong);
+  color:#fff;font-weight:600}
+.rm-hint{font-size:11.5px;color:var(--text-dim);margin:8px 0 2px;line-height:1.45}
+.rm-cards{display:flex;gap:8px;overflow-x:auto;padding:8px 0 4px;scrollbar-width:none}
+.rm-cards::-webkit-scrollbar{display:none}
+.rm-card{flex:0 0 auto;width:104px;cursor:pointer;user-select:none;
+  border:1px solid var(--border);border-radius:13px;background:var(--surface);
+  padding:8px 9px 9px;position:relative;overflow:hidden}
+.rm-card::before{content:'';position:absolute;left:0;top:0;bottom:0;width:4px;
+  background:var(--room)}
+.rm-card.sel{border-color:var(--accent);background:var(--accent-bg);
+  box-shadow:0 0 0 1px var(--accent) inset}
+.rm-card.pick{border-color:#f59e0b;background:var(--warn-bg)}
+.rm-card .ic{font-size:17px;line-height:1}
+.rm-card .nm{font-size:12px;font-weight:600;margin-top:3px;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.rm-card .ar{font-size:10.5px;color:var(--text-dim);font-family:var(--mono)}
+.rm-empty{font-size:11.5px;color:var(--text-dim);padding:6px 0}
+.rm-edit{border-top:1px solid var(--border);margin-top:8px;padding-top:9px}
+/* One scrolling row, not a wrapped block: twelve wrapped chips pushed the
+   Save/Divide/Merge buttons under the fold on a phone. */
+.rm-presets{display:flex;gap:5px;margin:7px 0;overflow-x:auto;padding-bottom:2px;
+  scrollbar-width:none}
+.rm-presets::-webkit-scrollbar{display:none}
+.rm-preset{flex:0 0 auto;white-space:nowrap;cursor:pointer;user-select:none;
+  font-size:11.5px;padding:5px 9px;
+  border-radius:var(--radius-pill);border:1px solid var(--border);background:var(--bg)}
+.rm-preset:hover{background:var(--surface-2)}
+.rm-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.rm-actions .btn{padding:6px 10px;font-size:12px}
+/* Bottom sheet: same "Map Editing" shape as Dreame's — a name/thumbnail
+   header, a row of 4 file-level actions, a grid of map-editing tools. Slides
+   up over a blurred backdrop rather than a full-page modal so the map stays
+   visible underneath, same reasoning as the VNC fullscreen overlay above. */
+.sheet-backdrop{position:fixed;inset:0;background:rgba(24,24,27,.32);
+  backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px);z-index:8000;
+  opacity:0;pointer-events:none;transition:opacity .15s}
+.sheet-backdrop.open{opacity:1;pointer-events:auto}
+.sheet{position:fixed;left:0;right:0;bottom:0;z-index:8001;background:var(--surface);
+  border-radius:20px 20px 0 0;box-shadow:0 -4px 24px rgba(24,24,27,.18);
+  padding:8px 18px 22px;max-width:520px;margin:0 auto;
+  max-height:85dvh;overflow-y:auto;-webkit-overflow-scrolling:touch;
+  transform:translateY(105%);transition:transform .2s ease-out}
+.sheet.open{transform:translateY(0)}
+.sheet-handle{width:36px;height:4px;border-radius:2px;background:var(--surface-2);
+  margin:6px auto 14px}
+.sheet-head{display:flex;align-items:center;gap:10px;margin-bottom:16px}
+.sheet-thumb{width:38px;height:38px;border-radius:9px;object-fit:cover;
+  background:var(--surface-2);border:1px solid var(--border)}
+.sheet-title{font-size:15px;font-weight:600}
+.sheet-row{display:flex;justify-content:space-between;text-align:center;
+  border-bottom:1px solid var(--border);padding-bottom:16px;margin-bottom:16px}
+.sheet-action{background:none;border:none;color:var(--text);cursor:pointer;
+  display:flex;flex-direction:column;align-items:center;gap:6px;font-size:11px;
+  flex:1;padding:4px}
+.sheet-action .ic{font-size:19px}
+.sheet-action:active{opacity:.6}
+.sheet-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.sheet-tool{background:var(--bg);border:1px solid var(--border);border-radius:14px;
+  padding:14px 10px;display:flex;flex-direction:column;align-items:center;
+  gap:8px;font-size:12px;cursor:pointer;user-select:none}
+.sheet-tool:active{background:var(--surface-2)}
+.sheet-tool .ic{font-size:22px}
 /* ‼️ Square, and capped. The costmap is a 60x60 grid of a 3x3 m window, so
    flex:1 stretched it across a 1200x450 pane: every cell became a ~20x7 px
    slab, the window read as a rectangle when it is a square, and the whole
@@ -5490,6 +5633,11 @@ button{font:inherit;color:inherit}
 #chat-in input{flex:1;background:var(--surface);border:1px solid var(--border);color:var(--text);
   padding:10px 13px;border-radius:9px;font-size:14px;outline:none}
 #chat-in input:focus{border-color:var(--accent)}
+#voice-live{margin-bottom:9px}
+#mic-meter{height:10px;border-radius:6px;background:var(--surface-2);overflow:hidden;margin-top:8px}
+#mic-level{height:100%;width:0;background:linear-gradient(90deg,#22c55e 0%,#eab308 70%,#ef4444 100%);
+  border-radius:6px;transition:width .08s linear}
+#heard-live{min-height:22px;margin-top:9px;font-size:13px;color:var(--text-dim);line-height:1.5}
 /* ── Mobile ── */
 @media(max-width:760px){
   #shell{flex-direction:column-reverse}
@@ -5533,6 +5681,7 @@ button{font:inherit;color:inherit}
      push the row back into overflow. */
   .tab>span:last-child{overflow:hidden;text-overflow:ellipsis;
     white-space:nowrap;max-width:100%}
+  .tab .ic{width:25px;height:25px;font-size:16px}
   .tab.active{color:var(--accent-strong);border-top-color:var(--accent)}
   #title{display:none}
   .pane{padding:8px}
@@ -5573,7 +5722,13 @@ button{font:inherit;color:inherit}
       </div>
       <div class="row ml-toolbar">
         <button class="btn pri" id="map-view-2d">🗺️ 2D</button>
-        <button class="btn" id="map-view-scan">📸 Σάρωμα</button>
+        <!-- "3D" is the photorealistic phone scan (maps/<map>.glb, put in the
+             map's own frame by scripts/usdz_to_glb.py) — 2026-08-19, user
+             request. The procedural walls extruded from the occupancy grid,
+             which used to be what this button showed, moved to "Τοίχοι": they
+             are still the fallback for a map with no scan. -->
+        <button class="btn" id="map-view-3d">🏗️ 3D</button>
+        <button class="btn" id="map-view-walls">🧱 Τοίχοι</button>
       </div>
       <div class="row" id="map-rotate-row" style="gap:4px;justify-content:center">
         <button class="btn" id="map-rot-ccw" title="Περιστροφή αριστερά" style="padding:8px 12px">⟲</button>
@@ -5583,12 +5738,55 @@ button{font:inherit;color:inherit}
       </div>
       <div id="map-wrap">
         <canvas id="map-canvas"></canvas>
-        <div class="ovl">ΧΑΡΤΗΣ · κλικ για πλοήγηση</div>
+        <div class="ovl" id="map-hint">ΧΑΡΤΗΣ · κλικ για πλοήγηση</div>
+        <div class="map-fabs">
+          <button class="map-fab" id="b-map-view-sheet" title="Αποθηκευμένοι χάρτες">👁️</button>
+          <button class="map-fab" id="b-map-edit-sheet" title="Επεξεργασία χάρτη">✏️</button>
+          <button class="map-fab" id="b-room-mgr" title="Δωμάτια">🏠</button>
+        </div>
+        <!-- Room manager. Floats OVER the map (not inside the bottom sheet,
+             which slides itself off-screen the moment a map-touching tool is
+             armed) — every tool in here is finished with a tap on the map
+             underneath. Rendered by rmRender() below; the cards, the presets
+             and the editor are all built in JS from the live room list. -->
+        <div id="room-mgr" style="display:none">
+          <div class="rm-head">
+            <span>🏠 Δωμάτια</span>
+            <label style="margin-left:auto;font-size:11.5px;color:var(--text-dim);
+              font-weight:400;cursor:pointer;user-select:none">
+              <input type="checkbox" id="b-tint" checked style="vertical-align:-2px">
+              Χρώματα
+            </label>
+            <button class="btn" id="rm-close" style="padding:4px 9px">✕</button>
+          </div>
+          <div class="rm-modes" id="rm-modes"></div>
+          <div class="rm-hint" id="rm-hint"></div>
+          <div class="rm-cards" id="rm-cards"></div>
+          <div class="rm-edit" id="rm-edit"></div>
+          <div id="rm-msg" style="font-size:11px;color:var(--text-dim);margin-top:6px;
+            min-height:13px"></div>
+        </div>
+      </div>
+      <div class="card" id="map-walls3d-card" style="display:none">
+        <h3>Τοίχοι 3D <span class="badge" id="walls3d-info">—</span>
+          <button class="btn" id="b-walls3d-reset" style="float:right">Επαναφορά όψης</button>
+        </h3>
+        <!-- Off-white, not the near-black the other 3D viewers use (arm,
+             point cloud): the map tab's two 3D views are a floor plan of a
+             home, and a home reads as white/beige/grey — 2026-08-19, user
+             request. The wall and floor colours below were re-toned to match;
+             a dark backdrop with pale walls is what they were tuned for. -->
+        <canvas id="walls3d" style="width:100%;height:min(58vh,600px);min-height:260px;
+          background:#f6f4f0;border-radius:8px;touch-action:none;cursor:grab;
+          display:block"></canvas>
+        <div style="color:var(--text-dim);font-size:11.5px;margin-top:6px">
+          Σύρε για περιστροφή · ροδέλα για ζουμ · δάπεδο χρωματισμένο ανά δωμάτιο, όπως στον 2D χάρτη
+        </div>
       </div>
       <div class="card" id="map-scan3d-card" style="display:none">
         <h3>Φωτορεαλιστικό σάρωμα <span class="badge" id="scan3d-info">—</span></h3>
         <canvas id="scan3d" style="width:100%;height:min(58vh,600px);min-height:260px;
-          background:#0a0a0b;border-radius:8px;touch-action:none;cursor:grab;
+          background:#f6f4f0;border-radius:8px;touch-action:none;cursor:grab;
           display:block"></canvas>
         <div style="color:var(--text-dim);font-size:11.5px;margin-top:6px">
           Σύρε για περιστροφή · ροδέλα για ζουμ · κλικ πάνω στο σπίτι στέλνει το ρομπότ εκεί ·
@@ -5624,7 +5822,73 @@ button{font:inherit;color:inherit}
         <div id="scan-upload-msg" style="color:var(--text-dim);font-size:11.5px;margin-top:8px;
                                           white-space:pre-wrap"></div>
       </div>
-      <div class="card grow">
+      <div class="card">
+        <div class="row" style="justify-content:space-between">
+          <div id="dpad">
+            <div class="dbtn ghost"></div><div class="dbtn" id="bf">▲</div><div class="dbtn ghost"></div>
+            <div class="dbtn" id="bl">◄</div><div class="dbtn" id="bstop">STOP</div><div class="dbtn" id="br">►</div>
+            <div class="dbtn ghost"></div><div class="dbtn" id="bb">▼</div><div class="dbtn ghost"></div>
+          </div>
+          <div class="grid2" style="flex:1;min-width:150px">
+            <span class="k">X</span><span class="v" id="ix">—</span>
+            <span class="k">Y</span><span class="v" id="iy">—</span>
+            <span class="k">Γωνία</span><span class="v" id="iyaw">—</span>
+            <span class="k">Ταχύτητα</span><span class="v" id="ivel">—</span>
+          </div>
+          <div class="row" style="flex-direction:column;align-items:stretch">
+            <button class="btn pri" id="b-loc">🔍 Εντοπισμός</button>
+            <button class="btn" id="b-xnav">✕ Ακύρωση στόχου</button>
+          </div>
+        </div>
+        <div class="speedbox">
+          <div class="srow">
+            <span class="lbl">🚀 Ταχύτητα</span>
+            <input type="range" id="sp-lin" min="0.05" max="0.30" step="0.01">
+            <span class="val" id="sp-linv">—</span>
+          </div>
+          <div class="srow">
+            <span class="lbl">🔄 Στροφή</span>
+            <input type="range" id="sp-ang" min="0.35" max="1.20" step="0.05">
+            <span class="val" id="sp-angv">—</span>
+          </div>
+          <div class="row" style="margin-top:2px">
+            <button class="btn" id="sp-slow">🐢 Αργά</button>
+            <button class="btn" id="sp-def">Προεπιλογή</button>
+            <button class="btn" id="sp-fast">🐇 Γρήγορα</button>
+            <span id="sp-note" style="font-size:11px;color:var(--text-dim)"></span>
+          </div>
+        </div>
+        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
+          ⌨️ Και από πληκτρολόγιο: βελάκια ή WASD (κράτα πατημένο), space = στοπ. Αφήνοντας το πλήκτρο σταματά· αν χαθεί το tab ή το δίκτυο, η βάση σταματά μόνη της σε 0.25s.
+        </p>
+      </div>
+    </section>
+
+    <!-- ── Map edit sheet (👁️/✏️ fabs on the map, "Dreame-style" menu) ── -->
+    <div class="sheet-backdrop" id="mes-backdrop"></div>
+    <div class="sheet" id="map-edit-sheet">
+      <div class="sheet-handle"></div>
+      <div class="sheet-head">
+        <img class="sheet-thumb" id="mes-thumb" alt="">
+        <div class="sheet-title" id="mes-title">—</div>
+        <button class="btn" id="mes-close" style="margin-left:auto">✕</button>
+      </div>
+      <div class="sheet-row">
+        <button class="sheet-action" id="mes-rename"><span class="ic">🖊</span>Μετονομασία</button>
+        <button class="sheet-action" id="mes-backup"><span class="ic">💾</span>Αντίγραφο ασφαλείας</button>
+        <button class="sheet-action" id="mes-restore"><span class="ic">♻️</span>Επαναφορά</button>
+        <button class="sheet-action" id="mes-delete"><span class="ic">🗑</span>Διαγραφή</button>
+      </div>
+      <div class="sheet-grid">
+        <div class="sheet-tool" id="mes-rooms"><span class="ic">🏠</span>Χωρισμός Δωματίων</div>
+        <div class="sheet-tool" id="mes-keepout"><span class="ic">🚫</span>Απαγορευμένη Ζώνη</div>
+      </div>
+      <div id="mes-msg" style="font-size:11.5px;color:var(--text-dim);margin-top:10px;min-height:14px"></div>
+
+      <!-- Moved in from the map pane's own body (2026-08-18, user request:
+           these lived as always-visible cards under the map; Dreame tucks
+           the equivalent tools behind its pencil icon, so they moved here). -->
+      <div class="card" style="margin-top:16px">
         <h3>Χάρτες <span class="badge" id="map-active">—</span></h3>
         <div id="map-list" style="margin:8px 0"></div>
         <div class="row" style="margin-top:10px">
@@ -5635,75 +5899,20 @@ button{font:inherit;color:inherit}
           <button class="btn" id="b-map-save">💾 Αποθήκευση</button>
         </div>
         <div id="map-msg" style="color:var(--text-dim);font-size:11.5px;margin-top:8px"></div>
-        <div id="map-straighten" style="display:none;margin-top:12px;padding-top:12px;
-                                        border-top:1px solid var(--border)">
-          <div style="font-size:12.5px;color:var(--text-dim);margin-bottom:8px">
-            🧹 Καθαρή εκδοχή — ισιώνει τα σκαλοπάτια των τοίχων. <b>Μόνο εμφάνιση</b> μέχρι
-            να διαλέξεις: μπορεί να μετατοπίσει τοίχους λίγα εκατοστά ή να αφαιρέσει ένα
-            πραγματικό εμπόδιο που έμοιαζε με θόρυβο σάρωσης — σύγκρινε οπτικά πριν διαλέξεις.
-          </div>
-          <div class="row" style="gap:12px">
-            <div style="flex:1;text-align:center;min-width:0">
-              <div style="font-size:11px;color:var(--text-dim);margin-bottom:4px">Πρωτότυπο</div>
-              <img id="map-straighten-orig" style="max-width:100%;border-radius:6px;
-                                                    border:1px solid var(--border)">
-            </div>
-            <div style="flex:1;text-align:center;min-width:0">
-              <div style="font-size:11px;color:var(--text-dim);margin-bottom:4px">Ισιωμένο</div>
-              <img id="map-straighten-clean" style="max-width:100%;border-radius:6px;
-                                                     border:1px solid var(--border)">
-            </div>
-          </div>
-          <div class="row" style="margin-top:10px">
-            <button class="btn" id="b-map-straighten-keep">Κράτησε το πρωτότυπο</button>
-            <button class="btn pri" id="b-map-straighten-use">Χρήση ισιωμένης εκδοχής</button>
-          </div>
-        </div>
       </div>
-      <div class="card">
-        <h3>Δωμάτια
-          <label style="float:right;font-size:11.5px;color:var(--text-dim);font-weight:400;
-            cursor:pointer;user-select:none">
-            <input type="checkbox" id="b-tint" checked style="vertical-align:-2px">
-            Χρώματα
-          </label>
-        </h3>
+      <div class="card" style="margin-top:12px">
+        <h3>Δωμάτια</h3>
+        <div style="font-size:10.5px;color:var(--text-mute);text-transform:uppercase;
+          letter-spacing:.5px;margin-bottom:4px">🧭 Μετάβαση σε δωμάτιο</div>
         <div class="row" id="rooms"></div>
-        <div class="row" id="room-legend" style="margin-top:8px;gap:11px"></div>
-        <label style="display:flex;align-items:center;gap:9px;font-size:12.5px;
-          cursor:pointer;user-select:none;margin-top:8px">
-          <input type="checkbox" id="b-pick-room" style="vertical-align:-2px">
-          🖱️ Κλικ στον χάρτη επιλέγει δωμάτιο (αντί να στέλνει το ρομπότ εκεί)
-        </label>
-        <label style="display:flex;align-items:center;gap:9px;font-size:12.5px;
-          cursor:pointer;user-select:none;margin-top:6px">
-          <input type="checkbox" id="b-place-room" style="vertical-align:-2px">
-          ➕ Κλικ στον χάρτη ΠΡΟΣΘΕΤΕΙ δωμάτιο εδώ, με το όνομα/χρώμα από κάτω
-        </label>
-        <div class="row" id="place-room-row" style="margin-top:6px;gap:8px;display:none">
-          <input type="color" id="pr-color" value="#cc44ff"
-            style="width:34px;height:30px;padding:0;border:none;background:none;flex:0 0 auto">
-          <input type="text" id="pr-name" placeholder="π.χ. κρεβατοκάμαρα"
-            style="flex:1;min-width:100px;background:var(--bg);border:1px solid var(--border);
-            border-radius:8px;color:var(--text);padding:6px 9px;font-size:12.5px">
-        </div>
-        <label style="display:flex;align-items:center;gap:9px;font-size:12.5px;
-          cursor:pointer;user-select:none;margin-top:6px">
-          <input type="checkbox" id="b-place-room-rect" style="vertical-align:-2px">
-          ⬜ Σύρε με το ποντίκι πάνω στο δωμάτιο — τετραγωνίζεται αυτόματα
-        </label>
-        <div class="row" id="place-room-rect-row" style="margin-top:6px;gap:8px;display:none">
-          <input type="color" id="prr-color" value="#cc44ff"
-            style="width:34px;height:30px;padding:0;border:none;background:none;flex:0 0 auto">
-          <input type="text" id="prr-name" placeholder="π.χ. κρεβατοκάμαρα"
-            style="flex:1;min-width:100px;background:var(--bg);border:1px solid var(--border);
-            border-radius:8px;color:var(--text);padding:6px 9px;font-size:12.5px">
-        </div>
-        <div id="room-edit" style="margin-top:10px"></div>
-        <div class="row" style="margin-top:8px" id="room-edit-row">
-          <button class="btn" id="b-room-save">💾 Αποθήκευση ονομάτων/χρωμάτων</button>
-          <span id="room-edit-msg" style="font-size:11.5px;color:var(--text-dim)"></span>
-        </div>
+        <!-- Naming/colouring/splitting/merging used to live here as a legend
+             plus a one-room editor plus a paint button (2026-08-19). It all
+             moved onto the map itself, into #room-mgr — the tools are map
+             gestures, so a panel that has to close before you can use them was
+             the wrong place. This button is just the door to it. -->
+        <button class="btn pri" id="b-room-mgr-open" style="margin-top:10px;width:100%">
+          🏠 Διαχείριση δωματίων (όνομα, χρώμα, διαίρεση, συγχώνευση)
+        </button>
         <div class="speedbox" style="margin-top:10px">
           <label style="display:flex;align-items:center;gap:9px;font-size:12.5px;
             cursor:pointer;user-select:none">
@@ -5751,47 +5960,7 @@ button{font:inherit;color:inherit}
           <div id="ck-msg" style="font-size:11.5px;color:var(--text-dim);margin-top:6px"></div>
         </div>
       </div>
-      <div class="card">
-        <div class="row" style="justify-content:space-between">
-          <div id="dpad">
-            <div class="dbtn ghost"></div><div class="dbtn" id="bf">▲</div><div class="dbtn ghost"></div>
-            <div class="dbtn" id="bl">◄</div><div class="dbtn" id="bstop">STOP</div><div class="dbtn" id="br">►</div>
-            <div class="dbtn ghost"></div><div class="dbtn" id="bb">▼</div><div class="dbtn ghost"></div>
-          </div>
-          <div class="grid2" style="flex:1;min-width:150px">
-            <span class="k">X</span><span class="v" id="ix">—</span>
-            <span class="k">Y</span><span class="v" id="iy">—</span>
-            <span class="k">Γωνία</span><span class="v" id="iyaw">—</span>
-            <span class="k">Ταχύτητα</span><span class="v" id="ivel">—</span>
-          </div>
-          <div class="row" style="flex-direction:column;align-items:stretch">
-            <button class="btn pri" id="b-loc">🔍 Εντοπισμός</button>
-            <button class="btn" id="b-xnav">✕ Ακύρωση στόχου</button>
-          </div>
-        </div>
-        <div class="speedbox">
-          <div class="srow">
-            <span class="lbl">🚀 Ταχύτητα</span>
-            <input type="range" id="sp-lin" min="0.05" max="0.30" step="0.01">
-            <span class="val" id="sp-linv">—</span>
-          </div>
-          <div class="srow">
-            <span class="lbl">🔄 Στροφή</span>
-            <input type="range" id="sp-ang" min="0.35" max="1.20" step="0.05">
-            <span class="val" id="sp-angv">—</span>
-          </div>
-          <div class="row" style="margin-top:2px">
-            <button class="btn" id="sp-slow">🐢 Αργά</button>
-            <button class="btn" id="sp-def">Προεπιλογή</button>
-            <button class="btn" id="sp-fast">🐇 Γρήγορα</button>
-            <span id="sp-note" style="font-size:11px;color:var(--text-dim)"></span>
-          </div>
-        </div>
-        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
-          ⌨️ Και από πληκτρολόγιο: βελάκια ή WASD (κράτα πατημένο), space = στοπ. Αφήνοντας το πλήκτρο σταματά· αν χαθεί το tab ή το δίκτυο, η βάση σταματά μόνη της σε 0.25s.
-        </p>
-      </div>
-    </section>
+    </div>
 
     <!-- ── Camera ──────────────────────────────────────────────── -->
     <section class="pane" id="p-cam">
@@ -5823,7 +5992,7 @@ button{font:inherit;color:inherit}
           <button class="btn warn" id="b-follow-stop">■ Σταμάτα να ακολουθείς</button>
         </div>
         <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
-          Τα πράσινα πλαίσια είναι άνθρωποι, τα πορτοκαλί αντικείμενα· ο κίτρινος σκελετός είναι 17 σημεία COCO. Κλικ πάνω σε ένα πορτοκαλί αντικείμενο στέλνει τον βραχίονα να το πιάσει. ‼️ Χρειάζονται τα perception nodes — ξεκίνα με «robot max use_perception:=true», αλλιώς η εικόνα μένει καθαρή και ο μετρητής στο 0. Το «Ακολούθησέ με» σταματά μόνο του μετά από 30 δευτερόλεπτα.
+          Τα πράσινα πλαίσια είναι άνθρωποι, τα πορτοκαλί αντικείμενα· ο κίτρινος σκελετός είναι 17 σημεία COCO. Κλικ πάνω σε ένα πορτοκαλί αντικείμενο κάνει το ρομπότ να το πλησιάσει και μετά ο βραχίονας το πιάνει. ‼️ Χρειάζονται τα perception nodes — ξεκίνα με «robot max use_perception:=true», αλλιώς η εικόνα μένει καθαρή και ο μετρητής στο 0. Το «Ακολούθησέ με» σταματά μόνο του μετά από 30 δευτερόλεπτα.
         </p>
       </div>
       <div class="card">
@@ -5852,12 +6021,12 @@ button{font:inherit;color:inherit}
 
     <!-- ── RViz / MoveIt / Gazebo / RTAB-Map ───────────────────── -->
     <section class="pane" id="p-rviz"></section>
-    <section class="pane" id="p-moveit"></section>
     <section class="pane" id="p-gazebo"></section>
     <section class="pane" id="p-rtabmap"></section>
 
-    <!-- ── Arm ─────────────────────────────────────────────────── -->
-    <section class="pane" id="p-arm">
+    <!-- The returned Waveshare arm panel is intentionally removed from the UI.
+         Keep the dormant backend code until a replacement arm is selected. -->
+    <section class="pane" id="p-arm" style="display:none" aria-hidden="true">
       <div class="card">
         <h3>3D <span class="badge" id="arm3d-info">—</span>
           <button class="btn" id="b-arm3d-reset" style="float:right">Επαναφορά όψης</button>
@@ -6368,74 +6537,6 @@ button{font:inherit;color:inherit}
       </div>
     </section>
 
-    <!-- ── Proactive observations ──────────────────────────────── -->
-    <section class="pane" id="p-obs">
-      <div class="card" style="margin-bottom:9px">
-        <h3>Τι πρόσεξε <span class="badge" id="ob-badge">—</span></h3>
-        <div id="ob-feed" style="font-size:12.5px;line-height:1.7;color:var(--text)">
-          <span style="color:var(--text-dim)">Καμία παρατήρηση ακόμη.</span>
-        </div>
-      </div>
-      <div class="card">
-        <h3>Πώς μαθαίνει</h3>
-        <p style="font-size:11.5px;color:var(--text-dim);line-height:1.6">
-          Το ρομπότ χτίζει μόνο του μια βάση αναφοράς: πού «ζει» κανονικά κάθε
-          αντικείμενο. Ένα αντικείμενο μετράει ως μόνιμο μόνο αφού το δει στο ίδιο
-          σημείο σε ΞΕΧΩΡΙΣΤΕΣ επισκέψεις, με απόσταση μεταξύ τους — αλλιώς μια
-          παρατεταμένη ματιά σε ένα δωμάτιο θα γινόταν «κανονικότητα» και όλα μετά
-          θα έμοιαζαν μετακινημένα.
-        </p>
-        <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
-          Σε καινούριο χάρτη θα σιωπά για μέρες. Αυτό είναι το σωστό: δεν ξέρει
-          ακόμη τι σημαίνει «κανονικά». Μιλάει ΜΟΝΟ όταν υπάρχει άνθρωπος μπροστά
-          του, το πολύ 4 φορές την ώρα, ποτέ 23:00–08:00, και ποτέ την ίδια
-          παρατήρηση δύο φορές σε 2 ώρες.
-        </p>
-      </div>
-    </section>
-
-    <!-- ── Object memory ───────────────────────────────────────── -->
-    <section class="pane" id="p-objmem">
-      <div class="card" style="margin-bottom:9px">
-        <h3>Πού είναι τα πράγματα <span class="badge" id="om-badge">—</span></h3>
-        <div id="om-list" style="font-size:12.5px;line-height:1.75">
-          <span style="color:var(--text-dim)">Τίποτα γνωστό ακόμη.</span>
-        </div>
-      </div>
-      <div class="card">
-        <h3>Πώς δουλεύει</h3>
-        <p style="font-size:11.5px;color:var(--text-dim);line-height:1.6">
-          Το ρομπότ θυμάται πού είδε τελευταία κάθε αντικείμενο, από την κάμερα —
-          η ίδια μνήμη που χρησιμοποιεί το «φέρε μου το Χ». Ένα αντικείμενο
-          μπαίνει εδώ μόνο αφού επιβεβαιωθεί σε αρκετές ξεχωριστές παρατηρήσεις,
-          όχι από μία ματιά.
-        </p>
-      </div>
-    </section>
-
-    <!-- ── Episodic timeline ───────────────────────────────────── -->
-    <section class="pane" id="p-time">
-      <div class="card" style="margin-bottom:9px">
-        <h3>Ρώτα τη μνήμη <span class="badge" id="tl-count">—</span></h3>
-        <div class="row">
-          <input id="tl-q" placeholder="π.χ. τι έγινε σήμερα το πρωί;"
-            style="flex:1;min-width:150px;background:var(--bg);border:1px solid var(--border);
-            border-radius:8px;color:var(--text);padding:7px 10px;font-size:12.5px"
-            autocomplete="off">
-          <button class="btn pri" id="b-tl-ask">Ρώτα</button>
-        </div>
-        <div class="row" style="margin-top:8px;flex-wrap:wrap;gap:6px" id="tl-chips"></div>
-        <div id="tl-answer" style="font-size:12.5px;color:var(--text-dim);margin-top:10px;
-          line-height:1.6"></div>
-      </div>
-      <div class="card">
-        <h3>Χρονολόγιο</h3>
-        <div id="tl-feed" style="font-size:12.5px;line-height:1.75">
-          <span style="color:var(--text-dim)">Άδειο.</span>
-        </div>
-      </div>
-    </section>
-
     <!-- ── IMU (BNO085) ────────────────────────────────────────── -->
     <section class="pane" id="p-imu">
       <div class="card">
@@ -6616,7 +6717,7 @@ button{font:inherit;color:inherit}
           <span class="k">Πλησιέστερο κρυφό εμπόδιο</span><span class="v" id="fp-near">—</span>
         </div>
         <p style="font-size:11.5px;color:var(--text-dim);margin-top:10px;line-height:1.6">
-          Κάτοψη γύρω από το ρομπότ, 4 μέτρα ακτίνα, μύτη προς τα πάνω. <b style="color:var(--text-dim)">Λευκό</b> = το lidar (μέσα στο σκούρο διάγραμμα), <b style="color:#38bdf8">γαλάζιο</b> = η κάμερα, <b style="color:#f87171">κόκκινο</b> = εκεί που η κάμερα βλέπει εμπόδιο ΠΙΟ ΚΟΝΤΑ από το lidar.
+          Κάτοψη γύρω από το ρομπότ, 4 μέτρα ακτίνα, μύτη προς τα πάνω. <b style="color:var(--text-dim)">Λευκό</b> = το lidar, <b style="color:#38bdf8">γαλάζιο</b> = η κάμερα, <b style="color:#f87171">κόκκινο</b> = εκεί που η κάμερα βλέπει εμπόδιο ΠΙΟ ΚΟΝΤΑ από το lidar.
         </p>
         <p style="font-size:11.5px;color:var(--text-dim);margin-top:8px;line-height:1.6">
           Τα κόκκινα είναι ο λόγος που υπάρχει αυτή η κάρτα: το C1 κόβει μία οριζόντια φέτα στα 60.6 cm, οπότε ένα τραπέζι, ένα σκαλί, ένα σκυμμένο κεφάλι ή μια γάτα ζουν ακριβώς στο κενό του. Η κάμερα κοιτάει από τα 53.6 cm και τα πιάνει, αλλά μόνο μπροστά — τα ~87° του κώνου της. Έξω από αυτόν υπάρχει μόνο λευκό, και αυτό είναι σωστό, όχι διαφωνία.
@@ -6632,6 +6733,11 @@ button{font:inherit;color:inherit}
 
     <!-- ── Voice / LLM ─────────────────────────────────────────── -->
     <section class="pane" id="p-llm">
+      <div class="card" id="voice-live">
+        <h3>Ζωντανό μικρόφωνο <span class="badge" id="stt-live-badge">αναμονή</span></h3>
+        <div id="mic-meter"><div id="mic-level"></div></div>
+        <div id="heard-live">Περιμένω να πεις «ρομπότ»…</div>
+      </div>
       <div class="card" style="margin-bottom:9px">
         <h3>Ποιος μιλάει <span class="badge" id="sp-badge">—</span></h3>
         <div id="sp-detail" style="font-size:11.5px;color:var(--text-dim);line-height:1.55">
@@ -6668,6 +6774,7 @@ button{font:inherit;color:inherit}
           Η αλλαγή σβήνει τις τελευταίες ατάκες της κουβέντας.
         </div>
       </div>
+      <h3 style="margin:4px 0 8px">Συνομιλία LLM</h3>
       <div id="chat"></div>
       <div id="chat-in">
         <input id="chat-text" placeholder="Γράψε στο ρομπότ…" autocomplete="off">
@@ -7002,11 +7109,48 @@ function updateMapStats(){
   const n = Object.keys(roomsData).length;
   $('ml-rooms').textContent = n || '—';
 }
-// Transient marker for "🖱️ Κλικ επιλέγει δωμάτιο": which room a map click
-// landed in was only ever shown by scrolling a distant card and flashing a
-// row there — easy to miss, and disconnected from where you actually
-// clicked. This anchors the answer to the click point itself.
-let pickedMarker=null;   // {x, y, name} in map metres, name=null while awaiting the reply
+let doorsData=[];        // [{x1,y1,x2,y2,width_m}] door segments, see /maps/doors
+let doorsForMap=null;    // which map doorsData was fetched for — refetch only on change
+async function refreshDoors(activeMap){
+  // No explicit ?map= — same as wallsLoad()/scan3d's load(), both rely on
+  // the server defaulting to whatever map is currently active.
+  if(activeMap === doorsForMap) return;
+  doorsForMap = activeMap;
+  try {
+    const r = await fetch('/maps/doors' + TOKEN_QS);
+    const d = r.ok ? await r.json() : null;
+    doorsData = (d && d.doors) || [];
+  } catch(e){ doorsData = []; }
+  draw();
+}
+
+// The user's OWN floorplan image (e.g. exported from a phone scanning app),
+// shown VERBATIM instead of the procedural pgm rendering when present — see
+// /maps/floorplan's docstring. floorplanReg (optional, /maps/floorplan_reg)
+// is a {a,b,c,d} pixel<->map affine fitted OFFLINE against the same source
+// scan's real wall geometry (maps/<name>_floorplan.yaml) — when present,
+// w2c()/c2w() below use it so AMCL pose/lidar/trail/goal still land in the
+// right place ON this image, without pretending to have registered an
+// image that was never actually measured against the map frame.
+let floorplanImg=null, floorplanForMap=null, floorplanReg=null;
+async function refreshFloorplan(activeMap){
+  if(activeMap === floorplanForMap) return;
+  floorplanForMap = activeMap;
+  floorplanReg = null;
+  try {
+    const r = await fetch('/maps/floorplan_reg' + TOKEN_QS);
+    floorplanReg = r.ok ? await r.json() : null;
+  } catch(e){ floorplanReg = null; }
+  const probe = new Image();
+  probe.onload = () => { floorplanImg = probe; draw(); };
+  probe.onerror = () => { floorplanImg = null; draw(); };
+  probe.src = '/maps/floorplan' + TOKEN_QS + (TOKEN_QS ? '&' : '?') + '_=' + Date.now();
+}
+// Fit-to-canvas geometry for floorplanImg, mirroring scale()/offX()/offY()
+// below but against the image's own natural size instead of mapInfo.
+function flFit(){ return floorplanImg ? Math.min(canvas.width/floorplanImg.naturalWidth, canvas.height/floorplanImg.naturalHeight) : 1; }
+function flOffX(){ return floorplanImg ? (canvas.width  - floorplanImg.naturalWidth  * flFit()) / 2 : 0; }
+function flOffY(){ return floorplanImg ? (canvas.height - floorplanImg.naturalHeight * flFit()) / 2 : 0; }
 let kzData={};   // keepout zones for the active map, see keepout_files.py
 let nfPoints=[], nfLastFrames=0;   // NeRF capture coverage — kept frame x,y as they arrive
 let robotTrail=[];   // where the robot has driven this session — (x,y) in map metres
@@ -7030,8 +7174,6 @@ const ALL_TABS = [
   ['cam',    '📷', 'Κάμερα'],
   ['cloud',  '🧿', '3D'],
   ['rviz',   '🧊', 'RViz'],
-  ['moveit', '🎯', 'MoveIt'],
-  ['arm',    '🦾', 'Χέρι'],
   ['base',   '🧹', 'Σκούπα'],
   ['imu',    '🧭', 'IMU'],
   // Left in English on purpose, in both languages: "Σύντηξη" alone reads as
@@ -7043,9 +7185,6 @@ const ALL_TABS = [
   ['point',  '👉', 'Χειρονομίες'],
   ['vocab',  '🔎', 'Ψάξε'],
   ['sound',  '👂', 'Ήχοι'],
-  ['obs',    '💡', 'Πρόσεξα'],
-  ['objmem', '📦', 'Αντικείμενα'],
-  ['time',   '🕐', 'Χρονικό'],
   ['people', '🧑', 'Άτομα'],
   ['llm',    '💬', 'Φωνή'],
   ['gazebo', '🌍', 'Gazebo'],
@@ -7059,9 +7198,19 @@ const ALL_TABS = [
 // the tabs actually used day-to-day; everything else still has a full pane,
 // just one tap further via Ρυθμίσεις → "Περισσότερα εργαλεία" (MORE_TABS/
 // renderMoreTools below), not removed.
-const CORE_TAB_IDS = ['map', 'cam', 'arm', 'base', 'llm', 'sys', 'safe', 'set'];
+const CORE_TAB_IDS = ['map', 'cam', 'base', 'llm', 'sys', 'set'];
 const TABS      = ALL_TABS.filter(([id]) => CORE_TAB_IDS.includes(id));
 const MORE_TABS = ALL_TABS.filter(([id]) => !CORE_TAB_IDS.includes(id));
+// Secondary screens are grouped by the job they help with, rather than by the
+// order they happened to be added to the dashboard. This is deliberately a
+// small, appliance-like menu: a person looking for a 3D house map should not
+// have to know whether its implementation is RViz, RTAB-Map or a point cloud.
+const MORE_TAB_GROUPS = [
+  ['Χάρτες & χώρος', ['cloud', 'rviz', 'rtabmap', 'cost', 'nerf']],
+  ['Όραση & αντίληψη', ['vocab', 'people', 'sound', 'point']],
+  ['Κίνηση & χειρισμός', ['gazebo']],
+  ['Τεχνικά', ['imu', 'fuse', 'safe', 'log']],
+];
 // Rebuilt on every language change; the labels come from the same t() as the
 // rest of the page. Preserves which tab is active across the rebuild.
 function renderTabs(){
@@ -7083,13 +7232,27 @@ function renderMoreTools(){
   const list = $('more-tools-list');
   if(!list) return;
   list.innerHTML = '';
-  MORE_TABS.forEach(([id, icon, label]) => {
-    const r = document.createElement('div');
-    r.className = 'mt-row';
-    r.dataset.pane = id;
-    r.innerHTML = `<span class="ic">${icon}</span><span>${t(label)}</span><span class="mt-chev">›</span>`;
-    r.onclick = () => showTab(id);
-    list.appendChild(r);
+  const byId = new Map(MORE_TABS.map(tab => [tab[0], tab]));
+  MORE_TAB_GROUPS.forEach(([groupLabel, ids]) => {
+    const groupTabs = ids.map(id => byId.get(id)).filter(Boolean);
+    if(!groupTabs.length) return;
+    const group = document.createElement('section');
+    group.className = 'mt-group';
+    const title = document.createElement('div');
+    title.className = 'mt-group-title';
+    title.textContent = t(groupLabel);
+    const rows = document.createElement('div');
+    rows.className = 'mt-group-list';
+    groupTabs.forEach(([id, icon, label]) => {
+      const r = document.createElement('div');
+      r.className = 'mt-row';
+      r.dataset.pane = id;
+      r.innerHTML = `<span class="ic">${icon}</span><span>${t(label)}</span><span class="mt-chev">›</span>`;
+      r.onclick = () => showTab(id);
+      rows.appendChild(r);
+    });
+    group.append(title, rows);
+    list.appendChild(group);
   });
 }
 function showTab(id){
@@ -7108,6 +7271,7 @@ function showTab(id){
   camSetActive(id === 'cam');
   costSetActive(id === 'cost');
   fuseSetActive(id === 'fuse');
+  voiceSetActive(id === 'llm');
   if (id === 'cost'){ buildCostLegend(); costShowSize(); }
   // 170 kB of geometry, fetched the first time the tab is opened rather than
   // on every page load — most visits never look at the arm.
@@ -7115,23 +7279,34 @@ function showTab(id){
 }
 
 // ── map tab: 2D / 3D toggle ─────────────────────────────────────────────────
-// One pane, two views of the SAME active map. The old "Τοίχοι 3D"
-// extruded-walls view was dropped per user request (2026-08-15) — the
-// photorealistic scan view covers 3D, this canvas only does 2D now.
+// One pane, three views of the SAME active map. 3D geometry (/maps/walls3d)
+// is fetched lazily on first switch to 3D (wallsLoad() is idempotent), same
+// as the arm's model. Re-added 2026-08-17 (Roborock/Dreame-style isometric
+// reference screenshot) after being dropped 2026-08-15 — this time the floor
+// is textured from the same room-tinted mapImg the 2D canvas already draws
+// (see wallsBuildFloor), so it reads as the coloured-room isometric view
+// requested, not the flat-grey block view that got removed.
 let mapView = '2d';
+// '3d' is the real scan; 'walls' is the grid extrusion. They swapped buttons
+// (2026-08-19) once a scan of this house existed — the names below follow what
+// each view IS, so the click handlers stay readable.
 function setMapView(view){
   mapView = view;
   $('map-view-2d').classList.toggle('pri', view === '2d');
-  $('map-view-scan').classList.toggle('pri', view === 'scan');
+  $('map-view-3d').classList.toggle('pri', view === '3d');
+  $('map-view-walls').classList.toggle('pri', view === 'walls');
   $('map-wrap').style.display = view === '2d' ? '' : 'none';
   $('map-rotate-row').style.display = view === '2d' ? '' : 'none';
-  $('map-scan3d-card').style.display = view === 'scan' ? '' : 'none';
-  $('map-scan3d-upload-card').style.display = view === 'scan' ? '' : 'none';
+  $('map-walls3d-card').style.display = view === 'walls' ? '' : 'none';
+  $('map-scan3d-card').style.display = view === '3d' ? '' : 'none';
+  $('map-scan3d-upload-card').style.display = view === '3d' ? '' : 'none';
   if (view === '2d') resize();
-  else if (view === 'scan' && window.hrScan3d) window.hrScan3d.activate();
+  else if (view === 'walls') { wallsLoad(); wallsDraw(); }
+  else if (view === '3d' && window.hrScan3d) window.hrScan3d.activate();
 }
 $('map-view-2d').onclick = () => setMapView('2d');
-$('map-view-scan').onclick = () => setMapView('scan');
+$('map-view-3d').onclick = () => setMapView('3d');
+$('map-view-walls').onclick = () => setMapView('walls');
 // NB: the initial showTab() call lives at the bottom of the script — calling it
 // here would touch VNC_APPS before its `const` is initialised (temporal dead
 // zone), which throws and leaves the whole page unwired.
@@ -7142,7 +7317,6 @@ $('map-view-scan').onclick = () => setMapView('scan');
 // streams the user may never look at.
 const VNC_APPS = {
   rviz:   {title:'RViz',   note:'Η ίδια συνεδρία :2 που ανοίγει το <code>robot max</code> — και αυτή που βλέπεις από το RealVNC στο κινητό.'},
-  moveit: {title:'MoveIt', note:'Ξεκινά <code>arm_moveit.launch.py</code>: move_group + RViz με το Motion Planning panel. Τράβα τη δαγκάνα, Plan, Execute.'},
   gazebo: {title:'Gazebo', note:'‼️ ΠΡΟΣΟΜΟΙΩΣΗ. Δημοσιεύει δικά της /clock, /scan, /odom — μην την ανοίγεις ενώ οδηγείς το πραγματικό ρομπότ.'},
   rtabmap:{title:'RTAB-Map', note:'Χτίζει τρισδιάστατο χάρτη του σπιτιού από την D435. Οδήγησε αργά και κοίτα τους τοίχους· ο χάρτης μεγαλώνει μόνο όσο κινείσαι. ΔΕΝ πειράζει την πλοήγηση: δεν δημοσιεύει TF και ζει σε δικό του namespace.'},
 };
@@ -7554,6 +7728,13 @@ function rotatePt(x, y, ang){
 }
 
 function w2c(wx, wy){
+  if(floorplanImg && floorplanReg){
+    const fit = flFit();
+    const px = (wx - floorplanReg.b) / floorplanReg.a;
+    const py = (wy - floorplanReg.d) / floorplanReg.c;
+    const ux = flOffX() + px * fit, uy = flOffY() + py * fit;
+    return mapViewRotation ? rotatePt(ux, uy, mapViewRotation) : {x:ux, y:uy};
+  }
   if(!mapInfo) return {x:0,y:0};
   const s=scale();
   const ux = offX() + (wx - mapInfo.origin[0]) / mapInfo.resolution * s;
@@ -7561,6 +7742,12 @@ function w2c(wx, wy){
   return mapViewRotation ? rotatePt(ux, uy, mapViewRotation) : {x:ux, y:uy};
 }
 function c2w(cx, cy){
+  if(floorplanImg && floorplanReg){
+    const fit = flFit();
+    const p = mapViewRotation ? rotatePt(cx, cy, -mapViewRotation) : {x:cx, y:cy};
+    const px = (p.x - flOffX()) / fit, py = (p.y - flOffY()) / fit;
+    return { x: floorplanReg.a * px + floorplanReg.b, y: floorplanReg.c * py + floorplanReg.d };
+  }
   if(!mapInfo) return null;
   const s=scale();
   const p = mapViewRotation ? rotatePt(cx, cy, -mapViewRotation) : {x:cx, y:cy};
@@ -7585,17 +7772,36 @@ function draw(){
   ctx.clearRect(0,0,canvas.width,canvas.height);
   ctx.fillStyle='#f4f4f5';
   ctx.fillRect(0,0,canvas.width,canvas.height);
-  if(!mapImg||!mapInfo) return;
-  const s=scale(), ox=offX(), oy=offY();
-  ctx.save();
-  if(mapViewRotation){
-    ctx.translate(canvas.width/2, canvas.height/2);
-    ctx.rotate(mapViewRotation);
-    ctx.translate(-canvas.width/2, -canvas.height/2);
+  // User-supplied floorplan image (maps/<name>_floorplan.*) wins outright as
+  // the BASE image — shown as-is, no procedural walls/badges/doors drawn on
+  // top of it (those belong to the pgm rendering this replaces). The live
+  // robot markers further down (trail/plan/lidar/goal/pose) still draw, now
+  // through w2c()'s floorplanReg branch — see refreshFloorplan()'s comment.
+  if(floorplanImg){
+    const iw = floorplanImg.naturalWidth, ih = floorplanImg.naturalHeight;
+    const fit = Math.min(canvas.width / iw, canvas.height / ih);
+    const dw = iw * fit, dh = ih * fit;
+    ctx.drawImage(floorplanImg, (canvas.width - dw) / 2, (canvas.height - dh) / 2, dw, dh);
+  } else {
+    if(!mapImg||!mapInfo) return;
+    const s=scale(), ox=offX(), oy=offY();
+    ctx.save();
+    if(mapViewRotation){
+      ctx.translate(canvas.width/2, canvas.height/2);
+      ctx.rotate(mapViewRotation);
+      ctx.translate(-canvas.width/2, -canvas.height/2);
+    }
+    ctx.drawImage(mapImg, ox, oy, mapInfo.width*s, mapInfo.height*s);
+    ctx.restore();
   }
-  ctx.drawImage(mapImg, ox, oy, mapInfo.width*s, mapInfo.height*s);
-  ctx.restore();
 
+  // Everything in this block is the procedural-map-only editing/decoration
+  // layer (room badges, door arcs, slip map, keepout zones, room-rectangle
+  // preview) — none of it means anything drawn over the user's OWN static
+  // floorplan image, so it's skipped outright in that mode. The live robot
+  // state further down (trail/plan/lidar/goal/pose) is NOT inside this
+  // block and still draws either way.
+  if(!floorplanImg){
   // Room badges: a numbered coloured circle at each room's centroid (see
   // _room_centers() server-side), Dreame/Roborock-style, with the name in a
   // pill just below it — the point of drawing the name AT the room instead
@@ -7628,9 +7834,19 @@ function draw(){
       ctx.fillText(String(num), p.x, by0 + 1);
       roomBadgeHits.push({name, x: p.x, y: by0, r: R});
 
-      // the name pill, just below
+      // the name pill, just below — with the room's floor area alongside
+      // the name (wc[2], from _room_centers() server-side), like a real
+      // floorplan's "Σαλόνι · 21 m²" instead of just a bare name.
       ctx.font = '600 12px system-ui, sans-serif';
-      const tw = ctx.measureText(name).width;
+      // Auto-segmented rooms (scripts/auto_rooms.py --apply) start out named
+      // "room1", "room2", ... until renamed from this tab — printing that
+      // placeholder on the map read as clutter next to a real floorplan's
+      // plain area-only labels (2026-08-18 reference), so skip the name
+      // until it's been given a real one.
+      const isPlaceholder = /^room\d+$/.test(name);
+      const label = isPlaceholder ? (wc[2] ? wc[2] + ' m²' : name)
+                                  : name + (wc[2] ? ' · ' + wc[2] + ' m²' : '');
+      const tw = ctx.measureText(label).width;
       const padX = 8, padY = 4;
       const bw = padX*2 + tw, bh = padY*2 + 13;
       const bx = p.x - bw/2, byy = by0 + R + 6;
@@ -7639,10 +7855,40 @@ function draw(){
       if(ctx.roundRect) ctx.roundRect(bx, byy, bw, bh, bh/2); else ctx.rect(bx, byy, bw, bh);
       ctx.fill();
       ctx.fillStyle = '#f4f4f5';
-      ctx.fillText(name, p.x, byy + bh/2);
+      ctx.fillText(label, p.x, byy + bh/2);
     });
     ctx.textAlign = 'left';
     ctx.textBaseline = 'alphabetic';
+  }
+
+  // Door swing arcs (maps/<name>_doors.yaml via refreshDoors) — standard
+  // floorplan symbol: a line from the hinge to the door's OPEN position
+  // (rotated 90° off the wall), plus a quarter-circle arc back to the
+  // doorway's other jamb. Real door positions/widths (extracted from the
+  // RoomPlan scan's own door mesh transforms), not guessed — only the swing
+  // SIDE is a fixed perpendicular pick, not sourced from the scan, so it
+  // occasionally opens "through" a wall on plan; harmless, it is a static
+  // decoration, not a collision object.
+  if(doorsData.length){
+    ctx.strokeStyle = 'rgba(255,255,255,.85)';
+    ctx.lineWidth = 1.5;
+    for(const d of doorsData){
+      const hinge = w2c(d.x1, d.y1), far = w2c(d.x2, d.y2);
+      const dx = far.x - hinge.x, dy = far.y - hinge.y;
+      const r = Math.hypot(dx, dy);
+      if(r < 2) continue;
+      const ux = dx / r, uy = dy / r;
+      const openX = hinge.x - uy * r, openY = hinge.y + ux * r;
+      ctx.beginPath();
+      ctx.moveTo(hinge.x, hinge.y);
+      ctx.lineTo(openX, openY);
+      ctx.moveTo(hinge.x, hinge.y);
+      ctx.lineTo(far.x, far.y);
+      const a0 = Math.atan2(openY - hinge.y, openX - hinge.x);
+      const a1 = Math.atan2(dy, dx);
+      ctx.arc(hinge.x, hinge.y, r, a0, a1);
+      ctx.stroke();
+    }
   }
 
   // Where the odometry loses ground. Drawn UNDER everything else: it is
@@ -7684,23 +7930,20 @@ function draw(){
     ctx.beginPath(); ctx.arc(c.x,c.y,6,0,Math.PI*2); ctx.stroke();
     ctx.setLineDash([]);
   }
-  if(prrPath && prrPath.length > 1){
-    // The freehand stroke itself, thin and faint — what actually gets sent is
-    // only its bounding box (drawn below), so the stroke is just a "yes, I'm
-    // drawing" trace, not the shape that ends up painted.
-    ctx.strokeStyle='rgba(204,68,255,.55)'; ctx.lineWidth=2;
-    ctx.beginPath();
-    prrPath.forEach((p,i)=>{ const c=w2c(p.x,p.y); i?ctx.lineTo(c.x,c.y):ctx.moveTo(c.x,c.y); });
-    ctx.stroke();
-    // Live bounding-box preview — this rectangle is what place_room_rect
-    // will actually paint, so the dashed box is the real feedback.
-    const xs=prrPath.map(p=>p.x), ys=prrPath.map(p=>p.y);
-    const p0=w2c(Math.min(...xs),Math.min(...ys)), p1=w2c(Math.max(...xs),Math.max(...ys));
-    ctx.strokeStyle='#cc44ff'; ctx.setLineDash([5,4]); ctx.lineWidth=1.5;
-    ctx.strokeRect(Math.min(p0.x,p1.x), Math.min(p0.y,p1.y),
-                   Math.abs(p1.x-p0.x), Math.abs(p1.y-p0.y));
+  // First point of a divide-the-room line, waiting for its second tap — same
+  // reasoning as the keepout preview above: a pending click must not be
+  // invisible. Drawn as scissors' first snip: a ring plus a cross-hair.
+  if(rmSplitPt){
+    const c=w2c(rmSplitPt.x,rmSplitPt.y);
+    ctx.strokeStyle='#7c3aed'; ctx.lineWidth=2; ctx.setLineDash([5,4]);
+    ctx.beginPath(); ctx.arc(c.x,c.y,8,0,Math.PI*2); ctx.stroke();
     ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(c.x-12,c.y); ctx.lineTo(c.x+12,c.y);
+    ctx.moveTo(c.x,c.y-12); ctx.lineTo(c.x,c.y+12);
+    ctx.stroke();
   }
+  } // end !floorplanImg (procedural-map-only editing/decoration layer)
 
   // Robot trail — where it has actually driven this session (pose(m) pushes
   // into robotTrail on >5cm movement). History, drawn before the plan so the
@@ -7762,26 +8005,6 @@ function draw(){
     ctx.restore();
   }
 
-  // "🖱️ Κλικ επιλέγει δωμάτιο" feedback — anchored to the actual click
-  // point, not just a flash in the room-edit card below (which can be
-  // scrolled out of view, easy to miss). See pickedMarker's declaration.
-  if(pickedMarker){
-    const p = w2c(pickedMarker.x, pickedMarker.y);
-    ctx.fillStyle = '#f472b6'; ctx.strokeStyle = '#1a1a1e'; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.arc(p.x, p.y, 7, 0, Math.PI*2); ctx.fill(); ctx.stroke();
-    const label = pickedMarker.name === null ? '…' : pickedMarker.name;
-    ctx.font = '600 13px system-ui, sans-serif';
-    const tw = ctx.measureText(label).width;
-    const padX = 8, padY = 5, bh = padY*2 + 14, by = p.y - 15 - bh;
-    const bx = p.x - tw/2 - padX, bw = tw + padX*2;
-    ctx.fillStyle = 'rgba(24,24,27,.92)'; ctx.strokeStyle = '#f472b6'; ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    if(ctx.roundRect) ctx.roundRect(bx, by, bw, bh, 6); else ctx.rect(bx, by, bw, bh);
-    ctx.fill(); ctx.stroke();
-    ctx.fillStyle = '#f4f4f5'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText(label, p.x, by + bh/2);
-    ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
-  }
 }
 
 function resize(){
@@ -7819,8 +8042,13 @@ function drawNerfMap(){
 const HANDLERS = {
   map(m){
     mapInfo={width:m.width,height:m.height,resolution:m.resolution,origin:m.origin};
-    const i=new Image(); i.onload=()=>{mapImg=i;draw();}; i.src='data:image/png;base64,'+m.image;
-    if (m.rooms) { roomsData=m.rooms; roomLegend(m.rooms); renderRoomEditor(m.rooms); }
+    const i=new Image(); i.onload=()=>{mapImg=i;draw();if(mapView==='walls')wallsDraw();};
+    i.src='data:image/png;base64,'+m.image;
+    if (m.rooms) {
+      roomsData=m.rooms;
+      if (selectedRoomName && !(selectedRoomName in m.rooms)) selectedRoomName = null;
+      rmRender();
+    }
     if (m.centers) roomCenters=m.centers;
     if (m.tinted !== undefined) $('b-tint').checked = m.tinted;
     if (m.keepout) { kzData=m.keepout; renderKeepoutList(kzData); }
@@ -7829,14 +8057,18 @@ const HANDLERS = {
   },
   map_rooms(m){
     roomsData=m.rooms||{}; roomCenters=m.centers||{};
-    roomLegend(roomsData); renderRoomEditor(roomsData); updateMapStats(); draw();
+    if (selectedRoomName && !(selectedRoomName in roomsData)) selectedRoomName = null;
+    rmRender(); updateMapStats(); draw();
   },
   room_saved(m){
-    $('room-edit-msg').textContent = m.ok ? t('Αποθηκεύτηκε.') : (m.error || t('Αποτυχία.'));
-    $('room-edit-msg').style.color = m.ok ? '#16a34a' : '#dc2626';
-    // place_room reuses this message: clear the name on success so the next
-    // click starts a fresh room instead of re-painting the same one.
-    if(m.ok && $('b-place-room').checked) $('pr-name').value = '';
+    // Ack for every room tool (add/rename/recolour/divide/merge/delete) — they
+    // all end in the same server-side _rooms_changed(), and the manager panel
+    // is the only place any of them can be triggered from.
+    // Back to plain selection after a successful add/divide, so the next tap
+    // on the map doesn't paint a second room with the same name. Before the
+    // message, not after: rmSetMode() clears the status line.
+    if(m.ok && (rmMode === 'add' || rmMode === 'split')) rmSetMode('select');
+    rmMsg(m.ok ? t('Αποθηκεύτηκε.') : (m.error || t('Αποτυχία.')), m.ok);
   },
   keepout_zones(m){ kzData=m.zones||{}; renderKeepoutList(kzData); draw(); },
   keepout_saved(m){
@@ -7849,25 +8081,6 @@ const HANDLERS = {
       ? t('Επανεκκίνηση… η σελίδα θα ξανασυνδεθεί μόνη της.')
       : (m.error || t('Αποτυχία.'));
     $('kz-msg').style.color = m.ok ? '#16a34a' : '#dc2626';
-  },
-  room_picked(m){
-    if(pickedMarker){
-      pickedMarker.name = m.name || t('(κανένα δωμάτιο εδώ)');
-      draw();
-      setTimeout(()=>{ pickedMarker=null; draw(); }, 2200);
-    }
-    if(!m.name){
-      $('room-edit-msg').textContent = t('Δεν βρέθηκε δωμάτιο εκεί.');
-      $('room-edit-msg').style.color = 'var(--text-dim)';
-      return;
-    }
-    const row = Array.from(document.querySelectorAll('#room-edit [data-room]'))
-      .find(el => el.dataset.room === m.name);
-    if(!row) return;
-    row.scrollIntoView({behavior:'smooth', block:'nearest'});
-    row.classList.add('picked');
-    setTimeout(()=>row.classList.remove('picked'), 1500);
-    row.querySelector('.re-name').focus();
   },
   pose(m){
     pose=m;
@@ -7884,6 +8097,7 @@ const HANDLERS = {
     }
     draw();
     drawCompass2();
+    if (mapView === 'walls') wallsDraw();
     if (window.hrScan3d) window.hrScan3d.setPose(m);
   },
   scan(m){ scan=m; draw(); },
@@ -7903,6 +8117,7 @@ const HANDLERS = {
     try {
       const d = JSON.parse(m.text);
       latestDetections = Array.isArray(d) ? d : [];
+      latestDetectionsAt = performance.now();
     } catch(e) { latestDetections = []; }
   },
   situation(m){ $('situation').textContent = m.text || '—'; },
@@ -7924,10 +8139,6 @@ const HANDLERS = {
   sysnet(m){ renderSysNet(m); },
   token(m){ renderToken(m); },
   touch(m){ renderTouch(m); },
-  observations(m){ renderObservations(m); },
-  object_memory(m){ renderObjectMemory(m); },
-  timeline(m){ renderTimeline(m); },
-  recall_answer(m){ $('tl-answer').textContent = m.text || ''; },
   arm(m){
     m.names.forEach((n,i)=>{
       armPos[n]=m.pos[i];
@@ -8030,6 +8241,8 @@ const HANDLERS = {
     $('title').style.opacity = m.on ? '.55' : '1';
   },
   chat(m){ addMsg(m.role, m.text); },
+  mic_live(m){ onMicLive(m); },
+  stt_state(m){ onSttState(m); },
   log(m){ addLog(m); },
   cloud(m){ onCloud(m); },
   sys(m){
@@ -8500,7 +8713,7 @@ function renderAcoustic(m){
 // ── resizable viewers ──────────────────────────────────────────────────────
 // The big panels are flex:1 so they fill the pane. Dragging the grip pins an
 // explicit height instead; double-tapping it gives the pane back its space.
-const VIEWERS = ['map-wrap', 'cam-wrap', 'cost-wrap', 'arm3d', 'cloud-canvas', 'scan3d'];
+const VIEWERS = ['map-wrap', 'cam-wrap', 'cost-wrap', 'cloud-canvas', 'scan3d', 'walls3d'];
 
 function loadSizes(){
   try { return JSON.parse(localStorage.getItem('hr_sizes') || '{}'); }
@@ -8636,7 +8849,8 @@ function setupCards(){
 // A canvas inside a folded card has no size; on unfold it needs repainting.
 function redrawVisible(){
   for (const f of [window.draw, window.armDraw, window.drawCompass2,
-                   window.drawPointRing, window.drawCost, window.cloudDraw]){
+                   window.drawPointRing, window.drawCost, window.cloudDraw,
+                   window.wallsDraw]){
     if (typeof f === 'function') { try { f(); } catch(e){} }
   }
   window.dispatchEvent(new Event('resize'));
@@ -9122,69 +9336,6 @@ function drawCompass(angle){
   g.fillStyle='rgba(96,165,250,.55)'; g.fill();
 }
 
-// ── proactive observations ─────────────────────────────────────────────────
-function renderObservations(m){
-  const feed = (m.feed||[]).slice().reverse();
-  $('ob-badge').textContent = (m.learned!=null)
-    ? m.learned+' '+t('γνωστά αντικείμενα') : '—';
-  const el = $('ob-feed');
-  if(!feed.length){
-    el.innerHTML = '<span style="color:var(--text-dim)">'+esc(t('Καμία παρατήρηση ακόμη.'))+'</span>';
-    return;
-  }
-  el.innerHTML = feed.map(o=>{
-    const t = new Date((o.ts||0)*1000).toLocaleTimeString('el-GR',
-      {hour:'2-digit',minute:'2-digit'});
-    return `<div style="padding:7px 0;border-bottom:1px solid var(--border)">
-      <span style="color:#52525b;font-variant-numeric:tabular-nums">${t}</span>
-      &nbsp;${esc(o.text||'')}</div>`;
-  }).join('');
-}
-
-// ── object memory ────────────────────────────────────────────────────────
-function renderObjectMemory(m){
-  const items = m.items || [];
-  $('om-badge').textContent = items.length
-    ? items.length + ' ' + t('αντικείμενα') : '—';
-  const el = $('om-list');
-  if(!items.length){
-    el.innerHTML = '<span style="color:var(--text-dim)">'
-      + esc(t('Τίποτα γνωστό ακόμη.')) + '</span>';
-    return;
-  }
-  el.innerHTML = items.map(o=>{
-    const when = o.last_seen ? new Date(o.last_seen*1000)
-      .toLocaleTimeString('el-GR', {hour:'2-digit', minute:'2-digit'}) : '';
-    const room = o.room_el ? `<span style="color:#16a34a">${esc(o.room_el)}</span>`
-      : `<span style="color:var(--text-dim)">${esc(t('άγνωστο δωμάτιο'))}</span>`;
-    return `<div style="padding:7px 0;border-bottom:1px solid var(--border);
-      display:flex;justify-content:space-between;gap:10px">
-      <span><span style="font-weight:600">${esc(o.label||'')}</span>
-        &nbsp;${room}</span>
-      <span style="color:#52525b;font-variant-numeric:tabular-nums">${when}</span>
-      </div>`;
-  }).join('');
-}
-
-// ── episodic timeline ──────────────────────────────────────────────────────
-const TL_ICON = {heard:'🗣️', said:'🤖', room:'🚪', observed:'💡',
-                 saw:'👤', mission:'🎯'};
-
-function renderTimeline(m){
-  $('tl-count').textContent = (m.count!=null) ? m.count+' '+t('γεγονότα') : '—';
-  const ev = (m.events||[]).slice().reverse();
-  const el = $('tl-feed');
-  if(!ev.length){
-    el.innerHTML='<span style="color:var(--text-dim)">'+esc(t('Άδειο.'))+'</span>'; return;
-  }
-  el.innerHTML = ev.map(e=>{
-    const who = e.who ? `<span style="color:#7c3aed">${esc(e.who)}</span> ` : '';
-    return `<div style="padding:6px 0;border-bottom:1px solid var(--border)">
-      <span style="color:#52525b;font-variant-numeric:tabular-nums">${esc(e.clock||'')}</span>
-      &nbsp;${TL_ICON[e.kind]||'•'}&nbsp;${who}${esc(e.text||'')}</div>`;
-  }).join('');
-}
-
 function connect(){
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws${TOKEN_QS}`);
@@ -9196,6 +9347,7 @@ function connect(){
                      // socket, so after a restart it has forgotten this tab.
                      if(costOn) send({type:'costmap', on:true});
                      if(fuseOn) fuseSend();
+                     if(voiceLive) send({type:'voice_live', on:true});
                      if(!overlayOn) send({type:'overlay', on:false}); };
   ws.onclose = ()=>{ $('dot').classList.remove('on');
                      // The server forgets listeners per socket, so a dropped
@@ -9222,43 +9374,164 @@ function connect(){
 }
 function send(o){ if(ws&&ws.readyState===1) ws.send(JSON.stringify(o)); }
 
-// ── map click ──────────────────────────────────────────────────────────────
-// Click-modes share the canvas with plain navigation, so they are mutually
-// exclusive checkboxes: checking one un-checks the others, rather than
-// layering meanings onto the same click with no visual cue.
-const CLICK_MODE_BOXES = ['b-pick-room', 'b-place-room', 'b-place-room-rect', 'b-kz-add'];
+// ── room manager ───────────────────────────────────────────────────────────
+// The room-editing mode, modelled on what the Roborock and Dreame apps
+// actually put behind their map-edit pencil: one panel over the map, a strip
+// of tools (select / add / divide / merge), the rooms as cards with their icon
+// and floor area, and the selected room's own name+colour editor underneath.
+// Everything is finished by touching the map, so the panel lives ON the map
+// (#room-mgr) and not in the bottom sheet, which slides away when armed.
+//
+// It, the keepout-zone corner tool and plain navigation all share the ONE map
+// canvas, so exactly one of them owns a tap at a time — see the click handler
+// below, which dispatches in that order.
+let roomMgrOn = false;
+let rmMode = 'select';        // 'select' | 'add' | 'split' | 'merge'
+let rmSplitPt = null;         // first point of a divide line, in map coords
+const RM_MODES = [['select','👆','Επιλογή'], ['add','➕','Νέο'],
+                  ['split','✂️','Διαίρεση'], ['merge','🔗','Συγχώνευση']];
+const RM_HINTS = {
+  select: 'Άγγιξε ένα δωμάτιο στον χάρτη (ή μια κάρτα) για όνομα και χρώμα.',
+  add:    'Άγγιξε μια περιοχή χωρίς χρώμα — γίνεται νέο δωμάτιο, μέχρι τους τοίχους της.',
+  split:  'Δύο αγγίγματα στον χάρτη τραβούν τη γραμμή που κόβει το δωμάτιο στα δύο.',
+  merge:  'Άγγιξε το δεύτερο δωμάτιο: ενώνεται με το επιλεγμένο σε ένα.',
+};
+function rmMsg(text, ok){
+  $('rm-msg').textContent = text || '';
+  $('rm-msg').style.color = ok === true ? '#16a34a'
+                          : ok === false ? '#dc2626' : 'var(--text-dim)';
+}
+function setRoomMgr(on){
+  roomMgrOn = on;
+  $('room-mgr').style.display = on ? '' : 'none';
+  $('b-room-mgr').classList.toggle('on', on);
+  if(on){
+    // The tools all paint on the 2D map, so opening from the 3D/scan view
+    // would arm gestures against a canvas that isn't showing.
+    if(mapView !== '2d') setMapView('2d');
+    $('b-kz-add').checked = false; syncClickModeRows();
+    mesClose();
+  } else {
+    rmMode = 'select'; rmSplitPt = null; rmMsg('');
+  }
+  rmRender();
+  rmHint();
+  draw();
+}
+function rmSetMode(mode){
+  rmMode = mode;
+  rmSplitPt = null;
+  rmMsg('');
+  rmRender();
+  rmHint();
+  draw();
+}
+// What the overlay on the map itself says the next tap will do.
+function rmHint(){
+  $('map-hint').textContent = !roomMgrOn ? t('ΧΑΡΤΗΣ · κλικ για πλοήγηση')
+    : rmMode === 'add'   ? t('➕ Άγγιξε μια περιοχή για νέο δωμάτιο')
+    : rmMode === 'split' ? t('✂️ Δύο αγγίγματα τραβούν τη γραμμή')
+    : rmMode === 'merge' ? t('🔗 Άγγιξε δύο δωμάτια για να ενωθούν')
+    :                      t('🏠 Άγγιξε ένα δωμάτιο');
+}
+$('b-room-mgr').onclick = () => setRoomMgr(!roomMgrOn);
+$('b-room-mgr-open').onclick = () => setRoomMgr(true);
+$('rm-close').onclick = () => setRoomMgr(false);
+$('rm-modes').addEventListener('click', e => {
+  const el = e.target.closest('.rm-mode');
+  if(el) rmSetMode(el.dataset.mode);
+});
+
+const CLICK_MODE_BOXES = ['b-kz-add'];
 function syncClickModeRows(){
-  $('place-room-row').style.display = $('b-place-room').checked ? '' : 'none';
-  $('place-room-rect-row').style.display = $('b-place-room-rect').checked ? '' : 'none';
   $('kz-add-row').style.display = $('b-kz-add').checked ? '' : 'none';
   if(!$('b-kz-add').checked) kzCorner = null;   // abandon a half-drawn zone
-  if(!$('b-place-room-rect').checked) prrPath = null;   // abandon a half-drawn freehand room
 }
 CLICK_MODE_BOXES.forEach(id => $(id).addEventListener('change', () => {
-  if($(id).checked) CLICK_MODE_BOXES.filter(o => o !== id).forEach(o => $(o).checked = false);
+  if($(id).checked) setRoomMgr(false);   // one owner of the map's taps at a time
   syncClickModeRows();
+  // Lives inside the map-edit sheet, but the click it arms lands on the map
+  // CANVAS underneath it — so arming it closes the sheet automatically, same
+  // as the 🏠/🚫 sheet-tool shortcuts do.
+  if($(id).checked && typeof mesClose === 'function') mesClose();
 }));
-// Tapping a room's numbered badge selects it (white ring) — pure UI
-// highlight, no robot command, independent of the click-mode checkboxes
-// below (goal/add-room/zone-corner). Tap the same badge again to clear it.
-function selectRoom(name){
-  selectedRoomName = (selectedRoomName === name) ? null : name;
+// Selecting a room is pure UI highlight (white ring on the map, ringed card in
+// the panel) — no robot command. One variable, selectedRoomName, so the card,
+// the badge and the editor can never disagree about which room is "the" one.
+function rmSelect(name, toggle){
+  selectedRoomName = (toggle && selectedRoomName === name) ? null : (name || null);
+  rmSplitPt = null;
+  rmRender();
   draw();
-  const row = Array.from(document.querySelectorAll('#room-edit [data-room]'))
-    .find(el => el.dataset.room === name);
-  if(row && selectedRoomName){
-    row.scrollIntoView({behavior:'smooth', block:'nearest'});
-    row.classList.add('picked');
-    setTimeout(()=>row.classList.remove('picked'), 1500);
-  }
 }
+
+// Which room a tap landed in — the whole coloured blob is the target, not just
+// its badge, which is how both reference apps behave.
+//
+// Read off the room-tinted map PICTURE (an offscreen copy of exactly the png
+// the server sent, so no robot/laser/plan overlay can be sampled by mistake)
+// rather than re-deriving room polygons in the browser: the server blends each
+// room's colour into the free cells at a known, fixed ratio (ROOM_TINT), so a
+// pixel's colour maps straight back to a room name. Sampling a small patch,
+// not one pixel, keeps a tap that clipped a wall or a badge from missing.
+let mapProbe = null, mapProbeFor = null;
+function roomAtCanvas(cx, cy){
+  const badge = roomBadgeHits.find(b => Math.hypot(b.x-cx, b.y-cy) <= b.r);
+  if(badge) return badge.name;
+  const wp = c2w(cx, cy);
+  if(!wp) return null;
+  const names = Object.keys(roomsData);
+  if(!names.length) return null;
+  if(mapImg && mapInfo && !floorplanImg){
+    if(mapProbeFor !== mapImg){
+      mapProbe = document.createElement('canvas');
+      mapProbe.width = mapImg.naturalWidth; mapProbe.height = mapImg.naturalHeight;
+      mapProbe.getContext('2d').drawImage(mapImg, 0, 0);
+      mapProbeFor = mapImg;
+    }
+    const col = Math.floor((wp.x - mapInfo.origin[0]) / mapInfo.resolution);
+    const row = Math.floor(mapInfo.height - (wp.y - mapInfo.origin[1]) / mapInfo.resolution);
+    const R = 4, x0 = Math.max(0, col-R), y0 = Math.max(0, row-R);
+    const w = Math.min(mapProbe.width, col+R+1) - x0;
+    const h = Math.min(mapProbe.height, row+R+1) - y0;
+    if(w > 0 && h > 0){
+      const px = mapProbe.getContext('2d').getImageData(x0, y0, w, h).data;
+      // Expected on-screen colour of each room: white floor blended with the
+      // room colour at ROOM_TINT, the same mix _tint_rooms does server-side.
+      const TINT = 0.62, votes = {};
+      const want = names.map(n => {
+        const c = roomsData[n];
+        return [n, 255*(1-TINT) + c[0]*TINT, 255*(1-TINT) + c[1]*TINT,
+                   255*(1-TINT) + c[2]*TINT];
+      });
+      for(let i = 0; i < px.length; i += 4){
+        let best = null, bestD = 42*42*3;   // "close enough to be that room"
+        for(const [n, r, g, b] of want){
+          const d = (px[i]-r)**2 + (px[i+1]-g)**2 + (px[i+2]-b)**2;
+          if(d < bestD){ bestD = d; best = n; }
+        }
+        if(best) votes[best] = (votes[best] || 0) + 1;
+      }
+      const won = Object.keys(votes).sort((a,b) => votes[b]-votes[a])[0];
+      if(won) return won;
+    }
+  }
+  // Fallback (tint off, or a user floorplan image is the base): nearest room
+  // centroid, but only if the tap is plausibly inside that room.
+  let best = null, bestD = 1.6;
+  for(const n of names){
+    const c = roomCenters[n]; if(!c) continue;
+    const d = Math.hypot(c[0]-wp.x, c[1]-wp.y);
+    if(d < bestD){ bestD = d; best = n; }
+  }
+  return best;
+}
+
 let kzCorner = null;    // first click of a 2-click keepout rectangle, or null
 canvas.addEventListener('click',e=>{
   const r=canvas.getBoundingClientRect();
   const cx=(e.clientX-r.left)*canvas.width/r.width;
   const cy=(e.clientY-r.top)*canvas.height/r.height;
-  const badge = roomBadgeHits.find(b => Math.hypot(b.x-cx, b.y-cy) <= b.r);
-  if(badge){ selectRoom(badge.name); return; }
   const wp=c2w(cx,cy); if(!wp) return;
   if($('b-kz-add').checked){
     if(!kzCorner){ kzCorner = wp; draw(); return; }
@@ -9268,73 +9541,50 @@ canvas.addEventListener('click',e=>{
     $('kz-msg').textContent = t('Προσθήκη…'); $('kz-msg').style.color = 'var(--text-dim)';
     return;
   }
-  if($('b-place-room-rect').checked) return;   // handled by the pointerdown/move/up drag below
-  if($('b-place-room').checked){
-    const name = $('pr-name').value.trim();
-    if(!name){
-      $('room-edit-msg').textContent = t('Δώσε πρώτα όνομα δωματίου.');
-      $('room-edit-msg').style.color = '#dc2626';
+  if(roomMgrOn){
+    if(rmMode === 'add'){
+      const name = ($('rm-name') ? $('rm-name').value : '').trim();
+      if(!name){ rmMsg(t('Δώσε πρώτα όνομα δωματίου.'), false); return; }
+      // Auto-segments the map by shape and paints whichever room-sized blob
+      // (x,y) landed in — walls stop it, so a single tap is the whole room.
+      send({type:'place_room', x:wp.x, y:wp.y, name, color:rmColorRgb()});
+      rmMsg(t('Τοποθέτηση…'));
       return;
     }
-    const hex = $('pr-color').value;
-    send({type:'place_room', x:wp.x, y:wp.y, name,
-          color:[parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)]});
-    $('room-edit-msg').textContent = t('Τοποθέτηση…');
-    $('room-edit-msg').style.color = 'var(--text-dim)';
+    if(rmMode === 'split'){
+      if(!selectedRoomName){
+        const hit = roomAtCanvas(cx, cy);
+        if(hit){ rmSelect(hit); rmMsg(t('Τώρα τράβα τη γραμμή: δύο αγγίγματα.')); }
+        else rmMsg(t('Διάλεξε πρώτα δωμάτιο.'), false);
+        return;
+      }
+      if(!rmSplitPt){ rmSplitPt = wp; draw(); rmMsg(t('…και το δεύτερο σημείο.')); return; }
+      const name = ($('rm-name') ? $('rm-name').value : '').trim();
+      if(!name){ rmMsg(t('Δώσε όνομα στο νέο κομμάτι.'), false); return; }
+      send({type:'split_room', name:selectedRoomName, x1:rmSplitPt.x, y1:rmSplitPt.y,
+            x2:wp.x, y2:wp.y, new_name:name, color:rmColorRgb()});
+      rmSplitPt = null; draw();
+      rmMsg(t('Διαίρεση…'));
+      return;
+    }
+    if(rmMode === 'merge'){
+      const hit = roomAtCanvas(cx, cy);
+      if(!hit){ rmMsg(t('Δεν βρέθηκε δωμάτιο εκεί.'), false); return; }
+      if(!selectedRoomName || hit === selectedRoomName){
+        rmSelect(hit); rmMsg(t('Τώρα άγγιξε το δεύτερο δωμάτιο.')); return;
+      }
+      rmMerge(hit);
+      return;
+    }
+    const hit = roomAtCanvas(cx, cy);
+    if(hit) rmSelect(hit, true); else rmMsg(t('Δεν βρέθηκε δωμάτιο εκεί.'), false);
     return;
   }
-  if($('b-pick-room').checked){
-    pickedMarker = {x: wp.x, y: wp.y, name: null};
-    draw();
-    send({type:'pick_room',x:wp.x,y:wp.y});
-    return;
-  }
+  // Manager closed: a badge still selects (and opens the manager on it), the
+  // rest of the map is plain navigation.
+  const badge = roomBadgeHits.find(b => Math.hypot(b.x-cx, b.y-cy) <= b.r);
+  if(badge){ setRoomMgr(true); rmSelect(badge.name); return; }
   goal=wp; send({type:'nav_goal',x:wp.x,y:wp.y});
-  draw();
-});
-
-// Freehand room drawing (b-place-room-rect): the drawn stroke itself is
-// thrown away, only its bounding box is sent — same place_room_rect
-// backend as before, which already took two opposite corners, and a
-// bounding box's min/max IS exactly that. Pointer events (not mouse+touch
-// separately) so a finger drag on the phone works the same as a mouse drag.
-let prrPath = null;   // array of {x,y} world points while dragging, or null
-canvas.addEventListener('pointerdown', e => {
-  if(!$('b-place-room-rect').checked) return;
-  const r=canvas.getBoundingClientRect();
-  const cx=(e.clientX-r.left)*canvas.width/r.width;
-  const cy=(e.clientY-r.top)*canvas.height/r.height;
-  const wp=c2w(cx,cy); if(!wp) return;
-  prrPath = [wp];
-  draw();
-});
-canvas.addEventListener('pointermove', e => {
-  if(!prrPath) return;
-  const r=canvas.getBoundingClientRect();
-  const cx=(e.clientX-r.left)*canvas.width/r.width;
-  const cy=(e.clientY-r.top)*canvas.height/r.height;
-  const wp=c2w(cx,cy); if(!wp) return;
-  prrPath.push(wp);
-  draw();
-});
-canvas.addEventListener('pointerup', () => {
-  if(!prrPath) return;
-  const path = prrPath; prrPath = null;
-  if(path.length < 2){ draw(); return; }   // a tap, not a drag — nothing to paint
-  const name = $('prr-name').value.trim();
-  if(!name){
-    $('room-edit-msg').textContent = t('Δώσε πρώτα όνομα δωματίου.');
-    $('room-edit-msg').style.color = '#dc2626';
-    draw();
-    return;
-  }
-  const xs=path.map(p=>p.x), ys=path.map(p=>p.y);
-  const hex = $('prr-color').value;
-  send({type:'place_room_rect', x1:Math.min(...xs), y1:Math.min(...ys),
-        x2:Math.max(...xs), y2:Math.max(...ys), name,
-        color:[parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)]});
-  $('room-edit-msg').textContent = t('Τοποθέτηση…');
-  $('room-edit-msg').style.color = 'var(--text-dim)';
   draw();
 });
 
@@ -9363,11 +9613,11 @@ function swatchRowHtml(hex){
     'style="background:' + p + '"></span>'
   ).join('') + '</div>';
 }
-// Delegated so it survives innerHTML rebuilds (renderRoomEditor() replaces
-// #room-edit's contents every time the room list changes). Looks up the
-// colour input by selector from whatever [data-room] row (or, for the
-// static add-room pickers, the container itself) the clicked dot is in,
-// rather than assuming a fixed DOM position next to the swatch row.
+// Delegated so it survives innerHTML rebuilds (rmRenderEditor() replaces
+// #rm-edit's contents on every selection or mode change). Looks up the colour
+// input by selector from whatever [data-room] row — or, as the room manager
+// uses it, the container itself — the clicked dot is in, rather than assuming
+// a fixed DOM position next to the swatch row.
 function wireSwatches(containerEl, colorSelector){
   function syncSel(input){
     const scope = input.closest('[data-room]') || containerEl;
@@ -9392,79 +9642,231 @@ function wireSwatches(containerEl, colorSelector){
     if (e.target.matches(colorSelector)) syncSel(e.target);
   });
 }
-$('place-room-row').insertAdjacentHTML('beforeend', swatchRowHtml($('pr-color').value));
-$('place-room-rect-row').insertAdjacentHTML('beforeend', swatchRowHtml($('prr-color').value));
-wireSwatches($('place-room-row'), '#pr-color');
-wireSwatches($('place-room-rect-row'), '#prr-color');
+// ── room icons & name presets ──────────────────────────────────────────────
+// Both reference apps name a room by PICKING a house room off a list instead
+// of typing one, and draw a little icon per room type. The icon is derived
+// from the name here — no extra file, no per-room type stored anywhere: rooms
+// are already named in the user's own words, and a name the list doesn't know
+// just gets the generic house icon. The labels go through t(), so an English
+// or German UI both offers and saves the room name in that language.
+const ROOM_PRESETS = [
+  ['🛋', 'Σαλόνι'], ['🍳', 'Κουζίνα'], ['🛏', 'Υπνοδωμάτιο'], ['🧸', 'Παιδικό'],
+  ['🚿', 'Μπάνιο'], ['🍽', 'Τραπεζαρία'], ['💻', 'Γραφείο'], ['🚪', 'Χολ'],
+  ['🚶', 'Διάδρομος'], ['🪴', 'Μπαλκόνι'], ['🧺', 'Πλυσταριό'], ['📦', 'Αποθήκη'],
+];
+// Accent-insensitive, so "σαλονι" typed without tones still gets the sofa.
+function rmFold(s){
+  return (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+}
+function roomIcon(name){
+  const n = rmFold(name);
+  if(!n) return '🏠';
+  for(const [icon, label] of ROOM_PRESETS){
+    const el = rmFold(label), tr = rmFold(t(label));
+    if(n.includes(el) || el.includes(n) || n.includes(tr) || tr.includes(n)) return icon;
+  }
+  return '🏠';
+}
+// Auto-segmented maps come out as room1, room2… — a placeholder, not a name.
+function rmIsPlaceholder(name){ return /^room\d+$/.test(name); }
+function rmHex(rgb){
+  return '#' + rgb.map(v => Math.max(0, Math.min(255, v|0))
+                             .toString(16).padStart(2, '0')).join('');
+}
+function rmColorRgb(){
+  const hex = $('rm-color') ? $('rm-color').value : ROOM_PALETTE[0];
+  return [parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16),
+          parseInt(hex.slice(5,7),16)];
+}
+// A colour no other room is already using, so a new room never comes out
+// looking like the room next door.
+function rmFreeColor(){
+  const used = Object.values(roomsData).map(c => rmHex(c));
+  return ROOM_PALETTE.find(p => !used.includes(p)) || ROOM_PALETTE[0];
+}
+function rmDefaultName(){
+  return t('Δωμάτιο') + ' ' + (Object.keys(roomsData).length + 1);
+}
 
-// ── room colours ───────────────────────────────────────────────────────────
-// The swatches come from the same room_colors.yaml the server tints with, so
-// the legend cannot drift from the picture. Greek names are data (they come
-// from the map), so they are not routed through t().
-function roomLegend(rooms){
-  const el = $('room-legend');
-  const names = Object.keys(rooms);
-  if (!names.length){ el.innerHTML = ''; return; }
-  el.innerHTML = names.sort().map((n, i) => {
-    const c = rooms[n];
-    // Same number the on-map badge shows (sorted-name order, see draw()'s
-    // roomBadgeHits) so "③" on the map and "③" here are the same room.
-    return '<span style="display:inline-flex;align-items:center;gap:5px;' +
-           'font-size:11.5px;color:var(--text-dim)">' +
-           '<i style="width:16px;height:16px;border-radius:50%;display:inline-flex;' +
-           'align-items:center;justify-content:center;font-size:9.5px;font-weight:700;' +
-           'color:#fff;background:rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')">' + (i+1) + '</i>' + n + '</span>';
-  }).join('');
+// ── room manager rendering ─────────────────────────────────────────────────
+// One render for the whole panel: mode strip, hint, room cards, editor. Room
+// NAMES are data (the user's own words, out of room_colors.yaml) and are never
+// routed through t(); everything around them is interface and is.
+function rmRender(){
+  if(!roomMgrOn) return;         // hidden: nothing on screen to keep in sync
+  $('rm-modes').innerHTML = RM_MODES.map(([m, ic, label]) =>
+    '<span class="rm-mode' + (rmMode === m ? ' on' : '') + '" data-mode="' + m + '">' +
+    ic + ' ' + esc(t(label)) + '</span>').join('');
+  $('rm-hint').textContent = t(RM_HINTS[rmMode]);
+
+  // While a map gesture is armed the panel shrinks and drops the card strip:
+  // what is needed then is the map underneath it, not the room list.
+  const armed = rmMode === 'add' || rmMode === 'split';
+  $('room-mgr').classList.toggle('compact', rmMode !== 'select');
+  $('rm-cards').style.display = armed ? 'none' : '';
+
+  const names = Object.keys(roomsData).sort();   // same order as the map badges
+  if(selectedRoomName && !names.includes(selectedRoomName)) selectedRoomName = null;
+  $('rm-cards').innerHTML = names.length
+    ? names.map((n, i) => {
+        const c = roomsData[n], wc = roomCenters[n];
+        const cls = 'rm-card' + (selectedRoomName === n
+          ? (rmMode === 'merge' ? ' pick' : ' sel') : '');
+        return '<div class="' + cls + '" data-room="' + esc(n) + '" ' +
+          'style="--room:rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')">' +
+          '<div class="ic">' + roomIcon(n) + '</div>' +
+          '<div class="nm">' + (rmIsPlaceholder(n) ? t('Χωρίς όνομα') : esc(n)) + '</div>' +
+          '<div class="ar">#' + (i+1) + (wc && wc[2] ? ' · ' + wc[2] + ' m²' : '') + '</div>' +
+          '</div>';
+      }).join('')
+    : '<div class="rm-empty">' +
+      t('Κανένα δωμάτιο ακόμη — πάτα «Νέο» και άγγιξε τον χάρτη.') + '</div>';
+  rmRenderEditor();
 }
-// ── room name/colour editor ─────────────────────────────────────────────────
-// Edits maps/room_colors.yaml (+ repaints room_mask.png server-side) so a
-// remap's room1/room2 placeholders can be named and coloured from the phone
-// instead of SSH-editing a YAML file. Greek names are data, not routed
-// through t() — same reasoning as roomLegend above.
-function renderRoomEditor(rooms){
-  const el = $('room-edit');
-  const names = Object.keys(rooms).sort();
-  if (!names.length){ el.innerHTML = ''; $('room-edit-row').style.display='none'; return; }
-  $('room-edit-row').style.display='';
-  el.innerHTML = names.map(n => {
-    const c = rooms[n];
-    const hex = '#' + c.map(v => Math.max(0, Math.min(255, v|0))
-                              .toString(16).padStart(2, '0')).join('');
-    return '<div style="margin-top:8px" data-room="' + esc(n) + '">' +
-      '<div class="row" style="gap:8px">' +
-        '<input type="color" class="re-color" value="' + hex + '" ' +
-          'style="width:34px;height:30px;padding:0;border:none;background:none;flex:0 0 auto">' +
-        '<input type="text" class="re-name" value="' + esc(n) + '" ' +
-          'style="flex:1;min-width:100px;background:var(--bg);border:1px solid var(--border);' +
-          'border-radius:8px;color:var(--text);padding:6px 9px;font-size:12.5px">' +
+// The name/colour form, shared by all three modes that need one: in 'select'
+// it edits the chosen room, in 'add'/'split' it describes the room about to be
+// created. Same two ids either way, so the click handler on the map does not
+// care which mode wrote them.
+//
+// Split in two so the buttons can sit BETWEEN them: with the twelve presets and
+// the palette above them, 💾/✂️/🔗 ended up under the fold of a phone-sized
+// panel, and a save button you have to scroll to find is a save button nobody
+// presses.
+function rmNameRowHtml(nameVal, hex){
+  const ph = t('όνομα δωματίου');
+  return '<div class="row" style="gap:8px">' +
+      '<input type="color" id="rm-color" value="' + hex + '" ' +
+        'style="width:34px;height:30px;padding:0;border:none;background:none;flex:0 0 auto">' +
+      '<input type="text" id="rm-name" value="' + esc(nameVal) + '" ' +
+        'placeholder="' + esc(ph) + '" ' +
+        'style="flex:1;min-width:100px;background:var(--bg);border:1px solid var(--border);' +
+        'border-radius:8px;color:var(--text);padding:7px 9px;font-size:12.5px">' +
+    '</div>';
+}
+function rmPickersHtml(hex){
+  return '<div class="rm-presets">' + ROOM_PRESETS.map(([ic, label]) =>
+      '<span class="rm-preset" data-name="' + esc(t(label)) + '">' + ic + ' ' +
+      esc(t(label)) + '</span>').join('') + '</div>' +
+    swatchRowHtml(hex);
+}
+let rmEditorKey = null;   // what the form on screen was last built for
+function rmRenderEditor(){
+  const el = $('rm-edit');
+  const n = selectedRoomName;
+  // Keep whatever is half-typed across a re-render (a room save from another
+  // tab rebuilds this panel) instead of yanking the field back — but ONLY
+  // while it is still the same form. Switching mode or room starts a new one:
+  // carrying the text over would have "divide Σαλόνι" propose "Σαλόνι" as the
+  // new piece's name, which the server then rejects as a duplicate.
+  const key = rmMode + '|' + (n || '');
+  const same = key === rmEditorKey;
+  rmEditorKey = key;
+  const typed = same && $('rm-name') ? $('rm-name').value : null;
+  const picked = same && $('rm-color') ? $('rm-color').value : null;
+
+  if(rmMode === 'merge'){
+    el.innerHTML = '<div class="rm-empty">' + (n
+      ? t('Επιλεγμένο:') + ' <b>' + esc(n) + '</b> — ' + t('άγγιξε τώρα το δεύτερο δωμάτιο.')
+      : t('Άγγιξε πρώτα το δωμάτιο που κρατάει το όνομά του.')) + '</div>' +
+      '<div class="rm-actions"><button class="btn" data-act="cancel">' +
+      t('Άκυρο') + '</button></div>';
+    return;
+  }
+  if(rmMode === 'add' || rmMode === 'split'){
+    const head = rmMode === 'split'
+      ? (n ? t('Διαίρεση του') + ' «' + esc(n) + '» — ' + t('το νέο κομμάτι:')
+           : t('Διάλεξε πρώτα το δωμάτιο που θα κοπεί.'))
+      : t('Το νέο δωμάτιο:');
+    const name = typed != null ? typed : rmDefaultName();
+    const hex = picked != null ? picked : rmFreeColor();
+    el.innerHTML = '<div class="rm-empty">' + head + '</div>' +
+      rmNameRowHtml(name, hex) +
+      '<div class="rm-actions">' +
+        '<button class="btn" data-act="cancel">' + t('Άκυρο') + '</button>' +
       '</div>' +
-      swatchRowHtml(hex).replace('class="swatch-row"', 'class="swatch-row" style="margin:6px 0 0 42px"') +
-      '</div>';
-  }).join('');
+      rmPickersHtml(hex);
+    return;
+  }
+  if(!n){
+    el.innerHTML = '<div class="rm-empty">' +
+      t('Άγγιξε ένα δωμάτιο στον χάρτη ή μια κάρτα παραπάνω.') + '</div>';
+    return;
+  }
+  const hex = rmHex(roomsData[n]);
+  el.innerHTML =
+    rmNameRowHtml(rmIsPlaceholder(n) ? '' : n, hex) +
+    '<div class="rm-actions">' +
+      '<button class="btn pri" data-act="save">💾 ' + t('Αποθήκευση') + '</button>' +
+      '<button class="btn" data-act="split">✂️ ' + t('Διαίρεση') + '</button>' +
+      '<button class="btn" data-act="merge">🔗 ' + t('Συγχώνευση') + '</button>' +
+      '<button class="btn" data-act="go">▶ ' + t('Πήγαινε') + '</button>' +
+      '<button class="btn warn" data-act="del">🗑 ' + t('Διαγραφή') + '</button>' +
+    '</div>' +
+    rmPickersHtml(hex);
 }
-wireSwatches($('room-edit'), '.re-color');
-$('b-room-save').onclick = () => {
-  const rows = $('room-edit').querySelectorAll('[data-room]');
-  const rooms = [];
-  rows.forEach(row => {
-    const old = row.dataset.room;
-    const name = row.querySelector('.re-name').value.trim();
-    const hex = row.querySelector('.re-color').value;
-    if (!name) return;
-    rooms.push({old, name, color:[
-      parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)]});
-  });
-  if (!rooms.length) return;
-  send({type:'save_rooms', rooms});
-  $('room-edit-msg').textContent = t('Αποθήκευση…');
-  $('room-edit-msg').style.color = 'var(--text-dim)';
-};
-$('b-tint').onchange = e => send({type:'room_tint', on: e.target.checked});
+$('rm-cards').addEventListener('click', e => {
+  const card = e.target.closest('.rm-card');
+  if(!card) return;
+  const name = card.dataset.room;
+  if(rmMode === 'merge' && selectedRoomName && name !== selectedRoomName) rmMerge(name);
+  else rmSelect(name, rmMode === 'select');
+});
+$('rm-edit').addEventListener('click', e => {
+  const preset = e.target.closest('.rm-preset');
+  if(preset){ $('rm-name').value = preset.dataset.name; return; }
+  const btn = e.target.closest('[data-act]');
+  if(!btn) return;
+  const act = btn.dataset.act;
+  if(act === 'save') rmSave();
+  else if(act === 'split') rmSetMode('split');
+  else if(act === 'merge') rmSetMode('merge');
+  else if(act === 'del') rmDelete();
+  else if(act === 'go') rmGoto();
+  else if(act === 'cancel') rmSetMode('select');
+});
+wireSwatches($('rm-edit'), '#rm-color');
+
+// ── room manager actions ───────────────────────────────────────────────────
+// Each writes <map>_room_mask.png + <map>_room_colors.yaml server-side and
+// comes back as a room_saved ack plus a fresh map — nothing is edited locally,
+// so two phones editing the same map cannot drift apart.
+function rmSave(){
+  const old = selectedRoomName;
+  if(!old) return;
+  const name = $('rm-name').value.trim();
+  if(!name){ rmMsg(t('Δώσε όνομα δωματίου.'), false); return; }
+  send({type:'save_rooms', rooms:[{old, name, color:rmColorRgb()}]});
+  selectedRoomName = name;      // follow the rename, so the panel stays put
+  rmMsg(t('Αποθήκευση…'));
+}
+function rmDelete(){
+  const n = selectedRoomName;
+  if(!n) return;
+  if(!confirm(t('Να αφαιρεθεί το δωμάτιο') + ' «' + n + '»; ' +
+              t('Ο χάρτης και το πάτωμα δεν αλλάζουν — μόνο το χρώμα και το όνομα φεύγουν.'))) return;
+  send({type:'delete_room', name:n});
+  rmMsg(t('Διαγραφή…'));
+}
+function rmMerge(other){
+  const keep = selectedRoomName;
+  if(!keep || !other || keep === other) return;
+  send({type:'merge_rooms', names:[keep, other]});
+  rmMsg(t('Συγχώνευση…'));
+}
+function rmGoto(){
+  const c = roomCenters[selectedRoomName];
+  if(!c){ rmMsg(t('Δεν ξέρω πού είναι αυτό το δωμάτιο.'), false); return; }
+  goal = {x:c[0], y:c[1]};
+  send({type:'nav_goal', x:c[0], y:c[1]});
+  rmMsg(t('Πάω…'));
+  draw();
+}
+$('b-tint').onchange = e => { send({type:'room_tint', on: e.target.checked}); draw(); };
 $('b-slipmap').onchange = e => { slipMapOn = e.target.checked; draw(); };
 
 // ── keepout zones ────────────────────────────────────────────────────────
 // Names are data (typed by the user, not routed through t()) — same
-// reasoning as roomLegend/renderRoomEditor above.
+// reasoning as the room manager's own room names above.
 function renderKeepoutList(zones){
   const el = $('kz-list');
   const names = Object.keys(zones).sort();
@@ -9536,6 +9938,17 @@ function onMission(m){
   $('ck-msg').textContent = t(MISSION_EL[s] || s);
   $('ck-msg').style.color = s === 'failed' ? '#dc2626'
                           : s === 'done'   ? '#16a34a' : 'var(--text-dim)';
+  if(camFetchLabel){
+    const text = s === 'navigating' ? t('Πηγαίνω προς: ') + camFetchLabel
+               : s === 'inspecting' ? t('Το εντοπίζω: ') + camFetchLabel
+               : s === 'returning'  ? t('Το προσέγγισα — επιστρέφω')
+               : s === 'done'       ? t('Ολοκληρώθηκε: ') + camFetchLabel
+               : s === 'failed'     ? t('Δεν μπόρεσα να πλησιάσω: ') + camFetchLabel
+               : s === 'cancelled'  ? t('Ακυρώθηκε: ') + camFetchLabel
+               : null;
+    if(text) camPickMsg(text, ['done','failed','cancelled'].includes(s) ? 5000 : 15000);
+    if(['done','failed','cancelled'].includes(s)) camFetchLabel = null;
+  }
 }
 
 // ── drive controls ─────────────────────────────────────────────────────────
@@ -10382,25 +10795,8 @@ function renderChips(){
       el.appendChild(b);
     });
   };
-  build('tl-chips', TL_CHIPS, q => { $('tl-q').value = t(q); askRecall(q); });
   build('vc-chips', VC_CHIPS, q => { $('vc-q').value = t(q); askVocab(q); });
 }
-
-// ── timeline ───────────────────────────────────────────────────────────────
-function askRecall(q){
-  $('tl-answer').textContent = '…';
-  send({type:'recall', when:q});
-}
-$('b-tl-ask').addEventListener('click',()=>askRecall($('tl-q').value.trim()));
-$('tl-q').addEventListener('keydown',e=>{
-  if(e.key==='Enter') askRecall($('tl-q').value.trim());
-});
-// Shortcuts for the periods people actually ask about, so the common case is
-// one tap on a phone rather than typing Greek into a tiny box.
-// ‼️ The chip DISPLAYS a translated label but SENDS the Greek phrase:
-// episodic.parse_time_window matches Greek time words, so an English chip on an
-// English UI would silently fall through to "no period named".
-const TL_CHIPS = ['σήμερα','σήμερα το πρωί','χθες','πριν από 2 ώρες'];
 
 $('b-loc').addEventListener('click',()=>send({type:'localize'}));
 // ‼️ 'cancel_nav', not 'stop'. A zero Twist stops the wheels for one tick and
@@ -10478,6 +10874,9 @@ const ARM_MECH_LIMITS = __ARM_MECH_LIMITS__;
 const ARM_ALL_JOINTS = [...ARM_JOINTS, 'hand'];   // + gripper, not in ARM_JOINTS
 
 function armLimBuild(){
+  // The RoArm integration was removed; this legacy hidden panel must not
+  // initialise against the now-empty arm limits.
+  return;
   const div = $('armlim');
   ARM_ALL_JOINTS.forEach(name=>{
     const [mlo,mhi] = ARM_MECH_LIMITS[name];
@@ -10570,6 +10969,31 @@ $('b-undock').onclick = ()=>send({type:'dock',on:false});
 
 // ── chat ───────────────────────────────────────────────────────────────────
 const chat=$('chat');
+let voiceLive=false;
+function voiceSetActive(on){
+  if(voiceLive===on) return;
+  voiceLive=on;
+  send({type:'voice_live',on});
+  if(!on && $('mic-level')) $('mic-level').style.width='0%';
+}
+function onMicLive(m){
+  const level=$('mic-level'); if(!level) return;
+  // RMS speech is normally 0.01–0.15; the square root makes quiet speech
+  // visible while still leaving headroom for clipping/noise.
+  const pct=Math.max(0,Math.min(100,Math.sqrt(Math.max(0,+m.rms||0))*220));
+  level.style.width=pct.toFixed(1)+'%';
+}
+function onSttState(m){
+  const state=m.state||'idle';
+  const badge=$('stt-live-badge'), detail=$('heard-live');
+  if(state==='processing'){
+    badge.textContent=t('μεταγράφει');
+    detail.textContent=t('Το Whisper μεταγράφει τη φράση…');
+  }else{
+    badge.textContent=t('ακούει');
+    if(!detail.dataset.final) detail.textContent=t('Περιμένω να πεις «ρομπότ»…');
+  }
+}
 function addMsg(role,text){
   const d=document.createElement('div');
   d.className='msg '+role;
@@ -10577,6 +11001,16 @@ function addMsg(role,text){
   chat.appendChild(d);
   while(chat.children.length>80) chat.removeChild(chat.firstChild);
   chat.scrollTop=chat.scrollHeight;
+  const badge=$('stt-live-badge'), detail=$('heard-live');
+  if(role==='wake' && badge){
+    badge.textContent=t('ακούει');
+    detail.dataset.final='';
+    detail.textContent=t('Ακούω τη φράση σου…');
+  }else if(role==='user' && detail){
+    badge.textContent=t('άκουσε');
+    detail.dataset.final='1';
+    detail.textContent=text;
+  }
 }
 // ── language ───────────────────────────────────────────────────────────────
 // Greek is the source: it is what is written in the markup, and t() is a
@@ -10652,13 +11086,14 @@ function setLang(code){
 async function mapsRefresh(){
   // active_map() shells out to `ros2 param get`, which takes a second or two
   // (see the Python side) — without this the ΧΑΡΤΕΣ card looks empty/broken
-  // for that whole stretch, including the 🧹 straighten button on each row.
+  // for that whole stretch.
   if(!$('map-list').children.length) $('map-list').textContent = t('Φόρτωση…');
   let d;
   try { d = await (await fetch('/maps' + (TOKEN_QS || ''))).json(); }
   catch(e){ return; }
   $('map-active').textContent = d.mapping ? t('χαρτογράφηση…')
                                           : (d.active || '—');
+  if(d.active) { refreshDoors(d.active); refreshFloorplan(d.active); }
   const box = $('map-list');
   box.innerHTML = '';
   for(const m of d.maps){
@@ -10676,11 +11111,6 @@ async function mapsRefresh(){
       b.onclick = () => mapSwitch(m.name);
       row.appendChild(b);
     }
-    const clean = document.createElement('button');
-    clean.className = 'btn'; clean.textContent = '🧹';
-    clean.title = t('Καθαρή εκδοχή');
-    clean.onclick = () => mapStraightenPreview(m.name);
-    row.appendChild(clean);
     if(!isActive){
       const del = document.createElement('button');
       del.className = 'btn'; del.textContent = '🗑';
@@ -10704,6 +11134,11 @@ async function mapSwitch(name){
   catch(e){ /* fire-and-forget: the swap keeps going server-side either way */ }
   setTimeout(mapsRefresh, 4000);
   setTimeout(mapsRefresh, 10000);
+  // Two attempts, same reasoning as mapsRefresh above: the first can race the
+  // hot-swap (map_server briefly down) and land on wallsLoad()'s error path,
+  // which does not retry itself — a second, later attempt catches that.
+  setTimeout(wallsReload, 10000);
+  setTimeout(wallsReload, 16000);
 }
 
 async function mapDelete(name){
@@ -10715,6 +11150,100 @@ async function mapDelete(name){
     mapMsg(r.ok ? t('Διαγράφηκε') + ': ' + name : t('Απέτυχε') + ': ' + (r.error || ''));
   } catch(e){ mapMsg(t('Απέτυχε') + ': ' + e); }
   mapsRefresh();
+}
+
+// ── map edit sheet — 👁️/✏️ fabs on the map open a "Dreame-style" menu ──────
+// Approximate copy of the Dreame app's own "Map Editing" sheet (2026-08-18,
+// user request, screenshots attached): file-level actions across the top,
+// map-editing tools in a grid below. Every action here reuses an endpoint the
+// dashboard already had (rename is the one new one, added alongside) — no
+// feature exists in this sheet that didn't already exist somewhere on the page.
+function mesMsg(s){ $('mes-msg').textContent = s; }
+function mesFlash(el){
+  el.style.transition = 'box-shadow .25s';
+  el.style.boxShadow = '0 0 0 3px var(--accent)';
+  setTimeout(() => { el.style.boxShadow = ''; }, 1400);
+}
+async function mesOpen(){
+  $('mes-backdrop').classList.add('open');
+  $('map-edit-sheet').classList.add('open');
+  mesMsg('');
+  try {
+    const cvs = $('map-canvas');
+    if(cvs.width) $('mes-thumb').src = cvs.toDataURL();
+  } catch(e){ /* tainted/empty canvas before the first map arrives */ }
+  try {
+    const d = await (await fetch('/maps' + (TOKEN_QS || ''))).json();
+    $('mes-title').textContent = d.mapping ? t('χαρτογράφηση…') : (d.active || t('κανένας ενεργός χάρτης'));
+    $('map-edit-sheet').dataset.active = d.active || '';
+  } catch(e){}
+}
+function mesClose(){
+  $('mes-backdrop').classList.remove('open');
+  $('map-edit-sheet').classList.remove('open');
+}
+$('b-map-view-sheet').onclick = mesOpen;
+$('b-map-edit-sheet').onclick = mesOpen;
+$('mes-close').onclick = mesClose;
+$('mes-backdrop').onclick = mesClose;
+
+$('mes-rename').onclick = async () => {
+  const active = $('map-edit-sheet').dataset.active;
+  if(!active){ mesMsg(t('Κανένας ενεργός χάρτης')); return; }
+  const name = prompt(t('Νέο όνομα για') + ' "' + active + '"', active);
+  if(!name || name === active) return;
+  mesMsg(t('Μετονομασία…'));
+  try {
+    const r = await (await fetch('/maps/rename/' + encodeURIComponent(active) + '/'
+                                 + encodeURIComponent(name) + (TOKEN_QS || ''))).json();
+    mesMsg(r.ok ? t('Έγινε') + ': ' + name : t('Απέτυχε') + ': ' + (r.error || ''));
+    if(r.ok){ $('map-edit-sheet').dataset.active = name; $('mes-title').textContent = name; mapsRefresh(); }
+  } catch(e){ mesMsg(t('Απέτυχε') + ': ' + e); }
+};
+
+$('mes-backup').onclick = async () => {
+  const active = $('map-edit-sheet').dataset.active;
+  if(!active){ mesMsg(t('Κανένας ενεργός χάρτης')); return; }
+  const stamp = new Date().toISOString().replace(/[-:T]/g,'').slice(0,13);   // YYYYMMDD_HHMM
+  const name = (active + '_' + stamp.slice(0,8) + '_' + stamp.slice(8)).slice(0,40);
+  mesMsg(t('Αντίγραφο ασφαλείας…'));
+  try {
+    const r = await (await fetch('/maps/save/' + encodeURIComponent(name) + (TOKEN_QS || ''))).json();
+    mesMsg(r.ok ? t('Αποθηκεύτηκε ως') + ': ' + name : t('Απέτυχε') + ': ' + (r.result || ''));
+    if(r.ok) mapsRefresh();
+  } catch(e){ mesMsg(t('Απέτυχε') + ': ' + e); }
+};
+
+// Restore/Delete both act on a DIFFERENT saved map than the active one (the
+// active map cannot be deleted — see the server-side guard — and "restore"
+// IS mapSwitch). The list they need (#map-list) now lives further down in
+// THIS sheet (moved in below, 2026-08-18) rather than on the page behind it,
+// so both just scroll the sheet itself to it — no need to close.
+$('mes-restore').onclick = () => {
+  $('map-list').scrollIntoView({behavior:'smooth', block:'center'});
+  mesFlash($('map-list'));
+};
+$('mes-delete').onclick = () => {
+  $('map-list').scrollIntoView({behavior:'smooth', block:'center'});
+  mesFlash($('map-list'));
+};
+
+// Room Partition opens the room manager over the map — the same one the 🏠
+// fab and the "Δωμάτια" card's button open (setRoomMgr() closes this sheet
+// itself, since its tools are all taps on the map underneath).
+$('mes-rooms').onclick = () => setRoomMgr(true);
+$('mes-keepout').onclick = () => {
+  $('b-kz-add').checked = true;
+  $('b-kz-add').dispatchEvent(new Event('change'));
+};
+
+// The 3D view caches wallsModel forever once loaded (wallsLoad() is a
+// load-once guard, see its comment) — without this it kept showing whichever
+// map was active when the page first opened 3D, even after switching maps.
+function wallsReload(){
+  wallsModel = null;
+  wallsLoading = false;
+  if (mapView === 'walls') wallsLoad();
 }
 
 async function mapNew(){
@@ -10733,41 +11262,13 @@ async function mapSave(){
   if(!/^[A-Za-z0-9_-]{1,40}$/.test(name)){
     mapMsg(t('Δώσε όνομα με λατινικά γράμματα, αριθμούς, - ή _')); return;
   }
-  $('map-straighten').style.display = 'none';
   mapMsg(t('Αποθήκευση…'));
   try {
     const r = await (await fetch('/maps/save/' + encodeURIComponent(name)
                                  + (TOKEN_QS || ''))).json();
     mapMsg(r.ok ? t('Αποθηκεύτηκε') + ': ' + name : t('Απέτυχε') + ': ' + (r.result || ''));
     mapsRefresh();
-    if(r.ok) mapStraightenPreview(name);
   } catch(e){ mapMsg(t('Απέτυχε') + ': ' + e); }
-}
-
-async function mapStraightenPreview(name){
-  let d;
-  try { d = await (await fetch('/maps/straighten/' + encodeURIComponent(name)
-                               + (TOKEN_QS || ''))).json(); }
-  catch(e){ return; }
-  if(!d || d.error) return;
-  $('map-straighten-orig').src  = 'data:image/png;base64,' + d.original;
-  $('map-straighten-clean').src = 'data:image/png;base64,' + d.straightened;
-  $('map-straighten').style.display = '';
-  $('b-map-straighten-keep').onclick = () => { $('map-straighten').style.display = 'none'; };
-  $('b-map-straighten-use').onclick = async () => {
-    if(!confirm(t('Θα αντικαταστήσει τον χάρτη') + ' "' + name + '" '
-               + t('με την ισιωμένη εκδοχή (κρατά αντίγραφο ασφαλείας). Αν αυτός ο '
-                  + 'χάρτης είναι ήδη ενεργός, θέλει "Ενεργοποίηση" για να φανεί η '
-                  + 'αλλαγή. Να συνεχίσω;'))) return;
-    mapMsg(t('Εφαρμογή ισιωμένης εκδοχής…'));
-    try {
-      const r = await (await fetch('/maps/straighten_apply/' + encodeURIComponent(name)
-                                   + (TOKEN_QS || ''))).json();
-      mapMsg(r.ok ? t('Έγινε') + ' — ' + t('αντίγραφο ασφαλείας') + ': ' + r.backup
-                  : t('Απέτυχε') + ': ' + (r.error || ''));
-    } catch(e){ mapMsg(t('Απέτυχε') + ': ' + e); }
-    $('map-straighten').style.display = 'none';
-  };
 }
 
 // Web equivalent of the manual ply_to_map.py + scp flow: pick a PLY export
@@ -11178,6 +11679,275 @@ function armDraw(){
   };
 })();
 
+// ── Τοίχοι 3D (floorplan extruded from the 2D map) ─────────────────────────
+// Same painter's-algorithm canvas approach as the arm/point-cloud tabs above
+// — no three.js, self-contained page. Wall geometry is /maps/walls3d: one
+// quad per straight wall segment, already rectilinear (see map_walls3d.py),
+// so there is no mesh to walk, just a box per wall. World axes here match
+// the arm's convention (Z up, yaw rotates the XY ground plane) so toView/
+// project below are the identical formulas, just renamed.
+let wallsModel = null, wallsBounds = null, wallsLoading = false;
+let wallsYaw = -0.7, wallsPitch = -0.55, wallsZoom = 1;
+
+function wallsLoad(){
+  if (wallsModel || wallsLoading) return;
+  wallsLoading = true;
+  $('walls3d-info').textContent = t('φόρτωση…');
+  fetch('/maps/walls3d' + TOKEN_QS)
+    .then(r => r.ok ? r.json() : Promise.reject(r.status))
+    .then(m => {
+      wallsModel = m.walls || [];
+      let minX=1e9, maxX=-1e9, minY=1e9, maxY=-1e9;
+      for (const wobj of wallsModel) for (const [x,y] of wobj.corners){
+        if (x<minX) minX=x; if (x>maxX) maxX=x;
+        if (y<minY) minY=y; if (y>maxY) maxY=y;
+      }
+      wallsBounds = wallsModel.length ? {minX,maxX,minY,maxY} : null;
+      $('walls3d-info').textContent = wallsModel.length + ' ' + t('τοίχοι');
+      wallsDraw();
+    })
+    .catch(e => {
+      wallsLoading = false;
+      $('walls3d-info').textContent = t('δεν φορτώθηκε');
+    });
+}
+
+// Colours the 3D floor from the SAME room-tinted image the 2D canvas already
+// draws (mapImg) rather than re-deriving room polygons — whatever is painted
+// on the flat map (tint, floorplan wash) is what shows up here too, with no
+// way for the two to disagree. This canvas is a hand-rolled painter's-
+// algorithm renderer, not WebGL, so "drop a bitmap on a tilted plane" isn't
+// a primitive it has — sampling onto a coarse world-space grid of flat-
+// shaded quads is the cheap equivalent, good enough for room-sized colour
+// blocks (the printed room name/area and wall hairlines already live in the
+// 2D tab, this view doesn't need to repeat them).
+let wallsFloor = null, wallsFloorImg = null;
+
+function wallsBuildFloor(){
+  wallsFloorImg = mapImg;
+  if (!mapImg || !mapInfo) { wallsFloor = null; return; }
+  const off = document.createElement('canvas');
+  off.width = mapInfo.width; off.height = mapInfo.height;
+  const octx = off.getContext('2d');
+  octx.drawImage(mapImg, 0, 0, mapInfo.width, mapInfo.height);
+  let data;
+  try { data = octx.getImageData(0, 0, mapInfo.width, mapInfo.height).data; }
+  catch(e){ wallsFloor = null; return; }
+  // ~46 cells along the shorter side: enough for room shapes to read as
+  // distinct blocks without pushing the triangle count (2/cell, combined
+  // with the wall boxes below) past what dragging can redraw smoothly.
+  const stride = Math.max(2, Math.round(Math.min(mapInfo.width, mapInfo.height) / 46));
+  const cells = [];
+  for (let py = 0; py < mapInfo.height; py += stride){
+    for (let px = 0; px < mapInfo.width; px += stride){
+      const sx = Math.min(px + (stride >> 1), mapInfo.width - 1);
+      const sy = Math.min(py + (stride >> 1), mapInfo.height - 1);
+      const idx = (sy * mapInfo.width + sx) * 4;
+      const r = data[idx], g = data[idx + 1], b = data[idx + 2];
+      // Skip "never scanned" — the floor should only cover the explored
+      // footprint, the same extent the wall boxes come from. Two greys to
+      // skip, not one: _cb_map paints unknown cells RViz-grey (128) today and
+      // the old pale wash (225) is still what a floorplan-backed map uses.
+      // Missing the 128 case tiled the whole 3D view with dark grey slabs
+      // outside the flat (2026-08-19).
+      const neutral = Math.abs(r-g) < 6 && Math.abs(g-b) < 6;
+      if (neutral && (Math.abs(r-225) < 6 || Math.abs(r-128) < 10)) continue;
+      // Occupied cells are the walls, and the walls are already boxes here —
+      // sampling them into the floor too just speckles it with dark tiles.
+      if (r < 90 && g < 90 && b < 90) continue;
+      const px1 = Math.min(px + stride, mapInfo.width);
+      const py1 = Math.min(py + stride, mapInfo.height);
+      const x0 = mapInfo.origin[0] + px  * mapInfo.resolution;
+      const x1 = mapInfo.origin[0] + px1 * mapInfo.resolution;
+      const y1 = mapInfo.origin[1] + (mapInfo.height - py)  * mapInfo.resolution;
+      const y0 = mapInfo.origin[1] + (mapInfo.height - py1) * mapInfo.resolution;
+      // Washed towards the floor base rather than used raw: the 2D map's room
+      // tint is saturated on purpose (it has to read at thumbnail size), and
+      // the same colours across a whole 3D floor are far too loud.
+      cells.push({corners: [[x0,y0],[x1,y0],[x1,y1],[x0,y1]],
+                  color: [r, g, b].map((c, i) => Math.round(
+                    WALLS_FLOOR_BASE[i] * (1 - WALLS_FLOOR_TINT) + c * WALLS_FLOOR_TINT))});
+    }
+  }
+  wallsFloor = cells;
+}
+
+// One wall footprint (a world-XY quad) extruded into 6 quad faces -> 12 tris.
+// No backface culling here (unlike the arm): the outer-boundary edges and
+// the interior-wall rectangles come from two different contour sources with
+// no shared winding guarantee, and at ~50 boxes drawing both sides of every
+// face costs nothing worth chasing that down for.
+function wallsAddBox(corners, height, color, out){
+  const b  = corners.map(([x,y]) => [x, y, 0]);
+  const tp = corners.map(([x,y]) => [x, y, height]);
+  const quads = [
+    [b[0],b[1],b[2],b[3]], [tp[0],tp[1],tp[2],tp[3]],
+    [b[0],b[1],tp[1],tp[0]], [b[1],b[2],tp[2],tp[1]],
+    [b[2],b[3],tp[3],tp[2]], [b[3],b[0],tp[0],tp[3]],
+  ];
+  for (const q of quads){
+    out.push({p:[q[0],q[1],q[2]], color});
+    out.push({p:[q[0],q[2],q[3]], color});
+  }
+}
+
+function wallsAddFloorQuad(corners, color, out){
+  const q = corners.map(([x,y]) => [x, y, 0]);
+  out.push({p:[q[0],q[1],q[2]], color});
+  out.push({p:[q[0],q[2],q[3]], color});
+}
+
+// Warm off-white walls (the Lambert shading below still separates the faces:
+// a lit face lands near #f0ece5, a shadowed one near #a9a49c). Was a blue-grey
+// [150,155,168], which only worked against the black backdrop this view used
+// to have.
+const WALLS_COLOR = [236, 231, 222];
+// What the room tint is mixed INTO on the 3D floor, and how much of it
+// survives: enough to still tell the kitchen from the bedroom, pale enough
+// that the whole model stays in the white/beige/grey family.
+const WALLS_FLOOR_BASE = [250, 248, 244], WALLS_FLOOR_TINT = 0.26;
+
+function wallsDraw(){
+  const cv = $('walls3d'); if (!cv) return;
+  const ctx = cv.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== w*dpr || cv.height !== h*dpr){ cv.width = w*dpr; cv.height = h*dpr; }
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,w,h);
+  if (!wallsModel || !wallsBounds) return;
+  if (mapImg !== wallsFloorImg) wallsBuildFloor();
+
+  const b = wallsBounds;
+  const span = Math.max(b.maxX-b.minX, b.maxY-b.minY, 1);
+  const cx0 = (b.minX+b.maxX)/2, cy0 = (b.minY+b.maxY)/2;
+
+  const cy = Math.cos(wallsYaw), sy = Math.sin(wallsYaw);
+  const cp = Math.cos(wallsPitch), sp = Math.sin(wallsPitch);
+  const toView = v => {
+    const xr =  v[0]*cy + v[1]*sy;
+    const yr = -v[0]*sy + v[1]*cy;
+    return [xr, yr*sp + v[2]*cp, yr*cp - v[2]*sp];
+  };
+  // Gentle perspective, scaled to the building rather than a fixed metre
+  // count — same reasoning as the arm tab's FOCAL, different unit (metres of
+  // floorplan instead of metres of arm reach).
+  const FOCAL = span * 2.0;
+  const scale = (Math.min(w, h) * 0.8 / span) * wallsZoom;
+  let ox = 0, oy = 0;
+  const project = p => {
+    const k = FOCAL / (FOCAL + p[2]);
+    return [ox + p[0]*scale*k, oy - p[1]*scale*k, k];
+  };
+  const centre = v => [v[0]-cx0, v[1]-cy0, v[2]];
+
+  const tris = [];
+  for (const wobj of wallsModel) wallsAddBox(wobj.corners, wobj.height, WALLS_COLOR, tris);
+  if (wallsFloor) for (const cell of wallsFloor) wallsAddFloorQuad(cell.corners, cell.color, tris);
+
+  const faces = [];
+  for (const {p: [p0,p1,p2], color} of tris){
+    const vv = [toView(centre(p0)), toView(centre(p1)), toView(centre(p2))];
+    const ux=vv[1][0]-vv[0][0], uy=vv[1][1]-vv[0][1], uz=vv[1][2]-vv[0][2];
+    const wx=vv[2][0]-vv[0][0], wy=vv[2][1]-vv[0][1], wz=vv[2][2]-vv[0][2];
+    let nx=uy*wz-uz*wy, ny=uz*wx-ux*wz, nz=ux*wy-uy*wx;
+    const nl = Math.hypot(nx,ny,nz) || 1;
+    nx/=nl; ny/=nl; nz/=nl;
+    const p = vv.map(project);
+    faces.push([(vv[0][2]+vv[1][2]+vv[2][2])/3, p, [nx,ny,nz], color]);
+  }
+  faces.sort((a,b2) => b2[0]-a[0]);
+
+  // Centre on the projected bounding box, not a world-space guess — same
+  // trick the arm tab uses, so panning while dragging keeps the model on
+  // screen instead of drifting off one edge.
+  let bx0=1e9, by0=1e9, bx1=-1e9, by1=-1e9;
+  for (const f of faces) for (const q of f[1]){
+    if (q[0]<bx0) bx0=q[0]; if (q[0]>bx1) bx1=q[0];
+    if (q[1]<by0) by0=q[1]; if (q[1]>by1) by1=q[1];
+  }
+  ox = bx1>bx0 ? w/2-(bx0+bx1)/2 : w/2;
+  oy = bx1>bx0 ? h/2-(by0+by1)/2 : h/2;
+
+  // Two-sided Lambert (abs of the dot) — see wallsAddBox for why nothing is
+  // culled: an inward-wound triangle should still read as lit, not black.
+  // The ambient floor is high (0.62, was 0.35): with off-white walls on an
+  // off-white backdrop, a face turned away from the light should read as a
+  // soft grey shade, not as a dark slab.
+  const L = ARM_LIGHT;
+  for (const [, p, n, color] of faces){
+    const diff = Math.abs(n[0]*L[0] + n[1]*L[1] + n[2]*L[2]);
+    const f = 0.62 + 0.38*diff;
+    const r  = Math.min(255, color[0]*f)|0;
+    const g2 = Math.min(255, color[1]*f)|0;
+    const bl = Math.min(255, color[2]*f)|0;
+    ctx.fillStyle = ctx.strokeStyle = `rgb(${r},${g2},${bl})`;
+    ctx.beginPath();
+    ctx.moveTo(p[0][0]+ox, p[0][1]+oy);
+    ctx.lineTo(p[1][0]+ox, p[1][1]+oy);
+    ctx.lineTo(p[2][0]+ox, p[2][1]+oy);
+    ctx.closePath();
+    ctx.fill();
+    ctx.lineWidth = 0.6;
+    ctx.stroke();
+  }
+
+  // Robot trail — drawn last (on top), no depth test against the walls: at
+  // floor height inside rooms that already-correct-looking painter's-order
+  // omission is not worth a depth buffer for a 2D line. project() already
+  // bakes ox/oy in at this point (they were set above, before this call) —
+  // do NOT add them again here, unlike the face loop above whose points
+  // were projected earlier, while ox/oy were still 0.
+  if (robotTrail.length > 1){
+    ctx.strokeStyle = '#38bdf8';
+    ctx.lineWidth = 3.5;
+    ctx.beginPath();
+    robotTrail.forEach(([x, y], i) => {
+      const p = project(toView(centre([x, y, 0.03])));
+      if (i === 0) ctx.moveTo(p[0], p[1]);
+      else ctx.lineTo(p[0], p[1]);
+    });
+    ctx.stroke();
+  }
+  if (pose){
+    const p = project(toView(centre([pose.x, pose.y, 0.05])));
+    ctx.fillStyle = '#f59e0b';
+    ctx.beginPath(); ctx.arc(p[0], p[1], 5, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+(function wallsWireInteraction(){
+  const cv = $('walls3d'); if (!cv) return;
+  let drag = null;
+  const pos = e => e.touches ? [e.touches[0].clientX, e.touches[0].clientY]
+                             : [e.clientX, e.clientY];
+  const down = e => { drag = pos(e); cv.style.cursor='grabbing'; };
+  const move = e => {
+    if (!drag) return;
+    const [x,y] = pos(e);
+    wallsYaw   += (x - drag[0]) * 0.01;
+    wallsPitch += (y - drag[1]) * 0.01;
+    wallsPitch = Math.max(-1.4, Math.min(1.4, wallsPitch));
+    drag = [x,y];
+    e.preventDefault();
+    wallsDraw();
+  };
+  const up = () => { drag = null; cv.style.cursor='grab'; };
+  cv.addEventListener('mousedown', down);
+  cv.addEventListener('touchstart', down, {passive:true});
+  window.addEventListener('mousemove', move);
+  cv.addEventListener('touchmove', move, {passive:false});
+  window.addEventListener('mouseup', up);
+  cv.addEventListener('touchend', up);
+  cv.addEventListener('wheel', e => {
+    e.preventDefault();
+    wallsZoom = Math.max(0.4, Math.min(3, wallsZoom * (e.deltaY > 0 ? 0.9 : 1.1)));
+    wallsDraw();
+  }, {passive:false});
+  $('b-walls3d-reset').onclick = () => {
+    wallsYaw=-0.7; wallsPitch=-0.55; wallsZoom=1; wallsDraw();
+  };
+})();
 
 // ── who is speaking ─────────────────────────────────────────────────────────
 // Deliberately shows what it does NOT know: a name with no matched face reads
@@ -11540,10 +12310,12 @@ function camShowFrame(bytes){
 // through it mirrors the server's own `sc()` and stays aligned even if
 // either resize changes.
 let latestDetections = [];
+let latestDetectionsAt = 0;
 function camPickAt(clientX, clientY){
   const img = $('cam');
   const nw = img.naturalWidth, nh = img.naturalHeight;
-  if(!nw || !nh || !latestDetections.length) return null;
+  if(!nw || !nh || !latestDetections.length ||
+     performance.now() - latestDetectionsAt > 1500) return null;
   const rect = img.getBoundingClientRect();
   // object-fit:contain letterboxes: the bitmap sits centred in `rect`,
   // scaled to the largest size that fits without cropping either axis.
@@ -11567,19 +12339,26 @@ function camPickAt(clientX, clientY){
   return best;
 }
 let camPickMsgTimer = null;
-function camPickMsg(text){
+function camPickMsg(text, duration=3000){
   const el = $('cam-pick-msg');
   el.textContent = text;
   el.style.display = 'block';
   clearTimeout(camPickMsgTimer);
-  camPickMsgTimer = setTimeout(() => { el.style.display = 'none'; }, 3000);
+  camPickMsgTimer = setTimeout(() => { el.style.display = 'none'; }, duration);
 }
+let camFetchLabel = null;
 $('cam').addEventListener('click', e => {
   if(!camOn) return;
   const d = camPickAt(e.clientX, e.clientY);
   if(!d) return;
+  if(['person','dog','cat','horse','sheep','cow','elephant','bear','zebra','giraffe']
+      .includes(String(d.label).toLowerCase())){
+    camPickMsg(t('Δεν επιτρέπεται πιάσιμο ανθρώπου ή ζώου.'), 5000);
+    return;
+  }
+  camFetchLabel = d.label;
   send({type:'pick', label:d.label});
-  camPickMsg(t('Πάω να πιάσω: ') + d.label);
+  camPickMsg(t('Πλησιάζω: ') + d.label + t(' (στα 0.4 m)'), 15000);
 });
 
 // ── log tail ───────────────────────────────────────────────────────────────
@@ -11766,17 +12545,27 @@ import { OrbitControls } from '/vendor/three/addons/controls/OrbitControls.js';
     renderer = new THREE.WebGLRenderer({canvas, antialias:true});
     renderer.setPixelRatio(window.devicePixelRatio || 1);
     scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x0a0a0b);
+    // Off-white room, not a black void — see the canvas's own background in
+    // the markup for why (2026-08-19, user request). Both are set: the clear
+    // colour is what WebGL paints, the CSS one is what shows while the scene
+    // is still loading.
+    scene.background = new THREE.Color(0xf6f4f0);
     camera = new THREE.PerspectiveCamera(55, 1, 0.05, 100);
     camera.position.set(4, 3, 4);
     controls = new OrbitControls(camera, renderer.domElement);
     controls.target.set(0, 1, 0);
     controls.update();
     controls.addEventListener('change', saveCam);
-    scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.2));
-    const sun = new THREE.DirectionalLight(0xfff4e0, 1.0);
+    // Bright sky, warm beige "ground" bounce, and a soft fill opposite the
+    // sun: a scan lit only from above went to near-black on every wall facing
+    // away, which is exactly what the pale backdrop must not have next to it.
+    scene.add(new THREE.HemisphereLight(0xffffff, 0xe6dccd, 2.0));
+    const sun = new THREE.DirectionalLight(0xfff4e0, 1.1);
     sun.position.set(3, 6, 2);
     scene.add(sun);
+    const fill = new THREE.DirectionalLight(0xffffff, 0.45);
+    fill.position.set(-4, 3, -3);
+    scene.add(fill);
     // Robot marker: cone tip along local +X, matching the map's yaw=0-faces-
     // +X convention (see pose.yaw's use at the laser-pose projection above).
     const cone = new THREE.ConeGeometry(0.12, 0.30, 12);
@@ -11801,13 +12590,14 @@ import { OrbitControls } from '/vendor/three/addons/controls/OrbitControls.js';
     scene.add(goalMarker);
     // Trail (where driven) and plan (upcoming Nav2 route, same blue as the
     // 2D canvas's) — both read the classic script's shared arrays each
-    // frame, like goalMarker does. Trail is a flat white ribbon mesh, not a
+    // frame, like goalMarker does. Trail is a flat ribbon mesh, not a
     // THREE.Line — LineBasicMaterial's `linewidth` is ignored by nearly
     // every browser/GPU (ANGLE clamps it to 1px), so a real quad-strip is
-    // the only portable way to get a visibly thick trail. White so it reads
-    // against both the pale scan mesh and the dark floor grid.
+    // the only portable way to get a visibly thick trail. Blue, matching the
+    // 2D canvas's trail: it used to be white, which vanished the moment the
+    // scene's backdrop and floor became off-white.
     trailLine = new THREE.Mesh(new THREE.BufferGeometry(),
-      new THREE.MeshBasicMaterial({color: 0xffffff, side: THREE.DoubleSide}));
+      new THREE.MeshBasicMaterial({color: 0x0ea5e9, side: THREE.DoubleSide}));
     trailLine.visible = false;
     scene.add(trailLine);
     planLine = new THREE.Line(new THREE.BufferGeometry(),
@@ -11937,12 +12727,44 @@ import { OrbitControls } from '/vendor/three/addons/controls/OrbitControls.js';
     }, 300);   // debounced: 'change' fires on every drag/wheel tick
   }
 
+  // The house in white/beige/grey (2026-08-19, user request). Only the FLAT
+  // colours are re-toned — anything carrying a photo texture is left exactly
+  // as scanned, since those photos are the whole reason this view exists. A
+  // RoomPlan export is mostly flat-coloured boxes, so that is most of it: the
+  // saturation is pulled almost out and the lightness floored, which turns
+  // "dark grey box, navy sofa" into the pale, uniform look a floor-plan render
+  // has, without touching geometry.
+  function toneScan(root){
+    root.traverse(o => {
+      if (!o.isMesh || !o.material) return;
+      for (const m of (Array.isArray(o.material) ? o.material : [o.material])){
+        if (!m || !m.color) continue;
+        if (m.map){
+          // Photo-textured: the pixels stay, but a small constant lift keeps
+          // a dark cupboard door from being the one black hole in an
+          // otherwise pale room.
+          if (m.emissive){ m.emissive.setHex(0xffffff); m.emissiveIntensity = 0.25; }
+          continue;
+        }
+        const hsl = m.color.getHSL({h: 0, s: 0, l: 0});
+        // A hint of beige where the material was a pure neutral, so the house
+        // does not read as a greyscale print; otherwise the original hue,
+        // desaturated nearly out.
+        const neutral = hsl.s < 0.02;
+        m.color.setHSL(neutral ? 0.09 : hsl.h,
+                       neutral ? 0.05 : Math.min(hsl.s, 0.10),
+                       Math.max(hsl.l, 0.74));
+      }
+    });
+  }
+
   function load(){
     if (loading || loaded) return;
     loading = true;
     if (info) info.textContent = t('φόρτωση…');
     new GLTFLoader().load('/maps/scan.glb' + (TOKEN_QS || ''),
       (gltf) => {
+        toneScan(gltf.scene);
         scene.add(gltf.scene);
         scanRoot = gltf.scene;
         // Frame the camera from the mesh's own measured extent, not a fixed
@@ -11964,7 +12786,15 @@ import { OrbitControls } from '/vendor/three/addons/controls/OrbitControls.js';
           camera.position.fromArray(saved.pos);
           controls.target.fromArray(saved.target);
         } else {
-          camera.position.set(centre.x + radius, centre.y + radius * 0.6, centre.z + radius);
+          // 0.6 left an open-top scan (RoomPlan-style: thin single-layer
+          // walls, no ceiling — see usdz_to_glb.py) looking almost edge-on:
+          // the near wall's own height blocked the sightline down to the
+          // floor/furniture even though the far walls were visible over it.
+          // 1.2 verified 2026-08-18 against both this kind of scan and the
+          // existing dense Scaniverse ones (maps/1.glb, iphone_house.glb) —
+          // steeper is strictly better for the former and no worse for the
+          // latter.
+          camera.position.set(centre.x + radius, centre.y + radius * 1.2, centre.z + radius);
           controls.target.copy(centre);
         }
         controls.update();
@@ -12029,9 +12859,20 @@ def main():
     # websocket died". Both look identical from outside: a few connections that
     # open and close. Cost a round of guessing on 2026-08-01.
     access = os.environ.get('HOME_ROBOT_DASHBOARD_ACCESS_LOG') == '1'
-    uvicorn.run(app, host='0.0.0.0', port=PORT,
-                log_level='info' if access else 'warning',
-                access_log=access)
+    try:
+        uvicorn.run(app, host='0.0.0.0', port=PORT,
+                    log_level='info' if access else 'warning',
+                    access_log=access)
+    finally:
+        # uvicorn returns on SIGINT, but the ROS executor used to be left
+        # spinning until launch escalated SIGINT -> SIGTERM -> SIGKILL.  Shut
+        # the context down explicitly so subscriptions, serialised callbacks
+        # and DDS resources all leave cleanly with the web server.
+        if ros_node is not None:
+            ros_node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+        t.join(timeout=2.0)
 
 
 if __name__ == '__main__':

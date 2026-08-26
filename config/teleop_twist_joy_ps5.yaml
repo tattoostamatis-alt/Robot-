@@ -6,11 +6,12 @@ teleop_twist_joy_node:
     axis_linear:
       x: 1      # left stick vertical (up = forward)
     scale_linear:
-      x: 0.10   # Dropped from 0.50 (flat-out) for this mapping session — the
-                # ‼️ note right here said fast driving smears the walls, and
-                # that is exactly what showed up: point-cloud spikes shooting
-                # out past the real room boundary. Put back to 0.50 when
-                # you're done mapping and just want to drive normally.
+      x: 0.20   # 2026-08-18: bumped from 0.10 (user: "a bit faster") for a new
+                # mapping session. Still well under 0.50 (flat-out) — that
+                # speed is what smeared the walls last time (point-cloud
+                # spikes shooting out past the real room boundary), so this is
+                # a middle ground, not a return to normal driving speed. Put
+                # back to 0.50 once mapping is done and you're driving normally.
     scale_linear_turbo:
       x: 0.50
 

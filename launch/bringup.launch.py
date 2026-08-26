@@ -13,7 +13,7 @@ from launch_ros.event_handlers import OnStateTransition
 from launch_ros.events.lifecycle import ChangeState
 from launch_ros.substitutions import FindPackageShare
 from lifecycle_msgs.msg import Transition
-from moveit_configs_utils import MoveItConfigsBuilder
+from ament_index_python.packages import get_package_share_directory
 import os
 
 
@@ -25,7 +25,9 @@ def generate_launch_description():
     use_localization = LaunchConfiguration('use_localization', default='false')
     localization_map = LaunchConfiguration('localization_map', default='')
     use_camera    = LaunchConfiguration('use_camera',    default='true')
-    use_arm       = LaunchConfiguration('use_arm',       default='false')
+    # The previous Waveshare arm was removed. A replacement arm will get a
+    # fresh integration when its model is selected.
+    use_arm       = 'false'
     # Off by default — see pick_place_node.py's "MoveIt transit" docstring
     # section. Starts a HEADLESS move_group + arm_moveit_bridge.py +
     # arm_scene_obstacles.py (no RViz) so pick_place_node.py's autonomous
@@ -119,10 +121,11 @@ def generate_launch_description():
     delete_db     = LaunchConfiguration('delete_db_on_start', default='false')
 
     # ── SLAMTEC C1 LIDAR ─────────────────────────────────────────
-    # Provided by ros-sllidar-c1.service (systemd, always running on
-    # /dev/sllidar = same physical port as /dev/lidar). Do NOT start
-    # another sllidar_node here — it would fail to open the serial
-    # port (SL_RESULT_OPERATION_TIMEOUT) since it's already in use.
+    # Provided by ros-sllidar-c1.service.  The unit is disabled at boot and
+    # /home/dimi/bin/robot starts it for `robot max` / `robot map`, then stops
+    # it for `robot stop`, so the motor only spins during a robot session.
+    # Do NOT start another sllidar_node here — it would fight the service for
+    # /dev/sllidar (the same physical port as /dev/lidar).
 
     # ── Roomba driver ─────────────────────────────────────────────
     # Listens on cmd_vel_safe, not cmd_vel directly — obstacle_safety_node
@@ -314,10 +317,10 @@ def generate_launch_description():
     # Remeasure after ANY change to the camera bracket, and prefer the plane
     # fit over a protractor: 5 deg here is ~7 cm of height error at 0.8 m.
     #
-    # Remeasured 2026-08-14 (later the same day, aimed at a clear floor patch):
-    # scripts/measure_camera_pitch.py gave height 0.577 m, pitch 28.1 deg
-    # (0.491 rad) downward — height agrees with the taped 0.56 m to within
-    # 1.7 cm, which is the sanity check that the fit hit real floor this time.
+    # Remeasured physically 2026-08-22 against the assembled robot: the optical
+    # centre is 160 mm forward of the Roomba centreline, 540 mm above the floor,
+    # and the bracket is 35° down (0.610865 rad).  This supersedes the older
+    # floor-plane estimate of x=150 / z=577 mm / pitch=28.1°.
     # This SUPERSEDES the same-day pitch=0 rejection above: that run's ~1.09 m
     # result was the "wrong surface" failure mode the docstring warns about
     # (the robot was not aimed at a clear near floor patch then), not evidence
@@ -334,17 +337,17 @@ def generate_launch_description():
     tf_base_camera = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
-        arguments=['--x', '0.15', '--y', '0.0', '--z', '0.577',
-                   '--roll', '0', '--pitch', '0.491', '--yaw', '0',
+        arguments=['--x', '0.16', '--y', '0.0', '--z', '0.540',
+                   '--roll', '0', '--pitch', '0.610865', '--yaw', '0',
                    '--frame-id', 'base_link', '--child-frame-id', 'camera_link'],
         name='tf_base_camera',
     )
 
     # ── Static TF: base_link → arm_base ───────────────────────────
-    # Remeasured 2026-07-21 for the Roomba 879 chassis: the arm base sits
-    # 120mm forward of the wheel axle, centred left/right, 150mm above the
-    # axle -> z = 0.150 + 0.036 (wheel radius) = 0.186, since base_link is on
-    # the floor. Faces straight forward (roll=pitch=yaw=0).
+    # The arm base sits forward of the wheel axle, centred left/right, facing
+    # straight ahead (roll=pitch=yaw=0) — see the tape measurement on the
+    # arguments below, which supersedes an older 0.12/0.186 placeholder that
+    # had only ever been copied from the camera's x.
     # pick_place_node.py uses this TF to convert object
     # positions from object_detector.py (camera_color_optical_frame) into
     # the arm_base frame that arm_driver.py's T:104 cartesian command expects —
@@ -353,18 +356,75 @@ def generate_launch_description():
         package='tf2_ros',
         executable='static_transform_publisher',
         name='tf_base_arm',
-        # Eye-on-base hand-eye calibrated 2026-08-17 (easy_handeye2, D435 <->
-        # gripper_tag AprilTag, 12 samples across the reachable joint space —
-        # see handeye_calibrate.launch.py / scripts/apply_handeye_calibration.py).
-        # Replaces the 2026-08-14 tape-measured guess below: that one only
-        # measured translation (100mm forward of the vacuum centre, 180mm off
-        # the floor) and left rotation at identity since eyeballing mount
-        # rotation by hand isn't feasible — the calibrated quaternion is the
-        # first real rotation measurement this TF has ever had, hence the
-        # large swing from identity.
-        #   old: --x 0.10 --y 0.0 --z 0.18 --roll 0 --pitch 0 --yaw 0
-        arguments=['--x', '0.0428', '--y', '0.1516', '--z', '0.3244',
-                   '--qx', '0.2331', '--qy', '-0.3829', '--qz', '0.8732', '--qw', '0.1912',
+        # Measured 2026-08-14 (user, tape): 100mm forward of the vacuum
+        # centre, centred left/right, first servo (base rotation pivot) at
+        # 180mm off the floor — the two higher servos (230mm) are downstream
+        # of that pivot in the arm's own kinematic chain, not part of this
+        # mount TF. Fully extended the arm reaches 780mm off the floor
+        # (reach reference, not a TF value).
+        #
+        # ‼️ 2026-08-19: REVERTED the eye-on-base hand-eye result that 8ac89f6
+        # applied here (--x 0.0428 --y 0.1516 --z 0.3244, quat 0.2331/-0.3829/
+        # 0.8732/0.1912). That calibration never converged — the run it came
+        # from is the same one whose own notes recorded RMS scatter LARGER than
+        # the mean implied hand_tcp->gripper_tag offset across all three sample
+        # rounds, and concluded it must NOT be applied. Applying it anyway
+        # broke picking outright:
+        #   * it places arm_base 0.32m off the floor and 0.15m off-centre, but
+        #     the arm is bolted flat, centred, 0.18m up. Feeding the arm's own
+        #     physical mount point (0.12, 0, 0.186 in base_link) through it
+        #     lands 0.22m from the arm_base origin instead of ~0.
+        #   * its rotation is roll -44 deg / pitch -34 deg / yaw 169 deg away
+        #     from base_link, for a bracket that is square to the chassis.
+        #   * net effect: a bottle on the floor 0.55m straight ahead maps to
+        #     arm_base x = -0.60 — BEHIND the arm — at 0.61m, so _run_pick's
+        #     max_reach guard rejected every floor object as 'out_of_reach'
+        #     and the arm never moved. With these tape values the same bottle
+        #     maps to (+0.45, 0.00, -0.15), 0.47m, comfortably in reach.
+        # Re-derive with a bigger tag + outlier rejection before trying again;
+        # until then measured-translation/identity-rotation is the honest TF.
+        # These are also the numbers _run_pick's max_reach comment reasons from
+        # ("arm_base sits 0.10m forward / 0.18m up from base_link") — changing
+        # them silently invalidates that guard's arithmetic too.
+        # ‼️ 2026-08-19, yaw measured (user, by eye on the real robot, then
+        # confirmed against the camera): the arm is mounted turned 90 deg from
+        # identity. The identity rotation this TF carried for its whole life
+        # was simply wrong, and wrong by the worst possible amount: every
+        # grasp target was rotated 90 deg out, so the arm reached accurately
+        # (better than 10 mm in its own frame, verified) at a place nothing
+        # was. That is why the gripper kept closing on air even after the
+        # frame, depth, units and settle-time fixes, and why the arm was never
+        # visible in the camera at any commanded pose.
+        #
+        # ‼️ 2026-08-20: yaw=+90 (the first eyeball guess, "arm's +x points to
+        # base_link's +y / robot's LEFT") was tried on hardware and sent the
+        # arm reaching to the robot's RIGHT instead of forward — the opposite
+        # of the intended correction, i.e. the guess had the mounting turned
+        # backwards. Flipped to yaw=-90 (arm's own +x points along base_link's
+        # -y / robot's RIGHT instead). Still needs a real pick to confirm.
+        #
+        # ‼️ 2026-08-20, later: BACK TO +90, and this time MEASURED, not seen.
+        # Both guesses above were made by watching where the arm ended up after
+        # a reach, which is the ambiguous observation: the robot's left is the
+        # observer's right when you stand in front of it, which is exactly how
+        # a +90/-90 flip happens twice in a row. scripts/calibrate_arm_base.py
+        # asks the arm instead — it drives ONLY the base joint until the arm
+        # visibly points along the robot's driving direction, and reads the
+        # angle back off the servo:
+        #     base = -89.0 deg  =>  arm points straight forward
+        #     yaw  = -(that)    =>  +1.5708
+        # (Confirmed on hardware with the user watching. Two other facts fell
+        # out of the same session and are worth keeping: +base rotates toward
+        # the arm's own +y — at base=+28 the TCP read x=309 y=+165 — and the
+        # board's boot.mission returns the arm to its zero on EVERY port open,
+        # so a reading taken right after connecting is the init pose, not
+        # wherever you left it.)
+        # This says the arm's own +x points along base_link's +y, the robot's
+        # LEFT, which is also what "the arm sits twisted to the left while the
+        # driver reports base=0" means. Do not flip it again on the strength of
+        # someone standing in front of the robot: re-run the script.
+        arguments=['--x', '0.10', '--y', '0.0', '--z', '0.18',
+                   '--roll', '0', '--pitch', '0', '--yaw', '1.5708',
                    '--frame-id', 'base_link', '--child-frame-id', 'arm_base'],
         condition=IfCondition(use_arm),
     )
@@ -535,29 +595,23 @@ def generate_launch_description():
         condition=IfCondition(use_localization),
     )
 
-    # Restores the last saved AMCL pose on startup (polls until AMCL is
-    # active, then publishes to /initialpose).  global_localizer auto-runs
-    # only when no per-map saved pose file exists.
+    # Restore the last saved AMCL pose on startup (polls until AMCL is active,
+    # then publishes to /initialpose). global_localizer verifies that pose
+    # against the live scan and searches globally if the robot was carried.
     pose_saver_node = Node(
         package='home_robot',
         executable='pose_saver_node.py',
         name='pose_saver_node',
         output='screen',
         parameters=[{'save_interval': 10.0, 'map_yaml': localization_map,
-                     # Don't restore the last pose on boot — global_localizer
-                     # self-localizes from a random start instead (the user
-                     # wants to power on anywhere without a manual 2D Pose
-                     # Estimate). pose_saver still saves the live pose.
                      'restore_pose': False}],
         condition=IfCondition(use_localization),
     )
 
     # FFT scan-matching global localizer: finds the robot on the map by
     # correlating the LiDAR scan + D435 depth virtual scan against the
-    # occupancy map likelihood field.  Auto-runs only when pose_saver has
-    # no saved pose file for this map (defer_to_saved_pose:=true); otherwise
-    # pose_saver restores the last AMCL pose and the LiDAR stays aligned.
-    # Call /localize_globally manually when the robot was moved to a new spot.
+    # occupancy map likelihood field. It checks the per-map saved pose first;
+    # when that no longer matches, it searches the complete map automatically.
     # The laser→base_link frame conversion (_laser_to_base in the node) is
     # required for this yaw=π-mounted lidar — without it every auto-match
     # lands 180° flipped.
@@ -568,13 +622,9 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'auto_localize': True,
-            # Run on EVERY boot, not just when no saved pose exists — the user
-            # wants the robot to self-localize from wherever it is powered on,
-            # never relying on a stale saved pose (which forced a manual 2D
-            # Pose Estimate whenever the robot had been moved).
             'defer_to_saved_pose': False,
             'map_yaml': localization_map,
-            'depth_weight': 0.5,
+            'depth_weight': 0.0,
         }],
         condition=IfCondition(use_localization),
     )
@@ -828,7 +878,7 @@ def generate_launch_description():
         name='proactive_observer_node',
         output='screen',
         parameters=[{
-            'enabled':        LaunchConfiguration('proactive', default='true'),
+            'enabled':        LaunchConfiguration('proactive', default='false'),
             'min_interval':   LaunchConfiguration('proactive_min_interval', default='180.0'),
             'max_per_hour':   LaunchConfiguration('proactive_max_per_hour', default='4'),
             'require_person': LaunchConfiguration('proactive_require_person', default='true'),
@@ -1117,7 +1167,9 @@ def generate_launch_description():
         parameters=[{
             # echo_node needs the un-cancelled beam; see its docstring.
             'publish_raw': LaunchConfiguration('use_echo', default='false'),
-            'threshold': 0.50,
+            # Conservative default: avoids false wakes from room noise/TV.
+            # A user who needs more sensitivity can retune it from the dashboard.
+            'threshold': 0.80,
             'device_name': 'XVF3800',
             'mic_channels': 6,
             'mic_channel': LaunchConfiguration('mic_channel', default='4'),
@@ -1184,7 +1236,14 @@ def generate_launch_description():
         package='home_robot',
         executable='stt_node.py',
         name='stt_node',
-        parameters=[{'energy_thresh': 0.030, 'calibrate_on_start': False}],
+        parameters=[{
+            # Keep voice commands responsive.  large-v3 was left here even
+            # though stt_node's measured default is medium; on this mini-PC
+            # it adds roughly 8–12 s before a command reaches Nav2.
+            'model_size': 'medium',
+            'energy_thresh': 0.030,
+            'calibrate_on_start': False,
+        }],
         output='screen',
         condition=IfCondition(use_stt),
     )
@@ -1286,108 +1345,22 @@ def generate_launch_description():
         condition=IfCondition(use_vision),
     )
 
-    # ── Text-to-speech (edge-tts, speaks speech_response) ────────
+    # ── Text-to-speech (fast online Greek neural voice) ──────────────────
     tts_node = Node(
         package='home_robot',
         executable='tts_node.py',
         name='tts_node',
+        # User choice 2026-08-22: Microsoft Athina is substantially clearer and
+        # faster than Chatterbox on this CPU. Keep one consistent voice and no
+        # Piper fallback, so the speaker never changes between utterances.
+        parameters=[{
+            'backend': 'edge',
+            'voice': 'el-GR-AthinaNeural',
+            'rate': '+0%',
+            'fallback_model': '',
+        }],
         output='screen',
         condition=IfCondition(use_tts),
-    )
-
-    # ── Waveshare RoArm-M3 ──────────────────────────────────────────
-    arm_node = Node(
-        package='home_robot',
-        executable='arm_driver.py',
-        name='arm_driver',
-        parameters=[{
-            'port': arm_port,
-            # Usable envelope — MEASURED by hand 2026-07-31 with the servo
-            # torque off, not taken from the wiki. ‼️ These must stay identical
-            # to config/arm_joy_ps5.yaml's limit_*: arm_joy stops the jog
-            # integrator, this node is what refuses the command. See that file
-            # for the raw extremes and why the shoulder is capped at 1.57.
-            'limit_base':     [-3.015, 0.016],
-            'limit_shoulder': [-0.169, 1.570],
-            'limit_elbow':    [0.141, 3.079],
-            'limit_wrist':    [-1.143, 1.407],
-            'limit_roll':     [-1.165, 1.372],
-        }],
-        output='screen',
-        condition=IfCondition(use_arm),
-    )
-
-    # ── Pick-place (object_detector.py + arm_driver.py bridge) ──────
-    # UNTESTED — see pick_place_node.py's module docstring. Gated on the
-    # same use_arm flag as arm_node/tf_base_arm since it's meaningless
-    # without either.
-    pick_place_node = Node(
-        package='home_robot',
-        executable='pick_place_node.py',
-        name='pick_place_node',
-        parameters=[{
-            'drop_x': pick_drop_x,
-            'drop_y': pick_drop_y,
-            'drop_z': pick_drop_z,
-            'approach_height': pick_approach_height,
-            'moveit_transit_enabled': moveit_transit,
-        }],
-        output='screen',
-        condition=IfCondition(use_arm),
-    )
-
-    # ── MoveIt (headless) — collision-aware transit for pick_place_node ────
-    # Same config as arm_moveit.launch.py (the dashboard's manual "MoveIt"
-    # tab), minus robot_state_publisher/RViz: pick_place_node.py only needs
-    # move_group to plan+execute, not a visualised model. Gated on
-    # moveit_transit, NOT bare use_arm — see the LaunchConfiguration comment
-    # above for why this must not run at the same time as the dashboard tab.
-    _moveit_config = (
-        MoveItConfigsBuilder("roarm_m3", package_name="roarm_moveit")
-        .robot_description(file_path="config/roarm_m3/roarm_m3.urdf.xacro")
-        .robot_description_semantic(file_path="config/roarm_m3/roarm_m3.srdf")
-        .robot_description_kinematics(file_path="config/roarm_m3/kinematics.yaml")
-        .trajectory_execution(file_path="config/roarm_m3/moveit_controllers.yaml")
-        .joint_limits(file_path="config/roarm_m3/joint_limits.yaml")
-        .planning_pipelines(pipelines=["ompl"])
-        .to_moveit_configs()
-    )
-    moveit_robot_state_publisher = Node(
-        package='robot_state_publisher',
-        executable='robot_state_publisher',
-        name='moveit_robot_state_publisher',
-        output='screen',
-        parameters=[_moveit_config.robot_description, {'publish_frequency': 15.0}],
-        condition=IfCondition(AndSubstitution(use_arm, moveit_transit)),
-    )
-    move_group_node = Node(
-        package='moveit_ros_move_group',
-        executable='move_group',
-        name='move_group',
-        output='screen',
-        parameters=[
-            _moveit_config.to_dict(),
-            {'publish_robot_description_semantic': True,
-             'publish_planning_scene': True,
-             'publish_geometry_updates': True,
-             'publish_state_updates': True,
-             'publish_transforms_updates': True},
-        ],
-        condition=IfCondition(AndSubstitution(use_arm, moveit_transit)),
-    )
-    arm_moveit_bridge_node = Node(
-        package='home_robot',
-        executable='arm_moveit_bridge.py',
-        name='arm_moveit_bridge',
-        output='screen',
-        condition=IfCondition(AndSubstitution(use_arm, moveit_transit)),
-    )
-    arm_scene_obstacles_node = Node(
-        package='home_robot',
-        executable='arm_scene_obstacles.py',
-        name='arm_scene_obstacles',
-        output='screen',
-        condition=IfCondition(AndSubstitution(use_arm, moveit_transit)),
     )
 
     # Forward RViz "2D Goal Pose" (/goal_pose) to the Nav2 action. Only useful
@@ -1449,18 +1422,6 @@ def generate_launch_description():
         output='screen',
         condition=IfCondition(use_joy),
     )
-    # Right stick jogs the arm (base/shoulder), R1/R2 work the gripper.
-    # Needs BOTH the controller and the arm, so gate on both flags — on its own
-    # it would just publish arm/joint_cmd into the void.
-    arm_joy_node = Node(
-        package='home_robot',
-        executable='arm_joy_node.py',
-        name='arm_joy',
-        parameters=[PathJoinSubstitution([pkg, 'config', 'arm_joy_ps5.yaml'])],
-        output='screen',
-        condition=IfCondition(AndSubstitution(use_joy, use_arm)),
-    )
-
     # ── RViz2 ─────────────────────────────────────────────────────
     rviz_node = Node(
         package='rviz2',
@@ -1499,7 +1460,9 @@ def generate_launch_description():
         DeclareLaunchArgument('doa_rotate_speed',   default_value='0.6'),
         DeclareLaunchArgument('doa_min_angle_deg',  default_value='20.0'),
         DeclareLaunchArgument('doa_led_enabled',    default_value='true'),
-        DeclareLaunchArgument('use_person_follower', default_value='false'),
+        # Follow mode still requires an explicit voice command and a safety
+        # confirmation; enabling this starts only the perception/control node.
+        DeclareLaunchArgument('use_person_follower', default_value='true'),
         DeclareLaunchArgument('use_llm',       default_value='false'),
         DeclareLaunchArgument('use_dashboard', default_value='false'),
         DeclareLaunchArgument('llm_backend',   default_value='lemonade'),
@@ -1549,7 +1512,7 @@ def generate_launch_description():
         # ‼️ Off by default: this is the master switch for gestures that can
         # MOVE the robot. Stop-type gestures work regardless.
         DeclareLaunchArgument('motion_gestures',        default_value='false'),
-        DeclareLaunchArgument('proactive',              default_value='true'),
+        DeclareLaunchArgument('proactive',              default_value='false'),
         DeclareLaunchArgument('use_sim_time',            default_value='false'),
         DeclareLaunchArgument('use_roomba',              default_value='true'),
         DeclareLaunchArgument('rtabmap_db',
@@ -1621,16 +1584,9 @@ def generate_launch_description():
         planner_node,
         vision_node,
         tts_node,
-        arm_node,
-        pick_place_node,
-        moveit_robot_state_publisher,
-        move_group_node,
-        arm_moveit_bridge_node,
-        arm_scene_obstacles_node,
         goal_pose_bridge_node,
         joy_node,
         teleop_twist_joy_node,
         joystick_estop_node,
-        arm_joy_node,
         rviz_node,
     ])

@@ -43,7 +43,6 @@ from cv_bridge import CvBridge
 from dotenv import load_dotenv
 from geometry_msgs.msg import Quaternion, Twist
 from home_robot import api_keys
-from home_robot import arm_motion
 from home_robot import llm_quota
 from home_robot.status_query import (ROOM_NAMES_EL, format_location,
                                      format_status, is_location_query,
@@ -52,7 +51,7 @@ from home_robot.status_query import (ROOM_NAMES_EL, format_location,
 from home_robot.motion_confirm import (MOTION_TOOLS, PENDING_TTL,
                                        confirm_question, is_affirmative,
                                        is_negative)
-from home_robot.simple_commands import parse_arm_command, parse_simple_motion
+from home_robot.simple_commands import parse_simple_motion
 from home_robot.stop_command import is_stop_command, strip_accents
 from home_robot.tool_router import select_tools
 from home_robot.vocabulary import (greek_accusative, greek_for,
@@ -169,8 +168,8 @@ TOOLS = [
                        'αντικειμένου — γι\' αυτό είναι το pick.',
         'parameters': {'type': 'object', 'properties': {
             'direction': {'type': 'string',
-                          'enum': list(arm_motion.DIRECTIONS)},
-            'amount': {'type': 'string', 'enum': list(arm_motion.AMOUNTS),
+                          'enum': []},
+            'amount': {'type': 'string', 'enum': [],
                        'description': 'πόσο· default «λίγο»'},
         }, 'required': ['direction']},
     }},
@@ -1103,8 +1102,7 @@ class LLMBridgeNode(Node):
         # verb-anchored enough not to be the overheard-conversation shape
         # confirm_motion exists for. Takes the busy lock like a status query:
         # a real action, so it must not interleave with one already running.
-        simple = (parse_arm_command(text)
-                  or parse_simple_motion(text, rooms_from_locations(self.locations)))
+        simple = parse_simple_motion(text, rooms_from_locations(self.locations))
         if simple is not None and self._busy.acquire(blocking=False):
             name, args = simple
             self.get_logger().info(f'Simple motion command (keyword gate): {text} -> {name}{args}')

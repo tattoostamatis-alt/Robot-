@@ -17,7 +17,7 @@ from home_robot import dock_geometry as dg
 PKG = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Where apriltag_relocalizer stores the tag pose for the map in use.
-CALIB = os.path.expanduser('~/.ros/saloni_tag_map_pose.yaml')
+CALIB = os.path.expanduser('~/.ros/room4_tag_map_pose.yaml')
 
 # The calibrated malou tag, as measured 2026-07-22 (verified to 6.1 mm). A
 # frozen fixture for the geometry itself — the map moved on, the arithmetic
@@ -150,16 +150,19 @@ def test_staging_rejects_anything_nav2_would_refuse():
     assert got[3] >= 1.2
 
 
-def test_staging_on_the_real_malou_map():
-    """End-to-end over the actual map and calibration, not a synthetic one."""
+def test_staging_on_the_active_map_when_calibrated():
+    """End-to-end over room4 once its tag calibration exists."""
     np = pytest.importorskip('numpy')
     yaml = pytest.importorskip('yaml')
     Image = pytest.importorskip('PIL.Image', reason='pillow not installed')
     ndimage = pytest.importorskip('scipy.ndimage')
 
-    meta = yaml.safe_load(open(f'{PKG}/maps/malou.yaml'))
+    if not os.path.exists(CALIB):
+        pytest.skip('room4 tag is not calibrated yet')
+    tag = yaml.safe_load(open(CALIB))
+    meta = yaml.safe_load(open(f'{PKG}/maps/room4.yaml'))
     res, (ox, oy) = meta['resolution'], meta['origin'][:2]
-    img = np.array(Image.open(f'{PKG}/maps/malou.pgm'))
+    img = np.array(Image.open(f'{PKG}/maps/room4.pgm'))
     h, w = img.shape
     dist = ndimage.distance_transform_edt(img >= 65) * res
 
@@ -169,10 +172,9 @@ def test_staging_on_the_real_malou_map():
             return -1.0
         return float(dist[r, c])
 
-    n = dg.tag_normal_yaw(MALOU_TAG['qx'], MALOU_TAG['qy'],
-                          MALOU_TAG['qz'], MALOU_TAG['qw'])
-    got = dg.find_staging(MALOU_TAG['x'], MALOU_TAG['y'], n, clearance)
-    assert got is not None, 'no reachable staging pose on malou'
+    n = dg.tag_normal_yaw(tag['qx'], tag['qy'], tag['qz'], tag['qw'])
+    got = dg.find_staging(tag['x'], tag['y'], n, clearance)
+    assert got is not None, 'no reachable staging pose on room4'
     x, y, yaw, d, c = got
     assert c >= dg.DEFAULT_MIN_CLEARANCE       # Nav2 will accept it
     assert d <= 1.5                            # IR can plausibly bridge it
@@ -189,10 +191,10 @@ def test_locations_yaml_matches_the_tag():
     """
     yaml = pytest.importorskip('yaml')
     locs = yaml.safe_load(open(f'{PKG}/config/locations.yaml'))
-    assert 'dock_staging' in locs, 'run scripts/derive_dock_pose.py --write'
-
     if not os.path.exists(CALIB):
-        pytest.skip('no tag calibration on this machine')
+        assert 'dock' not in locs and 'dock_staging' not in locs
+        pytest.skip('room4 tag not calibrated; stale dock goals correctly absent')
+    assert 'dock_staging' in locs, 'run scripts/derive_dock_pose.py room4 --write'
     tag = yaml.safe_load(open(CALIB))
 
     n = dg.tag_normal_yaw(tag['qx'], tag['qy'], tag['qz'], tag['qw'])

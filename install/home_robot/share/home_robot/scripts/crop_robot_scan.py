@@ -1,0 +1,1 @@
+/home/dimi/robot_ws/src/home_robot/scripts/crop_robot_scan.py

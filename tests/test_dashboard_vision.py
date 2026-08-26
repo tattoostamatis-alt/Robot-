@@ -104,6 +104,27 @@ def test_low_confidence_joints_are_skipped():
         'keypoint visibility is not checked before drawing'
 
 
+def test_camera_click_starts_goto_object_not_arm_only_pick():
+    """A camera object is usually outside arm reach; the base must approach
+    and stop short of it, not try to grasp immediately."""
+    dispatch = re.search(r"elif t == 'pick':(.*?)(?=\n        elif t ==)", _SRC, re.S)
+    assert dispatch, 'camera pick dispatch is gone'
+    body = dispatch.group(1)
+    assert "f'goto_object:{label}'" in body
+    assert '_mission_pub.publish' in body
+    assert '_pick_pub.publish' not in body
+
+
+def test_camera_click_refuses_stale_boxes_and_living_targets():
+    assert 'performance.now() - latestDetectionsAt > 1500' in _SRC
+    click = re.search(r"\$\('cam'\)\.addEventListener\('click'.*?\n\}\);", _SRC, re.S)
+    assert click, 'camera click handler is gone'
+    assert "'person'" in click.group(0) and "'dog'" in click.group(0)
+    # The server repeats the guard; a forged WebSocket must not bypass UI safety.
+    dispatch = re.search(r"elif t == 'pick':(.*?)(?=\n        elif t ==)", _SRC, re.S)
+    assert 'unsafe_grasps' in dispatch.group(1)
+
+
 # ── costmap: cost is not occupancy ─────────────────────────────────────────
 
 def test_the_cost_gradient_is_rendered_not_thresholded():

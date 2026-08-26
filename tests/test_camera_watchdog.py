@@ -33,6 +33,7 @@ class _CameraInfo:
 @pytest.fixture
 def cam(monkeypatch):
     launched = []
+    stopped = []
 
     class FakePopen:
         def __init__(self, args, **kw):
@@ -53,7 +54,11 @@ def cam(monkeypatch):
     }
     mod = _load(f'{PKG}/home_robot/nodes/camera_watchdog_node.py', mods)
     monkeypatch.setattr(mod.subprocess, 'Popen', FakePopen)
+    monkeypatch.setattr(mod.subprocess, 'run',
+                        lambda args, **kw: stopped.append((args, kw)))
+    monkeypatch.setattr(mod.time, 'sleep', lambda _seconds: None)
     node = mod.CameraWatchdog()
+    node._stopped_camera_processes = stopped
     return mod, node, launched
 
 
@@ -110,6 +115,22 @@ def test_a_dead_camera_is_restarted(cam):
     args = launched[0][0]
     assert args[:2] == ['ros2', 'launch']
     assert 'realsense2_camera' in args
+
+
+def test_a_stale_camera_process_is_stopped_before_relaunch(cam):
+    """A wedged native node can remain alive while publishing no frames.  A
+    second copy cannot claim the same D435, so recovery must release it first."""
+    mod, node, launched = cam
+    node._on_frame(None)
+    _age(node, 60.0)
+
+    node._check()
+
+    assert node._stopped_camera_processes
+    args, kwargs = node._stopped_camera_processes[0]
+    assert args[:3] == ['pkill', '-INT', '-f']
+    assert 'realsense2_camera_node' in args[3]
+    assert kwargs.get('check') is False
 
 
 def test_the_restart_keeps_the_perception_arguments(cam):

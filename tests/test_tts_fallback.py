@@ -146,7 +146,7 @@ def test_startup_warns_when_fallback_missing(node_src):
 
 # ── single-voice mode (2026-08-01) ────────────────────────────────────
 # The user heard the fallback fire and reported it as "sometimes two women
-# with different voices answer me": piper's el_GR-rapunzelina-low is a
+# with different voices answer me": piper's el_GR-joy-medium is a
 # different Greek woman from edge-tts's Athina, so a fallen-back answer sounds
 # like someone else joining in. They chose one consistent voice over never
 # being mute. These tests pin that trade rather than the old default, so
@@ -162,6 +162,13 @@ def test_the_fallback_code_still_exists(node_src):
     robot is the failure this originally fixed."""
     assert 'self._fallback.synthesize(text)' in node_src
     assert 'tts_fallback.DEFAULT_MODEL' in node_src
+
+
+def test_robot_max_selects_athina_as_the_primary_voice(node_src):
+    launch = open(f'{PKG}/launch/bringup.launch.py').read()
+    assert "'backend': 'edge'" in launch
+    assert "'voice': 'el-GR-AthinaNeural'" in launch
+    assert "'fallback_model': ''" in launch
 
 
 def test_attempts_are_raised_to_cover_the_missing_fallback(node_src):

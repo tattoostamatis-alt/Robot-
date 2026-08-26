@@ -1,0 +1,1 @@
+/home/dimi/robot_ws/src/home_robot/launch/view_map.launch.py

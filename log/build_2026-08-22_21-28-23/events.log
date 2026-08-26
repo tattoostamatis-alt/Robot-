@@ -1,0 +1,630 @@
+[0.000000] (-) TimerEvent: {}
+[0.000157] (home_robot) JobQueued: {'identifier': 'home_robot', 'dependencies': OrderedDict()}
+[0.000734] (home_robot) JobStarted: {'identifier': 'home_robot'}
+[0.009659] (home_robot) JobProgress: {'identifier': 'home_robot', 'progress': 'cmake'}
+[0.010357] (home_robot) Command: {'cmd': ['/usr/bin/cmake', '/home/dimi/robot_ws/src/home_robot', '-DAMENT_CMAKE_SYMLINK_INSTALL=1', '-DCMAKE_INSTALL_PREFIX=/home/dimi/robot_ws/src/home_robot/install/home_robot'], 'cwd': '/home/dimi/robot_ws/src/home_robot/build/home_robot', 'env': OrderedDict({'LESSOPEN': '| /usr/bin/lesspipe %s', 'CODEX_CI': '1', 'LANGUAGE': 'el_GR:el', 'USER': 'dimi', 'LC_TIME': 'C.UTF-8', 'CODEX_INTERNAL_ORIGINATOR_OVERRIDE': 'Codex Desktop', 'GZ_CONFIG_PATH': '/opt/ros/jazzy/opt/gz_sim_vendor/share/gz:/opt/ros/jazzy/opt/sdformat_vendor/share/gz:/opt/ros/jazzy/opt/gz_gui_vendor/share/gz:/opt/ros/jazzy/opt/gz_transport_vendor/share/gz:/opt/ros/jazzy/opt/gz_rendering_vendor/share/gz:/opt/ros/jazzy/opt/gz_plugin_vendor/share/gz:/opt/ros/jazzy/opt/gz_fuel_tools_vendor/share/gz:/opt/ros/jazzy/opt/gz_msgs_vendor/share/gz:/opt/ros/jazzy/opt/gz_common_vendor/share/gz', 'CODEX_SHELL': '1', 'XDG_SESSION_TYPE': 'wayland', 'LOG_FORMAT': 'json', 'SHLVL': '1', 'LD_LIBRARY_PATH': '/home/dimi/ros2_robot_ws/install/libcreate/lib:/home/dimi/ros2_robot_ws/install/create_msgs/lib:/home/dimi/robot_ws/install/interbotix_perception_msgs/lib:/home/dimi/robot_ws/install/explore_lite_msgs/lib:/home/dimi/robot_ws/install/easy_handeye2_msgs/lib:/opt/ros/jazzy/opt/gz_sim_vendor/lib:/opt/ros/jazzy/opt/gz_sensors_vendor/lib:/opt/ros/jazzy/opt/gz_physics_vendor/lib:/opt/ros/jazzy/opt/sdformat_vendor/lib:/opt/ros/jazzy/opt/rviz_ogre_vendor/lib:/opt/ros/jazzy/lib/x86_64-linux-gnu:/opt/ros/jazzy/opt/gz_gui_vendor/lib:/opt/ros/jazzy/opt/gz_transport_vendor/lib:/opt/ros/jazzy/opt/gz_rendering_vendor/lib:/opt/ros/jazzy/opt/gz_plugin_vendor/lib:/opt/ros/jazzy/opt/gz_fuel_tools_vendor/lib:/opt/ros/jazzy/opt/gz_msgs_vendor/lib:/opt/ros/jazzy/opt/gz_common_vendor/lib:/opt/ros/jazzy/opt/gz_math_vendor/lib:/opt/ros/jazzy/opt/gz_utils_vendor/lib:/opt/ros/jazzy/opt/gz_tools_vendor/lib:/opt/ros/jazzy/opt/gz_ogre_next_vendor/lib:/opt/ros/jazzy/opt/gz_dartsim_vendor/lib:/opt/ros/jazzy/opt/gz_cmake_vendor/lib:/opt/ros/jazzy/lib', 'HOME': '/home/dimi', 'CHROME_DESKTOP': 'chatgpt.desktop', 'CYCLONEDDS_URI': 'file:///home/dimi/.config/cyclonedds.xml', 'DISABLE_AUTO_UPDATE': 'true', 'DESKTOP_SESSION': 'ubuntu', 'GIO_LAUNCHED_DESKTOP_FILE': '/home/dimi/.config/autostart/chatgpt.desktop', 'ROS_PYTHON_VERSION': '3', 'GNOME_SHELL_SESSION_MODE': 'ubuntu', 'GTK_MODULES': 'gail:atk-bridge', 'PAGER': 'cat', 'LC_MONETARY': 'C.UTF-8', 'MANAGERPID': '1793', 'LC_CTYPE': 'C.UTF-8', 'SYSTEMD_EXEC_PID': '2114', 'IM_CONFIG_CHECK_ENV': '1', 'GSM_SKIP_SSH_AGENT_WORKAROUND': 'true', 'NO_COLOR': '1', 'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/run/user/1000/bus', 'COLORTERM': '', 'GIO_LAUNCHED_DESKTOP_FILE_PID': '2441', 'DEBUGINFOD_URLS': 'https://debuginfod.ubuntu.com', 'IM_CONFIG_PHASE': '1', 'WAYLAND_DISPLAY': 'wayland-0', 'COLCON_PREFIX_PATH': '/home/dimi/robot_ws/install:/home/dimi/ros2_robot_ws/install:/home/dimi/roomba_ws/install', 'ROS_DISTRO': 'jazzy', 'ZSH_TMUX_AUTOSTARTED': 'true', 'LOGNAME': 'dimi', 'DESKTOP_AUTOSTART_ID': '102a96377f2f37f15c178742230149109300000021140016', 'JOURNAL_STREAM': '10:10237', '_': '/usr/bin/colcon', 'ROS_VERSION': '2', 'PKG_CONFIG_PATH': '/home/dimi/ros2_robot_ws/install/libcreate/lib/x86_64-linux-gnu/pkgconfig:/home/dimi/ros2_robot_ws/install/libcreate/lib/pkgconfig', 'MEMORY_PRESSURE_WATCH': '/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/app-gnome\\x2dsession\\x2dmanager.slice/gnome-session-manager@ubuntu.service/memory.pressure', 'XDG_SESSION_CLASS': 'user', 'RUST_LOG': 'warn', 'USERNAME': 'dimi', 'TERM': 'dumb', 'GNOME_DESKTOP_SESSION_ID': 'this-is-deprecated', 'FC_FONTATIONS': '1', 'PATH': '/home/dimi/.local/bin:/home/dimi/bin:/home/dimi/.codex/tmp/arg0/codex-arg0PvXm3Q:/home/dimi/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override:/home/dimi/.local/bin:/home/dimi/bin:/home/dimi/bin:/opt/ros/jazzy/opt/gz_msgs_vendor/bin:/opt/ros/jazzy/opt/gz_tools_vendor/bin:/opt/ros/jazzy/opt/gz_ogre_next_vendor/bin:/opt/ros/jazzy/bin:/home/dimi/.local/bin:/home/dimi/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/snap/bin:/home/dimi/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback:/usr/lib/chatgpt/resources', 'SESSION_MANAGER': 'local/dimi-Default-string:@/tmp/.ICE-unix/2114,unix/dimi-Default-string:/tmp/.ICE-unix/2114', 'CODEX_SESSION_ID': '01a02ac9-4811-7312-869c-bf08a22ad75d', 'INVOCATION_ID': 'acc6534b8a5440689c15f6eca04a0965', 'PAPERSIZE': 'a4', 'XDG_MENU_PREFIX': 'gnome-', 'LC_ADDRESS': 'C.UTF-8', 'GNOME_SETUP_DISPLAY': ':1', 'XDG_RUNTIME_DIR': '/run/user/1000', 'GDK_BACKEND': 'x11', 'DISPLAY': ':0', 'LANG': 'C.UTF-8', 'XDG_CURRENT_DESKTOP': 'ubuntu:GNOME', 'LC_TELEPHONE': 'C.UTF-8', 'RMW_IMPLEMENTATION': 'rmw_cyclonedds_cpp', 'XMODIFIERS': '@im=ibus', 'GH_PAGER': 'cat', 'XDG_SESSION_DESKTOP': 'ubuntu', 'XAUTHORITY': '/run/user/1000/.mutter-Xwaylandauth.KGKGU3', 'LS_COLORS': '', 'SSH_AUTH_SOCK': '/run/user/1000/keyring/ssh', 'LEMONADE_HOST': '0.0.0.0', 'AMENT_PREFIX_PATH': '/home/dimi/ros2_robot_ws/install/sllidar_ros2:/home/dimi/ros2_robot_ws/install/create_robot:/home/dimi/ros2_robot_ws/install/create_bringup:/home/dimi/ros2_robot_ws/install/create_driver:/home/dimi/ros2_robot_ws/install/create_msgs:/home/dimi/ros2_robot_ws/install/create_description:/home/dimi/robot_ws/install/roarm_moveit:/home/dimi/robot_ws/install/roarm_description:/home/dimi/robot_ws/install/home_robot:/home/dimi/robot_ws/install/interbotix_perception_pipelines:/home/dimi/robot_ws/install/interbotix_perception_msgs:/home/dimi/robot_ws/install/explore_lite:/home/dimi/robot_ws/install/explore_lite_msgs:/home/dimi/robot_ws/install/easy_handeye2:/home/dimi/robot_ws/install/easy_handeye2_msgs:/home/dimi/roomba_ws/install/sllidar_ros2:/opt/ros/jazzy', 'LC_MESSAGES': 'el_GR.UTF-8', 'SHELL': '/bin/bash', 'LC_NAME': 'C.UTF-8', 'QT_ACCESSIBILITY': '1', 'NO_AT_BRIDGE': '1', 'GDMSESSION': 'ubuntu', 'LESSCLOSE': '/usr/bin/lesspipe %s %s', 'CODEX_THREAD_ID': '01a02ac9-4811-7312-869c-bf08a22ad75d', 'LC_MEASUREMENT': 'C.UTF-8', 'LC_IDENTIFICATION': 'C.UTF-8', 'ROS_AUTOMATIC_DISCOVERY_RANGE': 'SUBNET', 'GIT_PAGER': 'cat', 'QT_IM_MODULE': 'ibus', 'PWD': '/home/dimi/robot_ws/src/home_robot/build/home_robot', 'LC_ALL': 'C.UTF-8', 'XDG_CONFIG_DIRS': '/etc/xdg/xdg-ubuntu:/etc/xdg', 'ZSH_TMUX_AUTOSTART': 'false', 'XDG_DATA_DIRS': '/usr/share/ubuntu:/usr/share/gnome:/home/dimi/.local/share/flatpak/exports/share:/var/lib/flatpak/exports/share:/usr/local/share/:/usr/share/:/var/lib/snapd/desktop', 'PYTHONPATH': '/home/dimi/ros2_robot_ws/install/create_msgs/lib/python3.12/site-packages:/home/dimi/robot_ws/install/home_robot/lib/python3.12/site-packages:/home/dimi/robot_ws/install/interbotix_perception_msgs/lib/python3.12/site-packages:/home/dimi/robot_ws/install/explore_lite_msgs/lib/python3.12/site-packages:/home/dimi/robot_ws/build/easy_handeye2:/home/dimi/robot_ws/install/easy_handeye2/lib/python3.12/site-packages:/home/dimi/robot_ws/install/easy_handeye2_msgs/lib/python3.12/site-packages:/opt/ros/jazzy/lib/python3.12/site-packages', 'LC_NUMERIC': 'C.UTF-8', 'LC_PAPER': 'C.UTF-8', 'COLCON': '1', 'MEMORY_PRESSURE_WRITE': 'c29tZSAyMDAwMDAgMjAwMDAwMAA=', 'CMAKE_PREFIX_PATH': '/home/dimi/ros2_robot_ws/install/sllidar_ros2:/home/dimi/ros2_robot_ws/install/create_robot:/home/dimi/ros2_robot_ws/install/create_bringup:/home/dimi/ros2_robot_ws/install/create_driver:/home/dimi/ros2_robot_ws/install/libcreate:/home/dimi/ros2_robot_ws/install/create_msgs:/home/dimi/ros2_robot_ws/install/create_description:/home/dimi/robot_ws/install/roarm_moveit:/home/dimi/robot_ws/install/roarm_description:/home/dimi/robot_ws/install/home_robot:/home/dimi/robot_ws/install/interbotix_perception_pipelines:/home/dimi/robot_ws/install/interbotix_perception_msgs:/home/dimi/robot_ws/install/explore_lite:/home/dimi/robot_ws/install/explore_lite_msgs:/home/dimi/robot_ws/install/easy_handeye2_msgs:/home/dimi/roomba_ws/install/sllidar_ros2:/opt/ros/jazzy/opt/gz_sim_vendor:/opt/ros/jazzy/opt/gz_sensors_vendor:/opt/ros/jazzy/opt/gz_physics_vendor:/opt/ros/jazzy/opt/sdformat_vendor:/opt/ros/jazzy/opt/gz_gui_vendor:/opt/ros/jazzy/opt/gz_transport_vendor:/opt/ros/jazzy/opt/gz_rendering_vendor:/opt/ros/jazzy/opt/gz_plugin_vendor:/opt/ros/jazzy/opt/gz_fuel_tools_vendor:/opt/ros/jazzy/opt/gz_msgs_vendor:/opt/ros/jazzy/opt/gz_common_vendor:/opt/ros/jazzy/opt/gz_math_vendor:/opt/ros/jazzy/opt/gz_utils_vendor:/opt/ros/jazzy/opt/gz_tools_vendor:/opt/ros/jazzy/opt/gz_ogre_next_vendor:/opt/ros/jazzy/opt/gz_dartsim_vendor:/opt/ros/jazzy/opt/gz_cmake_vendor:/home/dimi/robot_ws/install/easy_handeye2:/opt/ros/jazzy'}), 'shell': False}
+[0.099743] (-) TimerEvent: {}
+[0.162343] (home_robot) StdoutLine: {'line': b'-- The C compiler identification is GNU 13.3.0\n'}
+[0.199924] (-) TimerEvent: {}
+[0.279354] (home_robot) StdoutLine: {'line': b'-- The CXX compiler identification is GNU 13.3.0\n'}
+[0.299981] (-) TimerEvent: {}
+[0.302289] (home_robot) StdoutLine: {'line': b'-- Detecting C compiler ABI info\n'}
+[0.400124] (-) TimerEvent: {}
+[0.423553] (home_robot) StdoutLine: {'line': b'-- Detecting C compiler ABI info - done\n'}
+[0.432216] (home_robot) StdoutLine: {'line': b'-- Check for working C compiler: /usr/bin/cc - skipped\n'}
+[0.432749] (home_robot) StdoutLine: {'line': b'-- Detecting C compile features\n'}
+[0.433236] (home_robot) StdoutLine: {'line': b'-- Detecting C compile features - done\n'}
+[0.442493] (home_robot) StdoutLine: {'line': b'-- Detecting CXX compiler ABI info\n'}
+[0.500195] (-) TimerEvent: {}
+[0.555818] (home_robot) StdoutLine: {'line': b'-- Detecting CXX compiler ABI info - done\n'}
+[0.567282] (home_robot) StdoutLine: {'line': b'-- Check for working CXX compiler: /usr/bin/c++ - skipped\n'}
+[0.567567] (home_robot) StdoutLine: {'line': b'-- Detecting CXX compile features\n'}
+[0.568039] (home_robot) StdoutLine: {'line': b'-- Detecting CXX compile features - done\n'}
+[0.592362] (home_robot) StdoutLine: {'line': b'-- Found ament_cmake: 2.5.6 (/opt/ros/jazzy/share/ament_cmake/cmake)\n'}
+[0.600299] (-) TimerEvent: {}
+[0.700501] (-) TimerEvent: {}
+[0.787565] (home_robot) StdoutLine: {'line': b'-- Found Python3: /usr/bin/python3 (found version "3.12.3") found components: Interpreter \n'}
+[0.800646] (-) TimerEvent: {}
+[0.900974] (-) TimerEvent: {}
+[0.905302] (home_robot) StdoutLine: {'line': b'-- Override CMake install command with custom implementation using symlinks instead of copying resources\n'}
+[0.983195] (home_robot) StdoutLine: {'line': b'-- Found rclpy: 7.1.11 (/opt/ros/jazzy/share/rclpy/cmake)\n'}
+[1.001069] (-) TimerEvent: {}
+[1.101249] (-) TimerEvent: {}
+[1.201437] (-) TimerEvent: {}
+[1.275228] (home_robot) StdoutLine: {'line': b'-- Configuring done (1.2s)\n'}
+[1.278411] (home_robot) StdoutLine: {'line': b'-- Generating done (0.0s)\n'}
+[1.281345] (home_robot) StdoutLine: {'line': b'-- Build files have been written to: /home/dimi/robot_ws/src/home_robot/build/home_robot\n'}
+[1.290693] (home_robot) CommandEnded: {'returncode': 0}
+[1.291347] (home_robot) JobProgress: {'identifier': 'home_robot', 'progress': 'build'}
+[1.291971] (home_robot) Command: {'cmd': ['/usr/bin/cmake', '--build', '/home/dimi/robot_ws/src/home_robot/build/home_robot', '--', '-j16', '-l16'], 'cwd': '/home/dimi/robot_ws/src/home_robot/build/home_robot', 'env': OrderedDict({'LESSOPEN': '| /usr/bin/lesspipe %s', 'CODEX_CI': '1', 'LANGUAGE': 'el_GR:el', 'USER': 'dimi', 'LC_TIME': 'C.UTF-8', 'CODEX_INTERNAL_ORIGINATOR_OVERRIDE': 'Codex Desktop', 'GZ_CONFIG_PATH': '/opt/ros/jazzy/opt/gz_sim_vendor/share/gz:/opt/ros/jazzy/opt/sdformat_vendor/share/gz:/opt/ros/jazzy/opt/gz_gui_vendor/share/gz:/opt/ros/jazzy/opt/gz_transport_vendor/share/gz:/opt/ros/jazzy/opt/gz_rendering_vendor/share/gz:/opt/ros/jazzy/opt/gz_plugin_vendor/share/gz:/opt/ros/jazzy/opt/gz_fuel_tools_vendor/share/gz:/opt/ros/jazzy/opt/gz_msgs_vendor/share/gz:/opt/ros/jazzy/opt/gz_common_vendor/share/gz', 'CODEX_SHELL': '1', 'XDG_SESSION_TYPE': 'wayland', 'LOG_FORMAT': 'json', 'SHLVL': '1', 'LD_LIBRARY_PATH': '/home/dimi/ros2_robot_ws/install/libcreate/lib:/home/dimi/ros2_robot_ws/install/create_msgs/lib:/home/dimi/robot_ws/install/interbotix_perception_msgs/lib:/home/dimi/robot_ws/install/explore_lite_msgs/lib:/home/dimi/robot_ws/install/easy_handeye2_msgs/lib:/opt/ros/jazzy/opt/gz_sim_vendor/lib:/opt/ros/jazzy/opt/gz_sensors_vendor/lib:/opt/ros/jazzy/opt/gz_physics_vendor/lib:/opt/ros/jazzy/opt/sdformat_vendor/lib:/opt/ros/jazzy/opt/rviz_ogre_vendor/lib:/opt/ros/jazzy/lib/x86_64-linux-gnu:/opt/ros/jazzy/opt/gz_gui_vendor/lib:/opt/ros/jazzy/opt/gz_transport_vendor/lib:/opt/ros/jazzy/opt/gz_rendering_vendor/lib:/opt/ros/jazzy/opt/gz_plugin_vendor/lib:/opt/ros/jazzy/opt/gz_fuel_tools_vendor/lib:/opt/ros/jazzy/opt/gz_msgs_vendor/lib:/opt/ros/jazzy/opt/gz_common_vendor/lib:/opt/ros/jazzy/opt/gz_math_vendor/lib:/opt/ros/jazzy/opt/gz_utils_vendor/lib:/opt/ros/jazzy/opt/gz_tools_vendor/lib:/opt/ros/jazzy/opt/gz_ogre_next_vendor/lib:/opt/ros/jazzy/opt/gz_dartsim_vendor/lib:/opt/ros/jazzy/opt/gz_cmake_vendor/lib:/opt/ros/jazzy/lib', 'HOME': '/home/dimi', 'CHROME_DESKTOP': 'chatgpt.desktop', 'CYCLONEDDS_URI': 'file:///home/dimi/.config/cyclonedds.xml', 'DISABLE_AUTO_UPDATE': 'true', 'DESKTOP_SESSION': 'ubuntu', 'GIO_LAUNCHED_DESKTOP_FILE': '/home/dimi/.config/autostart/chatgpt.desktop', 'ROS_PYTHON_VERSION': '3', 'GNOME_SHELL_SESSION_MODE': 'ubuntu', 'GTK_MODULES': 'gail:atk-bridge', 'PAGER': 'cat', 'LC_MONETARY': 'C.UTF-8', 'MANAGERPID': '1793', 'LC_CTYPE': 'C.UTF-8', 'SYSTEMD_EXEC_PID': '2114', 'IM_CONFIG_CHECK_ENV': '1', 'GSM_SKIP_SSH_AGENT_WORKAROUND': 'true', 'NO_COLOR': '1', 'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/run/user/1000/bus', 'COLORTERM': '', 'GIO_LAUNCHED_DESKTOP_FILE_PID': '2441', 'DEBUGINFOD_URLS': 'https://debuginfod.ubuntu.com', 'IM_CONFIG_PHASE': '1', 'WAYLAND_DISPLAY': 'wayland-0', 'COLCON_PREFIX_PATH': '/home/dimi/robot_ws/install:/home/dimi/ros2_robot_ws/install:/home/dimi/roomba_ws/install', 'ROS_DISTRO': 'jazzy', 'ZSH_TMUX_AUTOSTARTED': 'true', 'LOGNAME': 'dimi', 'DESKTOP_AUTOSTART_ID': '102a96377f2f37f15c178742230149109300000021140016', 'JOURNAL_STREAM': '10:10237', '_': '/usr/bin/colcon', 'ROS_VERSION': '2', 'PKG_CONFIG_PATH': '/home/dimi/ros2_robot_ws/install/libcreate/lib/x86_64-linux-gnu/pkgconfig:/home/dimi/ros2_robot_ws/install/libcreate/lib/pkgconfig', 'MEMORY_PRESSURE_WATCH': '/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/app-gnome\\x2dsession\\x2dmanager.slice/gnome-session-manager@ubuntu.service/memory.pressure', 'XDG_SESSION_CLASS': 'user', 'RUST_LOG': 'warn', 'USERNAME': 'dimi', 'TERM': 'dumb', 'GNOME_DESKTOP_SESSION_ID': 'this-is-deprecated', 'FC_FONTATIONS': '1', 'PATH': '/home/dimi/.local/bin:/home/dimi/bin:/home/dimi/.codex/tmp/arg0/codex-arg0PvXm3Q:/home/dimi/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override:/home/dimi/.local/bin:/home/dimi/bin:/home/dimi/bin:/opt/ros/jazzy/opt/gz_msgs_vendor/bin:/opt/ros/jazzy/opt/gz_tools_vendor/bin:/opt/ros/jazzy/opt/gz_ogre_next_vendor/bin:/opt/ros/jazzy/bin:/home/dimi/.local/bin:/home/dimi/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/snap/bin:/home/dimi/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback:/usr/lib/chatgpt/resources', 'SESSION_MANAGER': 'local/dimi-Default-string:@/tmp/.ICE-unix/2114,unix/dimi-Default-string:/tmp/.ICE-unix/2114', 'CODEX_SESSION_ID': '01a02ac9-4811-7312-869c-bf08a22ad75d', 'INVOCATION_ID': 'acc6534b8a5440689c15f6eca04a0965', 'PAPERSIZE': 'a4', 'XDG_MENU_PREFIX': 'gnome-', 'LC_ADDRESS': 'C.UTF-8', 'GNOME_SETUP_DISPLAY': ':1', 'XDG_RUNTIME_DIR': '/run/user/1000', 'GDK_BACKEND': 'x11', 'DISPLAY': ':0', 'LANG': 'C.UTF-8', 'XDG_CURRENT_DESKTOP': 'ubuntu:GNOME', 'LC_TELEPHONE': 'C.UTF-8', 'RMW_IMPLEMENTATION': 'rmw_cyclonedds_cpp', 'XMODIFIERS': '@im=ibus', 'GH_PAGER': 'cat', 'XDG_SESSION_DESKTOP': 'ubuntu', 'XAUTHORITY': '/run/user/1000/.mutter-Xwaylandauth.KGKGU3', 'LS_COLORS': '', 'SSH_AUTH_SOCK': '/run/user/1000/keyring/ssh', 'LEMONADE_HOST': '0.0.0.0', 'AMENT_PREFIX_PATH': '/home/dimi/ros2_robot_ws/install/sllidar_ros2:/home/dimi/ros2_robot_ws/install/create_robot:/home/dimi/ros2_robot_ws/install/create_bringup:/home/dimi/ros2_robot_ws/install/create_driver:/home/dimi/ros2_robot_ws/install/create_msgs:/home/dimi/ros2_robot_ws/install/create_description:/home/dimi/robot_ws/install/roarm_moveit:/home/dimi/robot_ws/install/roarm_description:/home/dimi/robot_ws/install/home_robot:/home/dimi/robot_ws/install/interbotix_perception_pipelines:/home/dimi/robot_ws/install/interbotix_perception_msgs:/home/dimi/robot_ws/install/explore_lite:/home/dimi/robot_ws/install/explore_lite_msgs:/home/dimi/robot_ws/install/easy_handeye2:/home/dimi/robot_ws/install/easy_handeye2_msgs:/home/dimi/roomba_ws/install/sllidar_ros2:/opt/ros/jazzy', 'LC_MESSAGES': 'el_GR.UTF-8', 'SHELL': '/bin/bash', 'LC_NAME': 'C.UTF-8', 'QT_ACCESSIBILITY': '1', 'NO_AT_BRIDGE': '1', 'GDMSESSION': 'ubuntu', 'LESSCLOSE': '/usr/bin/lesspipe %s %s', 'CODEX_THREAD_ID': '01a02ac9-4811-7312-869c-bf08a22ad75d', 'LC_MEASUREMENT': 'C.UTF-8', 'LC_IDENTIFICATION': 'C.UTF-8', 'ROS_AUTOMATIC_DISCOVERY_RANGE': 'SUBNET', 'GIT_PAGER': 'cat', 'QT_IM_MODULE': 'ibus', 'PWD': '/home/dimi/robot_ws/src/home_robot/build/home_robot', 'LC_ALL': 'C.UTF-8', 'XDG_CONFIG_DIRS': '/etc/xdg/xdg-ubuntu:/etc/xdg', 'ZSH_TMUX_AUTOSTART': 'false', 'XDG_DATA_DIRS': '/usr/share/ubuntu:/usr/share/gnome:/home/dimi/.local/share/flatpak/exports/share:/var/lib/flatpak/exports/share:/usr/local/share/:/usr/share/:/var/lib/snapd/desktop', 'PYTHONPATH': '/home/dimi/ros2_robot_ws/install/create_msgs/lib/python3.12/site-packages:/home/dimi/robot_ws/install/home_robot/lib/python3.12/site-packages:/home/dimi/robot_ws/install/interbotix_perception_msgs/lib/python3.12/site-packages:/home/dimi/robot_ws/install/explore_lite_msgs/lib/python3.12/site-packages:/home/dimi/robot_ws/build/easy_handeye2:/home/dimi/robot_ws/install/easy_handeye2/lib/python3.12/site-packages:/home/dimi/robot_ws/install/easy_handeye2_msgs/lib/python3.12/site-packages:/opt/ros/jazzy/lib/python3.12/site-packages', 'LC_NUMERIC': 'C.UTF-8', 'LC_PAPER': 'C.UTF-8', 'COLCON': '1', 'MEMORY_PRESSURE_WRITE': 'c29tZSAyMDAwMDAgMjAwMDAwMAA=', 'CMAKE_PREFIX_PATH': '/home/dimi/ros2_robot_ws/install/sllidar_ros2:/home/dimi/ros2_robot_ws/install/create_robot:/home/dimi/ros2_robot_ws/install/create_bringup:/home/dimi/ros2_robot_ws/install/create_driver:/home/dimi/ros2_robot_ws/install/libcreate:/home/dimi/ros2_robot_ws/install/create_msgs:/home/dimi/ros2_robot_ws/install/create_description:/home/dimi/robot_ws/install/roarm_moveit:/home/dimi/robot_ws/install/roarm_description:/home/dimi/robot_ws/install/home_robot:/home/dimi/robot_ws/install/interbotix_perception_pipelines:/home/dimi/robot_ws/install/interbotix_perception_msgs:/home/dimi/robot_ws/install/explore_lite:/home/dimi/robot_ws/install/explore_lite_msgs:/home/dimi/robot_ws/install/easy_handeye2_msgs:/home/dimi/roomba_ws/install/sllidar_ros2:/opt/ros/jazzy/opt/gz_sim_vendor:/opt/ros/jazzy/opt/gz_sensors_vendor:/opt/ros/jazzy/opt/gz_physics_vendor:/opt/ros/jazzy/opt/sdformat_vendor:/opt/ros/jazzy/opt/gz_gui_vendor:/opt/ros/jazzy/opt/gz_transport_vendor:/opt/ros/jazzy/opt/gz_rendering_vendor:/opt/ros/jazzy/opt/gz_plugin_vendor:/opt/ros/jazzy/opt/gz_fuel_tools_vendor:/opt/ros/jazzy/opt/gz_msgs_vendor:/opt/ros/jazzy/opt/gz_common_vendor:/opt/ros/jazzy/opt/gz_math_vendor:/opt/ros/jazzy/opt/gz_utils_vendor:/opt/ros/jazzy/opt/gz_tools_vendor:/opt/ros/jazzy/opt/gz_ogre_next_vendor:/opt/ros/jazzy/opt/gz_dartsim_vendor:/opt/ros/jazzy/opt/gz_cmake_vendor:/home/dimi/robot_ws/install/easy_handeye2:/opt/ros/jazzy'}), 'shell': False}
+[1.301505] (-) TimerEvent: {}
+[1.364878] (home_robot) StdoutLine: {'line': b'Built target ament_cmake_python_symlink_home_robot\n'}
+[1.401698] (-) TimerEvent: {}
+[1.501905] (-) TimerEvent: {}
+[1.602094] (-) TimerEvent: {}
+[1.620430] (home_robot) StdoutLine: {'line': b'running egg_info\n'}
+[1.622510] (home_robot) StdoutLine: {'line': b'creating home_robot.egg-info\n'}
+[1.702183] (-) TimerEvent: {}
+[1.724467] (home_robot) StdoutLine: {'line': b'writing home_robot.egg-info/PKG-INFO\n'}
+[1.724979] (home_robot) StdoutLine: {'line': b'writing dependency_links to home_robot.egg-info/dependency_links.txt\n'}
+[1.725078] (home_robot) StdoutLine: {'line': b'writing top-level names to home_robot.egg-info/top_level.txt\n'}
+[1.725140] (home_robot) StdoutLine: {'line': b"writing manifest file 'home_robot.egg-info/SOURCES.txt'\n"}
+[1.793032] (home_robot) StdoutLine: {'line': b"reading manifest file 'home_robot.egg-info/SOURCES.txt'\n"}
+[1.794050] (home_robot) StdoutLine: {'line': b"writing manifest file 'home_robot.egg-info/SOURCES.txt'\n"}
+[1.802264] (-) TimerEvent: {}
+[1.875178] (home_robot) StdoutLine: {'line': b'Built target ament_cmake_python_build_home_robot_egg\n'}
+[1.885300] (home_robot) CommandEnded: {'returncode': 0}
+[1.886069] (home_robot) JobProgress: {'identifier': 'home_robot', 'progress': 'install'}
+[1.896148] (home_robot) Command: {'cmd': ['/usr/bin/cmake', '--install', '/home/dimi/robot_ws/src/home_robot/build/home_robot'], 'cwd': '/home/dimi/robot_ws/src/home_robot/build/home_robot', 'env': OrderedDict({'LESSOPEN': '| /usr/bin/lesspipe %s', 'CODEX_CI': '1', 'LANGUAGE': 'el_GR:el', 'USER': 'dimi', 'LC_TIME': 'C.UTF-8', 'CODEX_INTERNAL_ORIGINATOR_OVERRIDE': 'Codex Desktop', 'GZ_CONFIG_PATH': '/opt/ros/jazzy/opt/gz_sim_vendor/share/gz:/opt/ros/jazzy/opt/sdformat_vendor/share/gz:/opt/ros/jazzy/opt/gz_gui_vendor/share/gz:/opt/ros/jazzy/opt/gz_transport_vendor/share/gz:/opt/ros/jazzy/opt/gz_rendering_vendor/share/gz:/opt/ros/jazzy/opt/gz_plugin_vendor/share/gz:/opt/ros/jazzy/opt/gz_fuel_tools_vendor/share/gz:/opt/ros/jazzy/opt/gz_msgs_vendor/share/gz:/opt/ros/jazzy/opt/gz_common_vendor/share/gz', 'CODEX_SHELL': '1', 'XDG_SESSION_TYPE': 'wayland', 'LOG_FORMAT': 'json', 'SHLVL': '1', 'LD_LIBRARY_PATH': '/home/dimi/ros2_robot_ws/install/libcreate/lib:/home/dimi/ros2_robot_ws/install/create_msgs/lib:/home/dimi/robot_ws/install/interbotix_perception_msgs/lib:/home/dimi/robot_ws/install/explore_lite_msgs/lib:/home/dimi/robot_ws/install/easy_handeye2_msgs/lib:/opt/ros/jazzy/opt/gz_sim_vendor/lib:/opt/ros/jazzy/opt/gz_sensors_vendor/lib:/opt/ros/jazzy/opt/gz_physics_vendor/lib:/opt/ros/jazzy/opt/sdformat_vendor/lib:/opt/ros/jazzy/opt/rviz_ogre_vendor/lib:/opt/ros/jazzy/lib/x86_64-linux-gnu:/opt/ros/jazzy/opt/gz_gui_vendor/lib:/opt/ros/jazzy/opt/gz_transport_vendor/lib:/opt/ros/jazzy/opt/gz_rendering_vendor/lib:/opt/ros/jazzy/opt/gz_plugin_vendor/lib:/opt/ros/jazzy/opt/gz_fuel_tools_vendor/lib:/opt/ros/jazzy/opt/gz_msgs_vendor/lib:/opt/ros/jazzy/opt/gz_common_vendor/lib:/opt/ros/jazzy/opt/gz_math_vendor/lib:/opt/ros/jazzy/opt/gz_utils_vendor/lib:/opt/ros/jazzy/opt/gz_tools_vendor/lib:/opt/ros/jazzy/opt/gz_ogre_next_vendor/lib:/opt/ros/jazzy/opt/gz_dartsim_vendor/lib:/opt/ros/jazzy/opt/gz_cmake_vendor/lib:/opt/ros/jazzy/lib', 'HOME': '/home/dimi', 'CHROME_DESKTOP': 'chatgpt.desktop', 'CYCLONEDDS_URI': 'file:///home/dimi/.config/cyclonedds.xml', 'DISABLE_AUTO_UPDATE': 'true', 'DESKTOP_SESSION': 'ubuntu', 'GIO_LAUNCHED_DESKTOP_FILE': '/home/dimi/.config/autostart/chatgpt.desktop', 'ROS_PYTHON_VERSION': '3', 'GNOME_SHELL_SESSION_MODE': 'ubuntu', 'GTK_MODULES': 'gail:atk-bridge', 'PAGER': 'cat', 'LC_MONETARY': 'C.UTF-8', 'MANAGERPID': '1793', 'LC_CTYPE': 'C.UTF-8', 'SYSTEMD_EXEC_PID': '2114', 'IM_CONFIG_CHECK_ENV': '1', 'GSM_SKIP_SSH_AGENT_WORKAROUND': 'true', 'NO_COLOR': '1', 'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/run/user/1000/bus', 'COLORTERM': '', 'GIO_LAUNCHED_DESKTOP_FILE_PID': '2441', 'DEBUGINFOD_URLS': 'https://debuginfod.ubuntu.com', 'IM_CONFIG_PHASE': '1', 'WAYLAND_DISPLAY': 'wayland-0', 'COLCON_PREFIX_PATH': '/home/dimi/robot_ws/install:/home/dimi/ros2_robot_ws/install:/home/dimi/roomba_ws/install', 'ROS_DISTRO': 'jazzy', 'ZSH_TMUX_AUTOSTARTED': 'true', 'LOGNAME': 'dimi', 'DESKTOP_AUTOSTART_ID': '102a96377f2f37f15c178742230149109300000021140016', 'JOURNAL_STREAM': '10:10237', '_': '/usr/bin/colcon', 'ROS_VERSION': '2', 'PKG_CONFIG_PATH': '/home/dimi/ros2_robot_ws/install/libcreate/lib/x86_64-linux-gnu/pkgconfig:/home/dimi/ros2_robot_ws/install/libcreate/lib/pkgconfig', 'MEMORY_PRESSURE_WATCH': '/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/app-gnome\\x2dsession\\x2dmanager.slice/gnome-session-manager@ubuntu.service/memory.pressure', 'XDG_SESSION_CLASS': 'user', 'RUST_LOG': 'warn', 'USERNAME': 'dimi', 'TERM': 'dumb', 'GNOME_DESKTOP_SESSION_ID': 'this-is-deprecated', 'FC_FONTATIONS': '1', 'PATH': '/home/dimi/.local/bin:/home/dimi/bin:/home/dimi/.codex/tmp/arg0/codex-arg0PvXm3Q:/home/dimi/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override:/home/dimi/.local/bin:/home/dimi/bin:/home/dimi/bin:/opt/ros/jazzy/opt/gz_msgs_vendor/bin:/opt/ros/jazzy/opt/gz_tools_vendor/bin:/opt/ros/jazzy/opt/gz_ogre_next_vendor/bin:/opt/ros/jazzy/bin:/home/dimi/.local/bin:/home/dimi/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/snap/bin:/home/dimi/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback:/usr/lib/chatgpt/resources', 'SESSION_MANAGER': 'local/dimi-Default-string:@/tmp/.ICE-unix/2114,unix/dimi-Default-string:/tmp/.ICE-unix/2114', 'CODEX_SESSION_ID': '01a02ac9-4811-7312-869c-bf08a22ad75d', 'INVOCATION_ID': 'acc6534b8a5440689c15f6eca04a0965', 'PAPERSIZE': 'a4', 'XDG_MENU_PREFIX': 'gnome-', 'LC_ADDRESS': 'C.UTF-8', 'GNOME_SETUP_DISPLAY': ':1', 'XDG_RUNTIME_DIR': '/run/user/1000', 'GDK_BACKEND': 'x11', 'DISPLAY': ':0', 'LANG': 'C.UTF-8', 'XDG_CURRENT_DESKTOP': 'ubuntu:GNOME', 'LC_TELEPHONE': 'C.UTF-8', 'RMW_IMPLEMENTATION': 'rmw_cyclonedds_cpp', 'XMODIFIERS': '@im=ibus', 'GH_PAGER': 'cat', 'XDG_SESSION_DESKTOP': 'ubuntu', 'XAUTHORITY': '/run/user/1000/.mutter-Xwaylandauth.KGKGU3', 'LS_COLORS': '', 'SSH_AUTH_SOCK': '/run/user/1000/keyring/ssh', 'LEMONADE_HOST': '0.0.0.0', 'AMENT_PREFIX_PATH': '/home/dimi/ros2_robot_ws/install/sllidar_ros2:/home/dimi/ros2_robot_ws/install/create_robot:/home/dimi/ros2_robot_ws/install/create_bringup:/home/dimi/ros2_robot_ws/install/create_driver:/home/dimi/ros2_robot_ws/install/create_msgs:/home/dimi/ros2_robot_ws/install/create_description:/home/dimi/robot_ws/install/roarm_moveit:/home/dimi/robot_ws/install/roarm_description:/home/dimi/robot_ws/install/home_robot:/home/dimi/robot_ws/install/interbotix_perception_pipelines:/home/dimi/robot_ws/install/interbotix_perception_msgs:/home/dimi/robot_ws/install/explore_lite:/home/dimi/robot_ws/install/explore_lite_msgs:/home/dimi/robot_ws/install/easy_handeye2:/home/dimi/robot_ws/install/easy_handeye2_msgs:/home/dimi/roomba_ws/install/sllidar_ros2:/opt/ros/jazzy', 'LC_MESSAGES': 'el_GR.UTF-8', 'SHELL': '/bin/bash', 'LC_NAME': 'C.UTF-8', 'QT_ACCESSIBILITY': '1', 'NO_AT_BRIDGE': '1', 'GDMSESSION': 'ubuntu', 'LESSCLOSE': '/usr/bin/lesspipe %s %s', 'CODEX_THREAD_ID': '01a02ac9-4811-7312-869c-bf08a22ad75d', 'LC_MEASUREMENT': 'C.UTF-8', 'LC_IDENTIFICATION': 'C.UTF-8', 'ROS_AUTOMATIC_DISCOVERY_RANGE': 'SUBNET', 'GIT_PAGER': 'cat', 'QT_IM_MODULE': 'ibus', 'PWD': '/home/dimi/robot_ws/src/home_robot/build/home_robot', 'LC_ALL': 'C.UTF-8', 'XDG_CONFIG_DIRS': '/etc/xdg/xdg-ubuntu:/etc/xdg', 'ZSH_TMUX_AUTOSTART': 'false', 'XDG_DATA_DIRS': '/usr/share/ubuntu:/usr/share/gnome:/home/dimi/.local/share/flatpak/exports/share:/var/lib/flatpak/exports/share:/usr/local/share/:/usr/share/:/var/lib/snapd/desktop', 'PYTHONPATH': '/home/dimi/ros2_robot_ws/install/create_msgs/lib/python3.12/site-packages:/home/dimi/robot_ws/install/home_robot/lib/python3.12/site-packages:/home/dimi/robot_ws/install/interbotix_perception_msgs/lib/python3.12/site-packages:/home/dimi/robot_ws/install/explore_lite_msgs/lib/python3.12/site-packages:/home/dimi/robot_ws/build/easy_handeye2:/home/dimi/robot_ws/install/easy_handeye2/lib/python3.12/site-packages:/home/dimi/robot_ws/install/easy_handeye2_msgs/lib/python3.12/site-packages:/opt/ros/jazzy/lib/python3.12/site-packages', 'LC_NUMERIC': 'C.UTF-8', 'LC_PAPER': 'C.UTF-8', 'COLCON': '1', 'MEMORY_PRESSURE_WRITE': 'c29tZSAyMDAwMDAgMjAwMDAwMAA=', 'CMAKE_PREFIX_PATH': '/home/dimi/ros2_robot_ws/install/sllidar_ros2:/home/dimi/ros2_robot_ws/install/create_robot:/home/dimi/ros2_robot_ws/install/create_bringup:/home/dimi/ros2_robot_ws/install/create_driver:/home/dimi/ros2_robot_ws/install/libcreate:/home/dimi/ros2_robot_ws/install/create_msgs:/home/dimi/ros2_robot_ws/install/create_description:/home/dimi/robot_ws/install/roarm_moveit:/home/dimi/robot_ws/install/roarm_description:/home/dimi/robot_ws/install/home_robot:/home/dimi/robot_ws/install/interbotix_perception_pipelines:/home/dimi/robot_ws/install/interbotix_perception_msgs:/home/dimi/robot_ws/install/explore_lite:/home/dimi/robot_ws/install/explore_lite_msgs:/home/dimi/robot_ws/install/easy_handeye2_msgs:/home/dimi/roomba_ws/install/sllidar_ros2:/opt/ros/jazzy/opt/gz_sim_vendor:/opt/ros/jazzy/opt/gz_sensors_vendor:/opt/ros/jazzy/opt/gz_physics_vendor:/opt/ros/jazzy/opt/sdformat_vendor:/opt/ros/jazzy/opt/gz_gui_vendor:/opt/ros/jazzy/opt/gz_transport_vendor:/opt/ros/jazzy/opt/gz_rendering_vendor:/opt/ros/jazzy/opt/gz_plugin_vendor:/opt/ros/jazzy/opt/gz_fuel_tools_vendor:/opt/ros/jazzy/opt/gz_msgs_vendor:/opt/ros/jazzy/opt/gz_common_vendor:/opt/ros/jazzy/opt/gz_math_vendor:/opt/ros/jazzy/opt/gz_utils_vendor:/opt/ros/jazzy/opt/gz_tools_vendor:/opt/ros/jazzy/opt/gz_ogre_next_vendor:/opt/ros/jazzy/opt/gz_dartsim_vendor:/opt/ros/jazzy/opt/gz_cmake_vendor:/home/dimi/robot_ws/install/easy_handeye2:/opt/ros/jazzy'}), 'shell': False}
+[1.902343] (-) TimerEvent: {}
+[1.905050] (home_robot) StdoutLine: {'line': b'-- Install configuration: ""\n'}
+[1.905498] (home_robot) StdoutLine: {'line': b'-- Execute custom install script\n'}
+[1.905711] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/environment/pythonpath.sh\n'}
+[1.915309] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/environment/pythonpath.dsv\n'}
+[1.930750] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot-0.1.0-py3.12.egg-info/PKG-INFO\n'}
+[1.940862] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot-0.1.0-py3.12.egg-info/SOURCES.txt\n'}
+[1.954351] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot-0.1.0-py3.12.egg-info/dependency_links.txt\n'}
+[1.964124] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot-0.1.0-py3.12.egg-info/top_level.txt\n'}
+[1.975821] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/__init__.py\n'}
+[1.988452] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/acoustic_map.py\n'}
+[2.000281] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/api_keys.py\n'}
+[2.002423] (-) TimerEvent: {}
+[2.009222] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/arm_motion.py\n'}
+[2.023321] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/arm_settings.py\n'}
+[2.032990] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/collision_skirt.py\n'}
+[2.042649] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/compass.py\n'}
+[2.058156] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/dashboard_i18n.py\n'}
+[2.073682] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/desktop.py\n'}
+[2.091220] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/diagnostics.py\n'}
+[2.101700] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/dock_geometry.py\n'}
+[2.102483] (-) TimerEvent: {}
+[2.109410] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/echo.py\n'}
+[2.117232] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/episodic.py\n'}
+[2.127967] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/face_identity.py\n'}
+[2.141339] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/fall_detect.py\n'}
+[2.155524] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/fetch_planner.py\n'}
+[2.165220] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/gesture.py\n'}
+[2.173780] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/gesture_bindings.py\n'}
+[2.186854] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/gesture_vocab.py\n'}
+[2.198676] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/grasp_geometry.py\n'}
+[2.202604] (-) TimerEvent: {}
+[2.208697] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/hand_gestures.py\n'}
+[2.221616] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/ir_homing.py\n'}
+[2.231601] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/joy_cmd_gate.py\n'}
+[2.240626] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/keepout_files.py\n'}
+[2.253889] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/keepout_toggle.py\n'}
+[2.268629] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/llm_quota.py\n'}
+[2.278378] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/map_straighten.py\n'}
+[2.287919] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/map_walls3d.py\n'}
+[2.298150] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/mic_settings.py\n'}
+[2.302684] (-) TimerEvent: {}
+[2.306947] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/motion_confirm.py\n'}
+[2.317079] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nerf.py\n'}
+[2.335921] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/acoustic_map_node.py\n'}
+[2.348476] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/apriltag_relocalizer.py\n'}
+[2.362922] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/arm_driver.py\n'}
+[2.371821] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/arm_joy_node.py\n'}
+[2.381655] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/arm_moveit_bridge.py\n'}
+[2.395995] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/arm_scene_obstacles.py\n'}
+[2.402753] (-) TimerEvent: {}
+[2.405624] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/calibrate_odom.py\n'}
+[2.416215] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/camera_watchdog_node.py\n'}
+[2.428495] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/cluster_detector_node.py\n'}
+[2.437340] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/diarization_node.py\n'}
+[2.447772] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/doa_node.py\n'}
+[2.462976] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/echo_node.py\n'}
+[2.472718] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/episodic_memory_node.py\n'}
+[2.482478] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/explore_manager_node.py\n'}
+[2.493290] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/face_detection_node.py\n'}
+[2.501330] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/face_identity_node.py\n'}
+[2.502819] (-) TimerEvent: {}
+[2.508246] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/fall_monitor_node.py\n'}
+[2.514917] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/gesture_node.py\n'}
+[2.522752] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/global_localizer_node.py\n'}
+[2.537069] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/goal_pose_bridge.py\n'}
+[2.555233] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/goto_room.py\n'}
+[2.571878] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/hand_gesture_node.py\n'}
+[2.582110] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/imu_node.py\n'}
+[2.596405] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/joy_cmd_gate_node.py\n'}
+[2.602892] (-) TimerEvent: {}
+[2.606967] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/joystick_estop_node.py\n'}
+[2.620273] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/llm_bridge_node.py\n'}
+[2.630920] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/mission_executor_node.py\n'}
+[2.640202] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/nerf_capture_node.py\n'}
+[2.653089] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/object_detector.py\n'}
+[2.666557] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/object_memory_node.py\n'}
+[2.678174] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/obstacle_prediction_node.py\n'}
+[2.690490] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/obstacle_safety_node.py\n'}
+[2.699348] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/odom_tf_broadcaster.py\n'}
+[2.702957] (-) TimerEvent: {}
+[2.706962] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/open_vocab_detector.py\n'}
+[2.714105] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/people_node.py\n'}
+[2.722204] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/person_follower_node.py\n'}
+[2.734843] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/pick_place_node.py\n'}
+[2.747049] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/pose_node.py\n'}
+[2.760739] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/pose_saver_node.py\n'}
+[2.769701] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/proactive_observer_node.py\n'}
+[2.778060] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/rag_memory_node.py\n'}
+[2.796844] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/record_location.py\n'}
+[2.803055] (-) TimerEvent: {}
+[2.808070] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/recovery_manager_node.py\n'}
+[2.824202] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/room_markers_node.py\n'}
+[2.834683] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/room_tour.py\n'}
+[2.845082] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/roomba_driver.py\n'}
+[2.858217] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/self_diagnosis_node.py\n'}
+[2.871230] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/semantic_costmap_node.py\n'}
+[2.881510] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/situational_awareness_node.py\n'}
+[2.892640] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/slip_monitor_node.py\n'}
+[2.900743] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/sound_event_node.py\n'}
+[2.903111] (-) TimerEvent: {}
+[2.907950] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/stt_node.py\n'}
+[2.923753] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/system_metrics_node.py\n'}
+[2.935277] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/tactile_node.py\n'}
+[2.945752] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/task_planner_node.py\n'}
+[2.957049] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/tracker_node.py\n'}
+[2.966155] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/trail_publisher_node.py\n'}
+[2.973744] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/tts_node.py\n'}
+[2.984608] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/vision_node.py\n'}
+[3.003230] (-) TimerEvent: {}
+[3.003461] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/wake_word_node.py\n'}
+[3.015999] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/web_dashboard_node.py\n'}
+[3.031423] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/yolo11n-pose.pt\n'}
+[3.041276] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/yolo11n-seg.pt\n'}
+[3.053691] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/yolo11n.pt\n'}
+[3.067663] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/yolo11n_int8.onnx\n'}
+[3.076944] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/yolo11n_pose_int8.onnx\n'}
+[3.085352] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/yolo11n_seg_int8.onnx\n'}
+[3.095313] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/yunet_face_2023mar.onnx\n'}
+[3.103305] (-) TimerEvent: {}
+[3.103653] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/yunet_int8.onnx\n'}
+[3.111487] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/object_memory.py\n'}
+[3.122990] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/obstacle_prediction.py\n'}
+[3.135177] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/pcl_clusters.py\n'}
+[3.143799] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/people.py\n'}
+[3.151672] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/proactive.py\n'}
+[3.161074] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/room_files.py\n'}
+[3.171171] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/room_segment.py\n'}
+[3.179373] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/routines.py\n'}
+[3.193357] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/safety_settings.py\n'}
+[3.203406] (-) TimerEvent: {}
+[3.205310] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/servo_filter.py\n'}
+[3.213394] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/simple_commands.py\n'}
+[3.222520] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/slip_detect.py\n'}
+[3.234370] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/slip_map.py\n'}
+[3.243931] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/sort_planner.py\n'}
+[3.263011] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/sound_events.py\n'}
+[3.272855] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/speaker_fusion.py\n'}
+[3.280691] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/status_query.py\n'}
+[3.288240] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/stop_command.py\n'}
+[3.298178] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/stt_postprocess.py\n'}
+[3.303480] (-) TimerEvent: {}
+[3.306799] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/system_settings.py\n'}
+[3.322245] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/tactile.py\n'}
+[3.336082] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/tool_router.py\n'}
+[3.348468] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/tts_fallback.py\n'}
+[3.365690] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/vocabulary.py\n'}
+[3.374906] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/voice_gate.py\n'}
+[3.383032] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/roomba_driver.py\n'}
+[3.391530] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/object_detector.py\n'}
+[3.403594] (-) TimerEvent: {}
+[3.405155] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/camera_watchdog_node.py\n'}
+[3.417542] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/obstacle_safety_node.py\n'}
+[3.432187] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/arm_driver.py\n'}
+[3.441494] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/arm_moveit_bridge.py\n'}
+[3.454729] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/arm_scene_obstacles.py\n'}
+[3.468945] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/pick_place_node.py\n'}
+[3.478259] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/cluster_detector_node.py\n'}
+[3.491424] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/system_metrics_node.py\n'}
+[3.499958] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/joystick_estop_node.py\n'}
+[3.503651] (-) TimerEvent: {}
+[3.507339] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/joy_cmd_gate_node.py\n'}
+[3.520477] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/arm_joy_node.py\n'}
+[3.532554] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/wake_word_node.py\n'}
+[3.542046] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/stt_node.py\n'}
+[3.557852] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/llm_bridge_node.py\n'}
+[3.572914] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/vision_node.py\n'}
+[3.580991] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/tts_node.py\n'}
+[3.588863] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/task_planner_node.py\n'}
+[3.602685] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/calibrate_odom.py\n'}
+[3.603733] (-) TimerEvent: {}
+[3.612798] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/imu_node.py\n'}
+[3.626820] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/rag_memory_node.py\n'}
+[3.636236] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/doa_node.py\n'}
+[3.645800] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/person_follower_node.py\n'}
+[3.657908] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/apriltag_relocalizer.py\n'}
+[3.670459] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/tracker_node.py\n'}
+[3.681513] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/diarization_node.py\n'}
+[3.693582] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/recovery_manager_node.py\n'}
+[3.701289] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/obstacle_prediction_node.py\n'}
+[3.703799] (-) TimerEvent: {}
+[3.709048] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/fall_monitor_node.py\n'}
+[3.723084] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/situational_awareness_node.py\n'}
+[3.735154] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/mission_executor_node.py\n'}
+[3.744354] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/semantic_costmap_node.py\n'}
+[3.757290] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/object_memory_node.py\n'}
+[3.766372] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/face_detection_node.py\n'}
+[3.774945] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/pose_node.py\n'}
+[3.791237] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/gesture_node.py\n'}
+[3.803915] (-) TimerEvent: {}
+[3.806721] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/proactive_observer_node.py\n'}
+[3.820606] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/episodic_memory_node.py\n'}
+[3.834990] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/open_vocab_detector.py\n'}
+[3.844105] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/sound_event_node.py\n'}
+[3.856147] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/face_identity_node.py\n'}
+[3.868811] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/self_diagnosis_node.py\n'}
+[3.878099] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/slip_monitor_node.py\n'}
+[3.887235] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/hand_gesture_node.py\n'}
+[3.898470] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/people_node.py\n'}
+[3.903996] (-) TimerEvent: {}
+[3.906963] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/acoustic_map_node.py\n'}
+[3.916191] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/tactile_node.py\n'}
+[3.931633] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/echo_node.py\n'}
+[3.941185] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/nerf_capture_node.py\n'}
+[3.949819] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/goto_room.py\n'}
+[3.957732] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/room_tour.py\n'}
+[3.969336] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/record_location.py\n'}
+[3.978206] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/collect_keepout_clicks.py\n'}
+[3.990273] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/pose_saver_node.py\n'}
+[4.002314] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/room_markers_node.py\n'}
+[4.004086] (-) TimerEvent: {}
+[4.012167] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/global_localizer_node.py\n'}
+[4.026258] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/explore_manager_node.py\n'}
+[4.035466] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/web_dashboard_node.py\n'}
+[4.046452] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/goal_pose_bridge.py\n'}
+[4.066433] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/odom_tf_broadcaster.py\n'}
+[4.076670] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/trail_publisher_node.py\n'}
+[4.088765] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/yolo11n.pt\n'}
+[4.100527] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/yolo11n-seg.pt\n'}
+[4.104150] (-) TimerEvent: {}
+[4.108574] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/yolo11n-pose.pt\n'}
+[4.119589] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/yolo11n_int8.onnx\n'}
+[4.133129] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/yolo11n_pose_int8.onnx\n'}
+[4.142529] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/yolo11n_seg_int8.onnx\n'}
+[4.150196] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/lib/home_robot/yunet_int8.onnx\n'}
+[4.159849] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/__pycache__/arm_moveit.launch.cpython-312.pyc\n'}
+[4.170573] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/__pycache__/bringup.launch.cpython-312.pyc\n'}
+[4.179195] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/__pycache__/handeye_calibrate.launch.cpython-312.pyc\n'}
+[4.192903] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/__pycache__/lidar.launch.cpython-312.pyc\n'}
+[4.204257] (-) TimerEvent: {}
+[4.205012] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/__pycache__/localize.launch.cpython-312.pyc\n'}
+[4.214076] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/__pycache__/map_mode_localize.launch.cpython-312.pyc\n'}
+[4.221984] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/__pycache__/map_mode_slam.launch.cpython-312.pyc\n'}
+[4.233565] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/__pycache__/perception_clusters.launch.cpython-312.pyc\n'}
+[4.243867] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/__pycache__/rtabmap.launch.cpython-312.pyc\n'}
+[4.257275] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/__pycache__/sim.launch.cpython-312.pyc\n'}
+[4.271634] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/__pycache__/slam_only.launch.cpython-312.pyc\n'}
+[4.281394] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/__pycache__/view_map.launch.cpython-312.pyc\n'}
+[4.290271] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/arm_moveit.launch.py\n'}
+[4.300537] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/bringup.launch.py\n'}
+[4.304331] (-) TimerEvent: {}
+[4.308530] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/handeye_calibrate.launch.py\n'}
+[4.318894] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/lidar.launch.py\n'}
+[4.333347] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/localize.launch.py\n'}
+[4.342639] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/map_mode_localize.launch.py\n'}
+[4.355933] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/map_mode_slam.launch.py\n'}
+[4.365858] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/perception_clusters.launch.py\n'}
+[4.374084] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/rtabmap.launch.py\n'}
+[4.383064] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/sim.launch.py\n'}
+[4.401825] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/slam_only.launch.py\n'}
+[4.404398] (-) TimerEvent: {}
+[4.411878] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/launch/view_map.launch.py\n'}
+[4.430311] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/99-robot-devices.rules\n'}
+[4.439363] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/apriltag.yaml\n'}
+[4.449704] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/arm_joy_ps5.yaml\n'}
+[4.466645] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/arm_model.json\n'}
+[4.476118] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/behavior_trees/navigate_to_pose_w_replanning_and_recovery.xml\n'}
+[4.488475] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/ekf.yaml\n'}
+[4.497795] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/explore.yaml\n'}
+[4.504476] (-) TimerEvent: {}
+[4.505095] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/keepout_mask.pgm\n'}
+[4.512486] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/keepout_mask.yaml\n'}
+[4.524691] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/keepout_zones.yaml\n'}
+[4.536573] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/lidar_arm_filter.yaml\n'}
+[4.545304] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/locations.yaml\n'}
+[4.556848] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/lukas.rviz\n'}
+[4.565906] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/models/hey_robot.onnx\n'}
+[4.574621] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/models/piper/el_GR-rapunzelina-low.onnx\n'}
+[4.587783] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/models/piper/el_GR-rapunzelina-low.onnx.json\n'}
+[4.604254] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/nav2_params.yaml\n'}
+[4.604539] (-) TimerEvent: {}
+[4.614473] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/pcl_filter_params.yaml\n'}
+[4.626722] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/robot.rviz\n'}
+[4.638636] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/robot_scan.glb\n'}
+[4.648051] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/robot_scan_uncropped.glb\n'}
+[4.662365] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/sort_rules.yaml\n'}
+[4.675641] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/config/teleop_twist_joy_ps5.yaml\n'}
+[4.690770] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/RUNBOOK_remap.md\n'}
+[4.699531] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/RUNBOOK_spin_retest.md\n'}
+[4.704621] (-) TimerEvent: {}
+[4.707451] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/apply_handeye_calibration.cpython-312.pyc\n'}
+[4.716138] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/auto_rooms.cpython-312.pyc\n'}
+[4.731408] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/brc_line_probe.cpython-312.pyc\n'}
+[4.741405] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/build_arm_model.cpython-312.pyc\n'}
+[4.749464] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/bump_test.cpython-312-pytest-7.4.4.pyc\n'}
+[4.757473] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/bump_test.cpython-312.pyc\n'}
+[4.768496] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/calibrate_arm_base.cpython-312.pyc\n'}
+[4.777096] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/calibrate_odom.cpython-312.pyc\n'}
+[4.789809] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/check_gemini_quota.cpython-312.pyc\n'}
+[4.802449] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/collect_keepout_clicks.cpython-312.pyc\n'}
+[4.804690] (-) TimerEvent: {}
+[4.812125] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/crop_robot_scan.cpython-312.pyc\n'}
+[4.826097] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/derive_dock_pose.cpython-312.pyc\n'}
+[4.835562] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/doorway_probe.cpython-312.pyc\n'}
+[4.845187] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/draw_keepout.cpython-312.pyc\n'}
+[4.853589] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/drive_to_open.cpython-312.pyc\n'}
+[4.863888] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/fetch_sim.cpython-312.pyc\n'}
+[4.876903] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/fetch_sim_gazebo.cpython-312.pyc\n'}
+[4.895945] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/hand_eye_probe.cpython-312.pyc\n'}
+[4.904796] (-) TimerEvent: {}
+[4.908176] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/ir_diagnose.cpython-312.pyc\n'}
+[4.919551] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/localize_in_room.cpython-312.pyc\n'}
+[4.934101] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/make_room_mask.cpython-312.pyc\n'}
+[4.942546] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/map_clearance.cpython-312.pyc\n'}
+[4.953551] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/map_downsample.cpython-312.pyc\n'}
+[4.964565] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/map_to_world.cpython-312.pyc\n'}
+[4.972425] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/measure_camera_pitch.cpython-312.pyc\n'}
+[4.980745] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/measure_person_distance.cpython-312.pyc\n'}
+[4.994616] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/nerf_smoke_test.cpython-312.pyc\n'}
+[5.004899] (-) TimerEvent: {}
+[5.006033] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/passive_arm_limits.cpython-312.pyc\n'}
+[5.016329] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/path_block.cpython-312.pyc\n'}
+[5.029862] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/ply_to_map.cpython-312.pyc\n'}
+[5.038494] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/power_blackbox.cpython-312.pyc\n'}
+[5.048037] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/roomba_awake.cpython-312.pyc\n'}
+[5.064663] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/roomba_keepalive.cpython-312.pyc\n'}
+[5.075229] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/sim_place_objects.cpython-312.pyc\n'}
+[5.086479] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/straighten_map_display.cpython-312.pyc\n'}
+[5.102997] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/tidy_sim.cpython-312.pyc\n'}
+[5.104960] (-) TimerEvent: {}
+[5.112105] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/tool_ab.cpython-312.pyc\n'}
+[5.124930] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/tool_multi.cpython-312.pyc\n'}
+[5.137284] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/tool_repeat.cpython-312.pyc\n'}
+[5.146449] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/train_nerf.cpython-312.pyc\n'}
+[5.159652] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/__pycache__/usdz_to_glb.cpython-312.pyc\n'}
+[5.171309] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/apply_handeye_calibration.py\n'}
+[5.178794] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/apply_keepout_toggle.sh\n'}
+[5.185812] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/apply_skirt_margin.sh\n'}
+[5.195693] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/auto_rooms.py\n'}
+[5.205058] (-) TimerEvent: {}
+[5.208518] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/brc_line_probe.py\n'}
+[5.223176] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/build_arm_model.py\n'}
+[5.233861] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/bump_test.py\n'}
+[5.243747] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/calibrate_arm_base.py\n'}
+[5.257720] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/calibrate_odom.py\n'}
+[5.270729] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/check_gemini_quota.py\n'}
+[5.280738] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/collect_keepout_clicks.py\n'}
+[5.292713] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/crop_robot_scan.py\n'}
+[5.300964] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/derive_dock_pose.py\n'}
+[5.305126] (-) TimerEvent: {}
+[5.308332] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/doorway_probe.py\n'}
+[5.318233] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/draw_keepout.py\n'}
+[5.338017] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/drive_to_open.py\n'}
+[5.349759] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/ensure_nav_active.sh\n'}
+[5.366849] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/fetch_perception_models.sh\n'}
+[5.375600] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/fetch_sim.py\n'}
+[5.386135] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/fetch_sim_gazebo.py\n'}
+[5.401648] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/fetch_tts_fallback.sh\n'}
+[5.405197] (-) TimerEvent: {}
+[5.412610] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/fetch_vendored.sh\n'}
+[5.425645] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/gui_session.sh\n'}
+[5.436239] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/hand_eye_probe.py\n'}
+[5.445559] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/install_power_smooth.sh\n'}
+[5.458097] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/install_usb_power.sh\n'}
+[5.473139] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/ir_diagnose.py\n'}
+[5.486154] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/localize_in_room.py\n'}
+[5.498413] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/make_room_mask.py\n'}
+[5.505298] (-) TimerEvent: {}
+[5.507463] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/map_clearance.py\n'}
+[5.516830] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/map_downsample.py\n'}
+[5.537370] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/map_session.sh\n'}
+[5.549792] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/map_to_world.py\n'}
+[5.568396] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/measure_camera_pitch.py\n'}
+[5.577971] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/measure_person_distance.py\n'}
+[5.593564] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/nerf_smoke_test.py\n'}
+[5.605404] (-) TimerEvent: {}
+[5.606716] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/passive_arm_limits.py\n'}
+[5.615742] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/path_block.py\n'}
+[5.625085] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/ply_to_map.py\n'}
+[5.638469] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/power-blackbox.service\n'}
+[5.652089] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/power-smooth.service\n'}
+[5.667400] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/power_blackbox.py\n'}
+[5.678074] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/power_smooth.sh\n'}
+[5.692003] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/power_smooth_sys.sh\n'}
+[5.702190] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/preflight.sh\n'}
+[5.705460] (-) TimerEvent: {}
+[5.710670] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/quantize_npu_models.sh\n'}
+[5.725359] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/record_nav_test.sh\n'}
+[5.741312] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/reset_rtabmap.sh\n'}
+[5.759731] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/roomba_awake.py\n'}
+[5.775318] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/roomba_keepalive.py\n'}
+[5.786403] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/save_map.sh\n'}
+[5.804849] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/sim_place_objects.py\n'}
+[5.805531] (-) TimerEvent: {}
+[5.815780] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/straighten_map_display.py\n'}
+[5.831005] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/switch_map_mode.sh\n'}
+[5.841971] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/tidy_sim.py\n'}
+[5.852388] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/tool_ab.py\n'}
+[5.867788] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/tool_multi.py\n'}
+[5.878825] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/tool_repeat.py\n'}
+[5.891970] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/train_nerf.py\n'}
+[5.900157] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/usb_power.sh\n'}
+[5.905606] (-) TimerEvent: {}
+[5.907386] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/usdz_to_glb.py\n'}
+[5.916193] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/vendor_easy_handeye2.sh\n'}
+[5.931051] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/scripts/vendor_roarm_moveit.sh\n'}
+[5.941313] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/firmware/bno085_imu/bno085_imu.ino\n'}
+[5.952059] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/firmware/i2c_scan/i2c_scan.ino\n'}
+[5.971325] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/.gitkeep\n'}
+[5.981951] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/1.glb\n'}
+[5.997730] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/auto_20260818_2018.data\n'}
+[6.005717] (-) TimerEvent: {}
+[6.007804] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/auto_20260818_2018.posegraph\n'}
+[6.017433] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/d1.glb\n'}
+[6.029289] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/iphone_house.glb\n'}
+[6.038880] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/lukas.data\n'}
+[6.048702] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/lukas.posegraph\n'}
+[6.063875] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/room2.glb\n'}
+[6.074336] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/room2_doors.yaml\n'}
+[6.084431] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/room2_floorplan.jpg\n'}
+[6.095526] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/room2_floorplan.yaml\n'}
+[6.103627] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/room3.glb\n'}
+[6.105765] (-) TimerEvent: {}
+[6.111486] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/room4.data\n'}
+[6.124931] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/room4.glb\n'}
+[6.137273] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/room4.pgm\n'}
+[6.147073] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/room4.posegraph\n'}
+[6.156188] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/room4.yaml\n'}
+[6.167815] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/room4_room_colors.yaml\n'}
+[6.176307] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/room4_room_mask.png\n'}
+[6.189073] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/weights/clip/ViT-B-32.pt\n'}
+[6.205906] (-) TimerEvent: {}
+[6.207951] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/maps/yolov8s-worldv2.pt\n'}
+[6.228191] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/worlds/dimi.world\n'}
+[6.239081] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/worlds/kela3.world\n'}
+[6.248377] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/worlds/malou.world\n'}
+[6.263362] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/worlds/malou2.world\n'}
+[6.274907] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/worlds/malou2.world.objects.json\n'}
+[6.285848] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/description/robot_sim.urdf.xacro\n'}
+[6.297468] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/ament_index/resource_index/package_run_dependencies/home_robot\n'}
+[6.305581] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/ament_index/resource_index/parent_prefix_path/home_robot\n'}
+[6.305966] (-) TimerEvent: {}
+[6.313792] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/environment/ament_prefix_path.sh\n'}
+[6.328839] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/environment/ament_prefix_path.dsv\n'}
+[6.339403] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/environment/path.sh\n'}
+[6.348177] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/environment/path.dsv\n'}
+[6.361918] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/local_setup.bash\n'}
+[6.371900] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/local_setup.sh\n'}
+[6.381268] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/local_setup.zsh\n'}
+[6.400052] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/local_setup.dsv\n'}
+[6.406069] (-) TimerEvent: {}
+[6.412465] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/package.dsv\n'}
+[6.430562] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/ament_index/resource_index/packages/home_robot\n'}
+[6.441917] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/cmake/home_robotConfig.cmake\n'}
+[6.453525] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/cmake/home_robotConfig-version.cmake\n'}
+[6.470830] (home_robot) StdoutLine: {'line': b'-- Symlinking: /home/dimi/robot_ws/src/home_robot/install/home_robot/share/home_robot/package.xml\n'}
+[6.506160] (-) TimerEvent: {}
+[6.606375] (-) TimerEvent: {}
+[6.671319] (home_robot) StdoutLine: {'line': b"Listing '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot'...\n"}
+[6.671496] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/__init__.py'...\n"}
+[6.671549] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/acoustic_map.py'...\n"}
+[6.671594] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/api_keys.py'...\n"}
+[6.671633] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/arm_motion.py'...\n"}
+[6.671672] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/arm_settings.py'...\n"}
+[6.671709] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/collision_skirt.py'...\n"}
+[6.671746] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/compass.py'...\n"}
+[6.671796] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/dashboard_i18n.py'...\n"}
+[6.671835] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/desktop.py'...\n"}
+[6.671880] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/diagnostics.py'...\n"}
+[6.671918] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/dock_geometry.py'...\n"}
+[6.671956] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/echo.py'...\n"}
+[6.671994] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/episodic.py'...\n"}
+[6.672031] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/face_identity.py'...\n"}
+[6.672068] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/fall_detect.py'...\n"}
+[6.672115] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/fetch_planner.py'...\n"}
+[6.672150] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/gesture.py'...\n"}
+[6.672187] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/gesture_bindings.py'...\n"}
+[6.672223] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/gesture_vocab.py'...\n"}
+[6.672259] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/grasp_geometry.py'...\n"}
+[6.672299] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/hand_gestures.py'...\n"}
+[6.672334] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/ir_homing.py'...\n"}
+[6.672370] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/joy_cmd_gate.py'...\n"}
+[6.672405] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/keepout_files.py'...\n"}
+[6.672441] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/keepout_toggle.py'...\n"}
+[6.672476] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/llm_quota.py'...\n"}
+[6.672511] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/map_straighten.py'...\n"}
+[6.672546] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/map_walls3d.py'...\n"}
+[6.672581] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/mic_settings.py'...\n"}
+[6.672616] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/motion_confirm.py'...\n"}
+[6.672651] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nerf.py'...\n"}
+[6.672690] (home_robot) StdoutLine: {'line': b"Listing '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes'...\n"}
+[6.672724] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/acoustic_map_node.py'...\n"}
+[6.672759] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/apriltag_relocalizer.py'...\n"}
+[6.672795] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/arm_driver.py'...\n"}
+[6.672830] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/arm_joy_node.py'...\n"}
+[6.672869] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/arm_moveit_bridge.py'...\n"}
+[6.672906] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/arm_scene_obstacles.py'...\n"}
+[6.672943] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/calibrate_odom.py'...\n"}
+[6.672978] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/camera_watchdog_node.py'...\n"}
+[6.673012] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/cluster_detector_node.py'...\n"}
+[6.673048] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/diarization_node.py'...\n"}
+[6.673083] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/doa_node.py'...\n"}
+[6.673118] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/echo_node.py'...\n"}
+[6.673153] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/episodic_memory_node.py'...\n"}
+[6.673188] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/explore_manager_node.py'...\n"}
+[6.673223] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/face_detection_node.py'...\n"}
+[6.673260] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/face_identity_node.py'...\n"}
+[6.673295] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/fall_monitor_node.py'...\n"}
+[6.673333] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/gesture_node.py'...\n"}
+[6.673368] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/global_localizer_node.py'...\n"}
+[6.673404] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/goal_pose_bridge.py'...\n"}
+[6.673439] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/goto_room.py'...\n"}
+[6.673474] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/hand_gesture_node.py'...\n"}
+[6.673509] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/imu_node.py'...\n"}
+[6.673545] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/joy_cmd_gate_node.py'...\n"}
+[6.673580] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/joystick_estop_node.py'...\n"}
+[6.673615] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/llm_bridge_node.py'...\n"}
+[6.673650] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/mission_executor_node.py'...\n"}
+[6.673685] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/nerf_capture_node.py'...\n"}
+[6.673721] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/object_detector.py'...\n"}
+[6.673757] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/object_memory_node.py'...\n"}
+[6.706444] (-) TimerEvent: {}
+[6.806648] (-) TimerEvent: {}
+[6.836671] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/obstacle_prediction_node.py'...\n"}
+[6.836977] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/obstacle_safety_node.py'...\n"}
+[6.837033] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/odom_tf_broadcaster.py'...\n"}
+[6.837079] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/open_vocab_detector.py'...\n"}
+[6.837121] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/people_node.py'...\n"}
+[6.837165] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/person_follower_node.py'...\n"}
+[6.837206] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/pick_place_node.py'...\n"}
+[6.837248] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/pose_node.py'...\n"}
+[6.837288] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/pose_saver_node.py'...\n"}
+[6.837329] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/proactive_observer_node.py'...\n"}
+[6.837370] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/rag_memory_node.py'...\n"}
+[6.837409] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/record_location.py'...\n"}
+[6.837447] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/recovery_manager_node.py'...\n"}
+[6.837486] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/room_markers_node.py'...\n"}
+[6.837523] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/room_tour.py'...\n"}
+[6.837567] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/roomba_driver.py'...\n"}
+[6.837604] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/self_diagnosis_node.py'...\n"}
+[6.837641] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/semantic_costmap_node.py'...\n"}
+[6.837677] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/situational_awareness_node.py'...\n"}
+[6.837714] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/slip_monitor_node.py'...\n"}
+[6.837756] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/sound_event_node.py'...\n"}
+[6.837792] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/stt_node.py'...\n"}
+[6.837829] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/system_metrics_node.py'...\n"}
+[6.837872] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/tactile_node.py'...\n"}
+[6.837911] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/task_planner_node.py'...\n"}
+[6.837947] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/tracker_node.py'...\n"}
+[6.837984] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/trail_publisher_node.py'...\n"}
+[6.838020] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/tts_node.py'...\n"}
+[6.838056] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/vision_node.py'...\n"}
+[6.838092] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/wake_word_node.py'...\n"}
+[6.838134] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/nodes/web_dashboard_node.py'...\n"}
+[6.838170] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/object_memory.py'...\n"}
+[6.838206] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/obstacle_prediction.py'...\n"}
+[6.838242] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/pcl_clusters.py'...\n"}
+[6.838279] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/people.py'...\n"}
+[6.838315] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/proactive.py'...\n"}
+[6.838351] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/room_files.py'...\n"}
+[6.838387] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/room_segment.py'...\n"}
+[6.838423] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/routines.py'...\n"}
+[6.838459] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/safety_settings.py'...\n"}
+[6.838495] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/servo_filter.py'...\n"}
+[6.838531] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/simple_commands.py'...\n"}
+[6.838567] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/slip_detect.py'...\n"}
+[6.838604] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/slip_map.py'...\n"}
+[6.838640] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/sort_planner.py'...\n"}
+[6.838687] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/sound_events.py'...\n"}
+[6.838723] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/speaker_fusion.py'...\n"}
+[6.838760] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/status_query.py'...\n"}
+[6.838797] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/stop_command.py'...\n"}
+[6.838833] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/stt_postprocess.py'...\n"}
+[6.838876] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/system_settings.py'...\n"}
+[6.838927] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/tactile.py'...\n"}
+[6.838976] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/tool_router.py'...\n"}
+[6.839014] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/tts_fallback.py'...\n"}
+[6.839050] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/vocabulary.py'...\n"}
+[6.839087] (home_robot) StdoutLine: {'line': b"Compiling '/home/dimi/robot_ws/src/home_robot/install/home_robot/lib/python3.12/site-packages/home_robot/voice_gate.py'...\n"}
+[6.853670] (home_robot) CommandEnded: {'returncode': 0}
+[6.877920] (home_robot) JobEnded: {'identifier': 'home_robot', 'rc': 0}
+[6.878412] (-) EventReactorShutdown: {}

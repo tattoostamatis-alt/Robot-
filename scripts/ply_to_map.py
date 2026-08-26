@@ -43,7 +43,7 @@ import numpy as np
 import open3d as o3d
 import yaml
 from PIL import Image
-from scipy.ndimage import binary_closing
+from scipy.ndimage import binary_closing, binary_dilation, binary_erosion, label
 
 
 def main():
@@ -59,6 +59,18 @@ def main():
     ap.add_argument('--floor-hi', type=float, default=0.08)
     ap.add_argument('--padding', type=float, default=0.3, help='meters of margin around the scanned floor extent')
     ap.add_argument('--min-occ-points', type=int, default=2, help='points/cell to call a cell occupied (noise filter)')
+    ap.add_argument('--min-blob-cells', type=int, default=0,
+                     help='drop connected occupied blobs smaller than this (cells) — real walls '
+                          'form long connected runs, clutter/furniture at LiDAR height forms small '
+                          'isolated islands, so this is a shape-based filter binary_closing cannot do')
+    ap.add_argument('--declutter', type=int, default=0,
+                     help='strip SOLID occupied blobs at least this many cells across (furniture: '
+                          'beds, sofas, wardrobes — anything wide enough to survive an erosion by a '
+                          'square this size), while leaving real walls (1-2 cells thick) untouched. '
+                          'min-blob-cells alone cannot separate a bulky low couch from a real wall: '
+                          'closing merges the two into one connected component of comparable size, '
+                          'so size is not the discriminator — solidity is. 5 (~25cm at default '
+                          'resolution) is a reasonable start; 0 disables this pass.')
     args = ap.parse_args()
 
     pcd = o3d.io.read_point_cloud(args.ply_path)
@@ -102,6 +114,19 @@ def main():
 
     occupied = occ_count >= args.min_occ_points
     occupied = binary_closing(occupied, structure=np.ones((3, 3), dtype=bool))
+    if args.declutter > 0:
+        k = np.ones((args.declutter, args.declutter), dtype=bool)
+        core = binary_erosion(occupied, structure=k)              # only solid blobs survive this
+        clutter = binary_dilation(core, structure=k) & occupied   # grow back to the blob's own
+        occupied &= ~clutter   # footprint (capped by the original mask), nothing further — a thin
+        # wall pixel never entered `core`, so dilation never reaches it unless it is
+        # within `declutter` cells of an actual blob, i.e. touching the furniture.
+    if args.min_blob_cells > 0:
+        labeled, n = label(occupied, structure=np.ones((3, 3), dtype=bool))
+        if n:
+            sizes = np.bincount(labeled.ravel())  # sizes[0] is the background, ignored below
+            drop = np.where(sizes < args.min_blob_cells)[0]
+            occupied &= ~np.isin(labeled, drop[drop != 0])
     free = (free_count >= 1) & ~occupied
 
     grid = np.full((h, w), 205, dtype=np.uint8)  # unknown

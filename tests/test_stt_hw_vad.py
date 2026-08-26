@@ -222,7 +222,7 @@ def test_the_flag_is_held_briefly_across_the_gaps_between_words(stt):
 
 # ── one-directional: it may extend, never cut ───────────────────────────────
 
-def test_the_vad_keeps_a_recording_open_through_a_quiet_syllable(stt):
+def test_noisy_hw_vad_cannot_hold_every_recording_open(stt):
     mod, node = stt
     _say_vad(node, True)
     node._state = 'recording'
@@ -231,8 +231,9 @@ def test_the_vad_keeps_a_recording_open_through_a_quiet_syllable(stt):
 
     node._on_audio(_chunk(node, QUIET))       # energy dip, VAD still speech
 
-    assert node._sil_count == 0, (
-        'the silence counter was not reset while the DSP still heard speech')
+    assert node._sil_count == 4, (
+        'hardware VAD reset the silence counter; live noise then holds every '
+        'recording open until max_record_seconds')
     assert node._state == 'recording'
 
 

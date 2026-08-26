@@ -14,16 +14,30 @@ Subscribes:
 Publishes:
 - `speech_response` (std_msgs/String) — progress narration, picked up by
   tts_node. Independent of llm_bridge_node's own immediate "started" reply.
-- `pick_command` (std_msgs/String, JSON {'label': ...}) — only when the
-  `use_arm` parameter is true. One per clutter item found at a stop,
-  consumed by pick_place_node.py (UNTESTED — no arm hardware yet, see its
-  module docstring). Waits for that node's `pick_result` (with timeout)
-  before moving on; pick_place_node.py narrates its own progress/outcome
-  on speech_response, so this node only narrates the timeout/failure case.
+- `pick_command` (std_msgs/String, JSON {'label': ..., 'hold': true}) — only
+  when the `use_arm` parameter is true, one per clutter item found at a stop,
+  consumed by pick_place_node.py. `hold:true` keeps the item in the gripper
+  instead of pick_place_node's own local drop pose.
+- `place_command` (std_msgs/String, JSON {}) — sent once the robot has
+  navigated to `drop_location` (a locations.yaml entry, default "gonia")
+  carrying a held item. Releases it at pick_place_node's default drop pose,
+  which — with the robot physically parked at the corner — leaves the item
+  there.
 
 Scope: navigate + look for clutter ("Plan -> Execute -> Verify" for the
-"go check on a room" part of roadmap item 6), and — when use_arm:=true —
-hand each item to pick_place_node.py to actually pick up.
+"go check on a room" part of roadmap item 6), and — when use_arm:=true — for
+each item found: pick it (held, not dropped in place), carry it to
+`drop_location`, place it, then navigate back to the room before the next
+item (pick_place_node re-detects from wherever the robot is standing, so it
+has to physically be back in the room to find what's left).
+
+‼️ 2026-08-15, NOT YET HW-VERIFIED END-TO-END. Individual pick/hold/place
+calls are each proven separately (pick_place_node.py, HW-verified twice for
+plain pick-and-drop), but this multi-item, multi-trip loop through Nav2 has
+never run live. `drop_location` also has to be taught first —
+`record_location.py gonia` (drive there) or `record_location.py --click
+gonia` (click on the map) — tidy silently drops items in place at
+whatever room it's in if that name is missing from locations.yaml.
 """
 
 import json
@@ -63,11 +77,16 @@ class TaskPlannerNode(Node):
         self.declare_parameter('detect_wait', 2.0)
         self.declare_parameter('use_arm', False)
         self.declare_parameter('pick_timeout', 30.0)
+        # Named entry in locations.yaml where tidied clutter gets dropped off.
+        # Teach it like any other room: drive there and
+        # `record_location.py gonia`, or `record_location.py --click gonia`.
+        self.declare_parameter('drop_location', 'gonia')
 
         self.nav_timeout = self.get_parameter('nav_timeout').value
         self.detect_wait = self.get_parameter('detect_wait').value
         self.use_arm = self.get_parameter('use_arm').value
         self.pick_timeout = self.get_parameter('pick_timeout').value
+        self.drop_location = self.get_parameter('drop_location').value
 
         locations_path = os.path.join(get_package_share_directory('home_robot'),
                                         'config', 'locations.yaml')
@@ -77,6 +96,7 @@ class TaskPlannerNode(Node):
 
         self.response_pub = self.create_publisher(String, 'speech_response', 10)
         self.pick_pub = self.create_publisher(String, 'pick_command', 10)
+        self.place_pub = self.create_publisher(String, 'place_command', 10)
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
 
         self._latest_objects = None
@@ -84,6 +104,8 @@ class TaskPlannerNode(Node):
         self._busy = threading.Lock()
         self._pick_event = threading.Event()
         self._pick_result = None
+        self._place_event = threading.Event()
+        self._place_result = None
         # ‼️ There was NO way to stop a running task. llm_bridge's emergency stop
         # publishes patrol_command=False, and _on_patrol dropped it on the floor
         # ("if not msg.data: return"), so a patrol kept visiting rooms and
@@ -95,6 +117,7 @@ class TaskPlannerNode(Node):
         self.create_subscription(Bool, 'patrol_command', self._on_patrol, 10)
         self.create_subscription(String, 'detected_objects', self._on_detected_objects, 10)
         self.create_subscription(String, 'pick_result', self._on_pick_result, 10)
+        self.create_subscription(String, 'place_result', self._on_place_result, 10)
         # Belt and braces: honour a spoken stop directly, so a task still stops
         # when llm_bridge is down (or busy failing) and never relays the cancel.
         self.create_subscription(String, 'speech_text', self._on_speech_text, 10)
@@ -119,6 +142,13 @@ class TaskPlannerNode(Node):
         except json.JSONDecodeError:
             self._pick_result = None
         self._pick_event.set()
+
+    def _on_place_result(self, msg: String):
+        try:
+            self._place_result = json.loads(msg.data)
+        except json.JSONDecodeError:
+            self._place_result = None
+        self._place_event.set()
 
     def _on_tidy(self, msg: String):
         try:
@@ -202,17 +232,63 @@ class TaskPlannerNode(Node):
             for label in clutter:
                 if self._cancel.is_set():
                     return
-                self._pick(label)
+                # Each item gets its own full round trip: pick here (held in
+                # the gripper, not dropped locally), carry it to drop_location,
+                # place, then come BACK to this room's pose before the next
+                # item — pick_place_node re-detects from wherever the robot is
+                # standing, so it has to physically be here again to find what
+                # is left.
+                if not self._pick(label, hold=True):
+                    continue
+                if self._cancel.is_set():
+                    return
+                self._deliver_to_corner()
+                if self._cancel.is_set():
+                    return
+                ok, reason = self._navigate(loc)
+                if self._cancel.is_set():
+                    return
+                if not ok:
+                    self._say(f'Δεν κατάφερα να επιστρέψω {room_name} ({reason}) — '
+                              'σταματάω την τακτοποίηση εδώ.')
+                    return
 
-    def _pick(self, label):
+    def _pick(self, label, hold=False):
+        """Returns True only if the grasp succeeded."""
         self._pick_event.clear()
         self._pick_result = None
-        self.pick_pub.publish(String(data=json.dumps({'label': label})))
+        self.pick_pub.publish(String(data=json.dumps({'label': label, 'hold': hold})))
         if not self._pick_event.wait(timeout=self.pick_timeout):
             self._say(f'Δεν κατάφερα να σηκώσω το {label} (λήξη χρόνου).')
-            return
-        if self._pick_result and self._pick_result.get('status') != 'ok':
+            return False
+        if not self._pick_result or self._pick_result.get('status') != 'ok':
             self._say(f'Δεν κατάφερα να σηκώσω το {label}.')
+            return False
+        return True
+
+    def _deliver_to_corner(self):
+        loc = self.locations.get(self.drop_location)
+        if loc is None:
+            self._say(f'Δεν έχω διδαχθεί τη θέση "{self.drop_location}" — '
+                      'αφήνω το αντικείμενο εδώ.')
+            self._place()
+            return
+        ok, reason = self._navigate(loc)
+        if self._cancel.is_set():
+            return
+        if not ok:
+            self._say(f'Δεν έφτασα στη γωνιά ({reason}) — αφήνω το αντικείμενο εδώ.')
+        self._place()
+
+    def _place(self):
+        self._place_event.clear()
+        self._place_result = None
+        self.place_pub.publish(String(data=json.dumps({})))
+        if not self._place_event.wait(timeout=self.pick_timeout):
+            self._say('Χρονο-όριο στην απόθεση.')
+            return
+        if not self._place_result or self._place_result.get('status') != 'ok':
+            self._say('Δεν κατάφερα να αφήσω το αντικείμενο.')
 
     def _await_future(self, future, timeout_sec):
         """Wait for an async future from this worker thread WITHOUT spinning —

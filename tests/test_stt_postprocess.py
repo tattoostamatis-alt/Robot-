@@ -25,6 +25,9 @@ NODES = f'{PKG}/home_robot/nodes'
     'Εντολές προς το ρομπότ Μαξ, στο δωμάτιο του Μαξ, στο δωμάτιο του Μαξ.',
     'Εντολές προς το ρομπότ Μαξ, στον διάδρομο, στην κουζίνα, στο δωμάτιο του Μαξ.',
     'Εντολές προς το ρομπότ Μαξ, στο σαλόνι, στο δωμάτιο του Μαξ.',
+    'Υπότιτλοι AUTHORWAVE',
+    'Υπότιτλοι Authorwave.',
+    'Ευχαριστούμε που παρακολουθήσατε.',
 ])
 def test_meta_echo_is_discarded(raw):
     assert clean(raw) == ''
@@ -100,6 +103,13 @@ def test_initial_prompt_has_no_meta_framing():
     call = src[src.index('self._whisper.transcribe'):]
     call = call[:call.index(')\n')]
     assert 'Εντολές προς το ρομπότ' not in call
+
+
+def test_initial_prompt_covers_short_location_questions():
+    """These were decoded live as «ευχαριστούμε» without prompt guidance."""
+    src = open(f'{NODES}/stt_node.py').read()
+    assert 'πού είσαι' in src
+    assert 'πού βρίσκεσαι' in src
 
 
 # ── babble: Whisper decoding noise into repeated fragments ──────────────────

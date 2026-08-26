@@ -27,7 +27,13 @@ import unicodedata
 
 # Meta-text from the head of the initial_prompt. A user talking to the robot
 # never utters this, so any transcription containing it is discarded whole.
-META_MARKERS = ('εντολες προς το ρομποτ',)
+META_MARKERS = (
+    'εντολες προς το ρομποτ',
+    # Stock Whisper hallucinations on quiet/noisy Greek recordings.  These
+    # are video-credit phrases, never commands addressed to the robot.
+    'υποτιτλοι authorwave',
+    'ευχαριστουμε που παρακολουθησατε',
+)
 
 # Prompt fragments that may legitimately appear ONCE (they are real commands)
 # but signal leakage when the decoder loops on them.

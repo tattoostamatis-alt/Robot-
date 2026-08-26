@@ -33,7 +33,13 @@ def _active_map() -> str:
 
 def test_all_python_compiles():
     for f in glob.glob(f'{PKG}/**/*.py', recursive=True):
-        if '__pycache__' in f:
+        rel_parts = os.path.relpath(f, PKG).split(os.sep)
+        # colcon --symlink-install mirrors source files and their __pycache__
+        # into generated trees. Compiling those mirrors can fail solely
+        # because the destination .pyc is intentionally a symlink, and also
+        # checks the same source more than once. Only compile the source tree.
+        if any(part in {'__pycache__', 'build', 'install', 'log'}
+               for part in rel_parts):
             continue
         py_compile.compile(f, doraise=True)
 

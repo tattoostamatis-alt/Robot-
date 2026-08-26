@@ -82,7 +82,7 @@ print(f'      {gd:.2f} m from the station, clearance {gc:.3f} m, '
 print(f'      IR homing then covers {gd - args.seat_offset:.2f} m')
 print()
 
-print('corridor from staging in to the base (Nav2 inflation 0.30, robot 0.17):')
+print('corridor from staging in to the base (Nav2 inflation 0.30, robot 0.175):')
 steps = int((gd - args.seat_offset) / 0.1) + 1
 for i in range(steps + 1):
     d = gd - i * 0.1
@@ -91,7 +91,7 @@ for i in range(steps + 1):
     x, y, _ = dg.approach_point(tag['x'], tag['y'], normal, d)
     c = clearance(x, y)
     print(f'  {d:4.2f} m out: clearance {c:.3f}  '
-          f'{"robot fits" if c >= 0.17 else "TIGHT"}, '
+          f'{"robot fits" if c >= 0.175 else "TIGHT"}, '
           f'{"Nav2 ok" if c >= 0.30 else "Nav2 blocked"}')
     if d <= args.seat_offset:
         break

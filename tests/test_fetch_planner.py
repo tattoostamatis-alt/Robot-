@@ -9,7 +9,7 @@ node and LLM tool speak the fetch:<label> contract.
 import math
 import os
 
-from home_robot.fetch_planner import (approach_pose, memory_target,
+from home_robot.fetch_planner import (approach_origin, approach_pose, memory_target,
                                       nearest_detection, homing_twist,
                                       is_stale_repeat)
 
@@ -18,6 +18,15 @@ NODES = f'{PKG}/home_robot/nodes'
 
 
 # ── approach_pose ──────────────────────────────────────────────────────
+
+def test_approach_origin_uses_safe_room_waypoint_instead_of_across_wall():
+    target = {'x': 4.8, 'y': 3.7, 'room': 'bedroom'}
+    locations = {'bedroom': {'x': 4.8, 'y': 4.2, 'yaw': 0.0}}
+    assert approach_origin(target, locations, (1.7, 2.5)) == (4.8, 4.2)
+
+
+def test_approach_origin_falls_back_without_room_metadata():
+    assert approach_origin({'x': 2.0, 'y': 3.0}, {}, (1.0, 1.5)) == (1.0, 1.5)
 
 def test_approach_stops_short_and_faces_object():
     # robot at origin, object 2 m ahead on +x; approach 0.4 m short of it.

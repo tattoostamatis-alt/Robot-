@@ -20,10 +20,10 @@ def generate_launch_description():
     joy_device_name = LaunchConfiguration('joy_device_name',
                                           default='DualSense Wireless Controller')
 
-    # SLAMTEC C1 LIDAR is provided by ros-sllidar-c1.service (systemd,
-    # always running on /dev/sllidar = same physical port as /dev/lidar).
-    # Do NOT start another sllidar_node here — it would fail to open the
-    # serial port (SL_RESULT_OPERATION_TIMEOUT) since it's already in use.
+    # SLAMTEC C1 LIDAR is provided by ros-sllidar-c1.service.  The unit is
+    # disabled at boot and the `robot` wrapper owns its start/stop lifecycle.
+    # Do NOT start another sllidar_node here — it would fail to open the serial
+    # port while the on-demand service owns /dev/sllidar.
 
     # No obstacle_safety_node in this minimal launch, so listen on cmd_vel
     # directly (bringup.launch.py remaps to cmd_vel_safe instead).
