@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Open the magic-lamp extension's settings on the user's display.
+PID=$(pgrep -u "$USER" -f gsd-media-keys | head -1)
+export $(tr '\0' '\n' < /proc/$PID/environ | grep -E '^(DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|DISPLAY|WAYLAND_DISPLAY)=' | xargs -d'\n')
+exec gnome-extensions prefs compiz-alike-magic-lamp-effect@hermes83.github.com

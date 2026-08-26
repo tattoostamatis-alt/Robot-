@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Record REAL "Έι ρομπότ" wake-word samples on the XVF3800 (see
+# training/wake_word_hey_robot/record_real.py). Wrapped as a short command
+# because long pasted lines get broken by this terminal.
+cd ~/robot_ws/src/home_robot/training/wake_word_hey_robot || exit 1
+exec python3 record_real.py --label pos --count "${1:-30}" --device 5

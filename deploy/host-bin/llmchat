@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""llmchat — απλή συζήτηση με το τοπικό NPU μοντέλο.
+
+Μιλάει στον server του FastFlowLM (:52625) και ΟΧΙ στο lemonade (:13305):
+το lemonade v11 έβγαλε το FLM backend, οπότε το :13305 απαντάει
+"model_not_found" για κάθε NPU μοντέλο.
+
+Χρήση:  llmchat            # διαδραστικά
+        llmchat "ερώτηση"  # μία ερώτηση και έξοδος
+Εντολές μέσα στο chat: /reset καθαρίζει το ιστορικό, /exit ή Ctrl-D έξοδος.
+"""
+import json
+import os
+import sys
+import urllib.request
+
+URL = "http://127.0.0.1:52625/v1/chat/completions"
+# qwen3vl-it:4b is no longer in ~/.config/flm/models — the keepalive serves
+# qwen3.5:4b, and asking for a model the server does not hold returns
+# model_not_found. Override with LLMCHAT_MODEL if the keepalive was started
+# with a different one.
+MODEL = os.environ.get("LLMCHAT_MODEL", "qwen3.5:4b")
+SYSTEM = "Είσαι ένας βοηθός. Απαντάς πάντα στα ελληνικά, σύντομα και φυσικά."
+
+
+def ask(history):
+    body = json.dumps({
+        "model": MODEL,
+        "messages": history,
+        "stream": True,
+    }).encode()
+    req = urllib.request.Request(URL, body, {"Content-Type": "application/json"})
+    parts = []
+    with urllib.request.urlopen(req, timeout=300) as r:
+        for raw in r:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                delta = json.loads(data)["choices"][0]["delta"].get("content", "")
+            except (json.JSONDecodeError, KeyError, IndexError):
+                continue
+            if delta:
+                parts.append(delta)
+                sys.stdout.write(delta)
+                sys.stdout.flush()
+    print()
+    return "".join(parts)
+
+
+def main():
+    history = [{"role": "system", "content": SYSTEM}]
+
+    if len(sys.argv) > 1:                      # one-shot
+        history.append({"role": "user", "content": " ".join(sys.argv[1:])})
+        ask(history)
+        return
+
+    print(f"Συζήτηση με {MODEL} στο NPU.  /reset για καθάρισμα, /exit για έξοδο.\n")
+    while True:
+        try:
+            msg = input("\033[1;36mεσύ ›\033[0m ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if not msg:
+            continue
+        if msg in ("/exit", "/quit"):
+            return
+        if msg == "/reset":
+            history = history[:1]
+            print("(ιστορικό καθαρίστηκε)\n")
+            continue
+        history.append({"role": "user", "content": msg})
+        print("\033[1;33mμοντέλο ›\033[0m ", end="", flush=True)
+        try:
+            history.append({"role": "assistant", "content": ask(history)})
+        except Exception as e:                 # server restart, timeout, κλπ
+            history.pop()
+            print(f"\n⚠ σφάλμα: {e}\n")
+            continue
+        print()
+
+
+if __name__ == "__main__":
+    main()

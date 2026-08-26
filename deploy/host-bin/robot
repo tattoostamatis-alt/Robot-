@@ -1,0 +1,310 @@
+#!/usr/bin/env bash
+# robot max — full bringup: all sensors + full voice pipeline (wake word, STT,
+# TTS, LLM). Starts the robot services on demand (they're no longer enabled at
+# boot). Camera + IMU + EKF come up by default, and since 2026-07-26 so does
+# LOCALIZATION against the saved map (AMCL, not SLAM) — that is what makes
+# `goto`/voice navigation actually work. RViz on the desk monitor stays OFF by
+# default since 2026-08-11 (LOCAL_RVIZ=true opts back in). The TigerVNC :2
+# session (phone RealVNC + the dashboard's RViz tab, both stream the same
+# rviz2) is, since 2026-08-14, ALSO no longer auto-started here — it was the
+# single biggest CPU line in this script (~73% measured). Open the dashboard's
+# RViz tab (or connect RealVNC directly) whenever you actually want it; see
+# the comment further down for why it then stays up until `robot stop`.
+#
+# Usage:  robot max                   # launch everything, ready to navigate
+#         robot max use_joy:=false    # explicitly disable the PS5 controller
+#         robot max map:=kela3        # localize against a different saved map
+#         LOCAL_RVIZ=true robot max   # DO open RViz on the desk monitor
+#         robot map                   # MAP a new space (SLAM) — same stack
+#
+# ‼️ `robot map` exists because "skip this wrapper and run
+# `ros2 launch home_robot bringup.launch.py use_slam:=true`" — what this header
+# used to advise, and what the dashboard's «Νέος χάρτης» button actually did —
+# comes up MISSING HALF THE ROBOT. bringup defaults the four voice flags to
+# false, and the services/VNC below are this script's job, not a launch file's.
+# So starting a map tore down a full stack and brought back one with no voice,
+# no Foxglove, no phone RViz and the wrong joypad, which is exactly what "the
+# whole stack terminates" looked like from the browser. Everything below is
+# shared; only the final launch line differs.
+set -e
+
+# Every ROS process of ours, matched by executable path. Killing the `ros2
+# launch` parent does NOT take the nodes with it — on 2026-07-23 a `robot stop`
+# that printed "✔ stopped" left 22 of them running for 1h39m (the whole Nav2
+# C++ set, realsense, ekf_node, the static TFs and every python node), which is
+# why the machine sat at load 6. So enumerate by path and signal each one.
+# Excludes this script, its parent, and the ros2 daemon (bounced separately).
+ros_pids() {
+  ps -eo pid,cmd --no-headers \
+    | grep -E '[/]opt/ros/jazzy|[r]obot_ws/install' \
+    | grep -vE 'ros2cli|ros2-daemon' \
+    | awk -v self="$$" -v parent="${PPID:-0}" \
+          '$1 != self && $1 != parent { print $1 }'
+}
+
+# robot stop — tear everything down (ROS nodes + on-demand services + VNC).
+if [ "${1:-}" = "stop" ]; then
+  echo "→ Stopping robot..."
+
+  # Ask the launch parent to go first so it can tidy up its own children.
+  pkill -TERM -f "ros2 launch home_robot" 2>/dev/null || true
+  sleep 2
+
+  PIDS=$(ros_pids | tr '\n' ' ' || true)
+  if [ -n "${PIDS// /}" ]; then
+    echo "  → σταματώ $(echo $PIDS | wc -w) ROS διεργασίες"
+    kill -TERM $PIDS 2>/dev/null || true
+    for _ in $(seq 1 10); do            # give them 10s to exit cleanly
+      sleep 1
+      [ -z "$(ros_pids || true)" ] && break
+    done
+    LEFT=$(ros_pids | tr '\n' ' ' || true)
+    if [ -n "${LEFT// /}" ]; then
+      echo "  → $(echo $LEFT | wc -w) δεν τερμάτισαν, SIGKILL"
+      kill -9 $LEFT 2>/dev/null || true
+      sleep 1
+    fi
+  fi
+
+  sudo systemctl stop ros-sllidar-c1.service ros-foxglove-bridge.service lemond.service 2>/dev/null || true
+  # flm holds the NPU and ~3 GB of RAM, so it goes too. This also kills any
+  # `llmchat` session, which talks to the same server. Set the stop file FIRST so
+  # the keepalive wrapper doesn't respawn flm the moment we kill it.
+  touch /tmp/flm_keepalive.stop
+  pkill -f flm_keepalive 2>/dev/null || true
+  pkill -f "flm serve" 2>/dev/null && echo "  → FastFlowLM σταμάτησε (και το llmchat μαζί)" || true
+  tigervncserver -kill :2 >/dev/null 2>&1 || true
+
+  # The daemon caches the graph, so `ros2 node list` keeps listing dead nodes
+  # until it is bounced. ROS is not sourced above this point — do it here.
+  source /opt/ros/jazzy/setup.bash 2>/dev/null || true
+  ros2 daemon stop >/dev/null 2>&1 || true
+
+  REMAIN=$(ros_pids | wc -l || true)
+  if [ "${REMAIN:-0}" -eq 0 ]; then
+    echo "  ✔ stopped (ROS, LiDAR, LLM, Foxglove, VNC)"
+  else
+    echo "  ⚠ $REMAIN ROS διεργασίες επιβίωσαν:"
+    ros_pids | while read -r p; do ps -o pid=,cmd= -p "$p" 2>/dev/null | cut -c1-100; done
+  fi
+  exit 0
+fi
+
+# Which final launch line runs. Everything between here and there is identical
+# for both, on purpose: a mapping session that quietly loses the voice pipeline
+# or the LiDAR service is the bug this subcommand was added to fix.
+MODE=max
+case "${1:-}" in
+  max) shift ;;
+  map) MODE=map; shift ;;
+esac
+LOCAL_RVIZ=${LOCAL_RVIZ:-false}       # RViz on the desk monitor; true to open it
+source /opt/ros/jazzy/setup.bash
+source ~/robot_ws/install/setup.bash
+export HF_HUB_DISABLE_XET=1           # this network stalls HF Xet downloads
+
+# These robot services are NO LONGER enabled at boot — we start them here so
+# they only run when you launch the robot. tailscaled and the CPU-tuning units
+# stay enabled at boot on purpose (remote access + crash/thermal stability).
+#
+# Foxglove is deliberately NOT started here (2026-08-12, user request — not
+# needed day to day, and it was measured eating ~100% CPU competing with the
+# LLM/voice pipeline). Start it by hand if you need it:
+#   sudo systemctl start ros-foxglove-bridge.service
+echo "→ Starting robot services (LiDAR, LLM)..."
+sudo systemctl start ros-sllidar-c1.service 2>/dev/null || true
+
+# The LLM is FastFlowLM, NOT Lemonade: v11.0.0 dropped every FLM/NPU model from
+# its catalogue, so lemond.service listens on :13305 but answers model_not_found
+# for anything NPU. flm has no systemd unit, so start it here. Weights live in
+# ~/.config/flm/models (a user dir, so apt cannot wipe them the way it wiped
+# /var/lib/lemonade on 2026-07-09).
+# Run flm under a keepalive wrapper: `flm serve` has been seen to exit on its
+# own (silently after a request, or "double free" under CONCURRENT requests), so
+# a bare `nohup flm serve` leaves the voice pipeline with a dead LLM. The wrapper
+# respawns it. IMPORTANT: exactly one client may hit :52625 at a time — the wrapper
+# sends no probes of its own, and llm_bridge already serialises with a busy lock.
+# `llm_backend:=gemini` means the NPU model answers nothing — starting it
+# anyway would hold 4.7 GB of RAM (measured) and make this script wait a
+# further 60 s for a server nobody talks to. So skip it, and stop one that is
+# already running. Set the stop file first or the keepalive respawns it.
+#
+# ‼️ Opt OUT of flm, do not opt in. The default backend is lemonade (see
+# bringup.launch.py) since the 2026-08-12 RAM upgrade (13 GB -> ~30 GB usable)
+# removed the reason it was ever gemini-by-default: retested `robot max` (77
+# nodes) + qwen3.5:4b together and there were still 12 GB free with zero swap,
+# vs. the 300 MB shortfall that used to OOM-kill flm on the old 13 GB machine.
+# Until 2026-08-12 this flag was inverted the other way (opt IN to flm)
+# because 4.7 GB resident for a server nobody talked to left only 3.1 GB free
+# and made the dashboard's Gazebo tab segfault in Mesa (2026-08-02). That
+# constraint is gone now, so explicit `llm_backend:=gemini` is the opt-out.
+case " $* " in
+  *" llm_backend:=gemini "*) WANT_FLM=false ;;
+  *" llm_backend:=ollama "*) WANT_FLM=false ;;
+  *) WANT_FLM=true ;;
+esac
+
+if [ "$WANT_FLM" = false ]; then
+  echo "  ○ FastFlowLM skipped (llm_backend is not lemonade) — 4.7 GB stays free"
+  touch /tmp/flm_keepalive.stop
+  pkill -f flm_keepalive 2>/dev/null || true
+  pkill -x flm 2>/dev/null || true
+elif pgrep -f flm_keepalive >/dev/null; then
+  echo "  ✔ FastFlowLM keepalive already running"
+else
+  rm -f /tmp/flm_keepalive.stop
+  setsid nohup ~/bin/flm_keepalive.sh qwen3.5:4b >/tmp/flm_serve.log 2>&1 &
+fi
+
+# LiDAR: wait for the C1 driver to be active (bringup relies on its /scan_raw).
+for i in $(seq 1 15); do
+  systemctl is-active --quiet ros-sllidar-c1.service && { echo "  ✔ LiDAR C1 up"; break; }
+  [ "$i" = 15 ] && echo "  ⚠ LiDAR service not active — check /dev/lidar"
+  sleep 1
+done
+
+# LLM: wait for FastFlowLM to actually listen, so llm_bridge connects first try.
+# Loading the 3.1 GB model onto the NPU takes a while, hence the long timeout.
+# The check has to be a real completion. Port-open is how the old Lemonade line
+# lied for two weeks, and /v1/models is no better: it returns the whole FLM
+# catalogue, listing models like deepseek-r1:8b that were never downloaded. Only
+# a round trip proves the weights are on the NPU. It costs one token, ~1.6s.
+for i in $(seq 1 12); do
+  [ "$WANT_FLM" = false ] && break
+  set +e
+  curl -sf -m 20 http://127.0.0.1:52625/v1/chat/completions \
+       -H 'Content-Type: application/json' \
+       -d '{"model":"qwen3.5:4b","messages":[{"role":"user","content":"ok"}],"max_tokens":1}' \
+       2>/dev/null | grep -q '"choices"'
+  rc=$?
+  set -e
+  if [ "$rc" = 0 ]; then
+    echo "  ✔ FastFlowLM LLM ready on :52625 (qwen3.5:4b)"
+    break
+  elif [ "$rc" = 28 ]; then
+    # curl's own -m timeout: the request is still running server-side (cold
+    # prefill under a loaded box can outlast 20s). A second request while this
+    # one is in flight is exactly what corrupts flm's NPU queue ("double free
+    # or corruption" — reproduced 2026-08-11), so wait it out instead of
+    # retrying fast.
+    echo "  … FastFlowLM still busy with first request, waiting it out (retrying too soon crashes it)"
+    sleep 20
+  else
+    [ "$i" = 12 ] && echo "  ⚠ FastFlowLM not ready — voice will hear you but cannot answer (see /tmp/flm_serve.log)"
+    sleep 3
+  fi
+done
+
+# VNC :2 (rviz2, ~73% CPU measured 2026-08-14) is now on-demand rather than
+# auto-started here — it was the single biggest CPU line in `robot max`,
+# running whether or not anyone was looking at it. Start it from the
+# dashboard's RViz tab (already fully wired: /gui/rviz/start via
+# scripts/gui_session.sh, same mechanism as the Gazebo/MoveIt/RTAB-Map tabs)
+# whenever you actually want either the dashboard's RViz view or the phone's
+# RealVNC → <tailscale-ip>:5902 (pass RobotView1) — both stream the same :2
+# session once it's up. ‼️ gui_session.sh refuses `stop rviz` on purpose (it
+# has no per-app pgid tracking for this one, unlike moveit/gazebo/rtabmap, so
+# stopping it would tear down the whole shared :2 display) — once started it
+# stays up until `robot stop` or a reboot.
+if ss -ltn 2>/dev/null | grep -q ':5902'; then
+  echo "  ✔ VNC :2 already running (RealVNC Viewer → :5902, pass RobotView1)"
+else
+  echo "  ○ VNC :2 (RViz) not started — open the dashboard's RViz tab when you need it"
+fi
+
+# Web dashboard — the whole robot in one browser tab (map, camera, vacuum,
+# LLM chat, and the real RViz/MoveIt/Gazebo streamed from VNC). Started by
+# localize.launch.py (use_dashboard:=false to skip it); the URL is printed here
+# because the node's own banner scrolls away under the Nav2 startup log.
+# The token is generated once and persisted, so a phone bookmark keeps working.
+# Mint it here rather than waiting for the node: the dashboard reads this same
+# file, so on a first run we can print a usable URL instead of a tokenless one
+# that 401s.
+if [ ! -s ~/.home_robot/dashboard_token ]; then
+  mkdir -p ~/.home_robot
+  (umask 077; head -c 16 /dev/urandom | base64 | tr -d '=+/' > ~/.home_robot/dashboard_token)
+fi
+_tok=$(cat ~/.home_robot/dashboard_token 2>/dev/null || true)
+_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+echo "  ✔ Dashboard → http://${_ip:-localhost}:8080/${_tok:+?t=$_tok}"
+_ts=$(tailscale ip -4 2>/dev/null | head -1)
+[ -n "$_ts" ] && echo "              (κινητό/Tailscale: http://$_ts:8080/${_tok:+?t=$_tok})"
+
+# LOCAL_RVIZ=true sends RViz to the desk monitor. Needed when launching from a
+# tty or over SSH, where there is no DISPLAY. Under Wayland the X authority
+# file is mutter's Xwayland cookie, not ~/.Xauthority, and it is only reachable
+# through the environment of an already-running session process — so scrape it
+# rather than guessing a path (the name has a random suffix per session).
+if [ "$LOCAL_RVIZ" = "true" ]; then
+  for _p in $(pgrep -f 'gsd-|gnome-session|nautilus' 2>/dev/null | head -8); do
+    _xa=$(tr '\0' '\n' < /proc/$_p/environ 2>/dev/null | grep -m1 '^XAUTHORITY=' | cut -d= -f2-)
+    [ -n "$_xa" ] && { export XAUTHORITY="$_xa"; break; }
+  done
+  export DISPLAY=${DISPLAY:-:0}
+  export QT_QPA_PLATFORM=xcb
+  if [ -n "$XAUTHORITY" ]; then
+    echo "  ✔ RViz → desk monitor ($DISPLAY)"
+  else
+    # No graphical session to draw into (headless boot, or SSH with the desktop
+    # logged out). Now that RViz is ON by default this is a normal case, not an
+    # error — skip it rather than launch a node that can only fail.
+    echo "  ⚠ καμία γραφική συνεδρία — παραλείπω το τοπικό RViz (VNC :2 παραμένει)"
+    LOCAL_RVIZ=false
+  fi
+fi
+
+# localize.launch.py, NOT bringup.launch.py. bringup on its own defaults to
+# use_slam:=true / slam_mode:=mapping, i.e. it builds a brand-new map every
+# time — and the coordinates in config/locations.yaml belong to the SAVED map
+# (malou). With no saved map loaded there is no `map` frame at all, so every
+# `goto` posts a NavigateToPose goal into a frame that does not exist and dies
+# silently: the LLM logs "Tool call: goto(...)", nothing reaches cmd_vel, and
+# the robot just sits there. Diagnosed 2026-07-26 after chasing it through the
+# mic, the STT and the Roomba first.
+#
+# localize.launch.py includes bringup with use_localization:=true,
+# use_slam:=false and the saved map, and adds AMCL + global_localizer +
+# pose_saver. The voice flags below are inherited into the nested bringup.
+#
+# To build a NEW map instead, bypass this wrapper:
+#   ros2 launch home_robot bringup.launch.py use_slam:=true
+# use_open_vocab defaults ON here (2026-08-06) because without it the detector
+# only recognizes the 80 COCO classes, and «βρες την παντόφλα» failed with «δεν
+# βλέπω κάτι να σηκώσω» even with the slipper in plain view. The node loads
+# YOLO-World + CLIP and then sits IDLE until a tool asks for a non-COCO word,
+# releasing the iGPU again after vocab_idle_timeout — so it costs memory, not
+# the continuous second-detector load that use_perception keeps running into.
+#
+# The Waveshare RoArm-M3 was returned after it failed. Keep it disabled in the
+# normal robot startup so no arm driver, arm TF, joystick control, or MoveIt
+# arm components are started and no missing /dev/arm serial errors appear.
+#
+# `robot map` uses the SAME launch file with use_slam:=true — slam_toolbox
+# replaces map_server+AMCL and nothing else changes. Do NOT swap it back to a
+# bare bringup: that is what silently dropped the voice pipeline (bringup
+# defaults use_wake_word/use_stt/use_tts/use_llm to false) and handed the pad
+# to bringup's joy_node, which selects it with the ROS1 `dev` param Jazzy
+# ignores.
+# ‼️ `|| true`: this file runs under `set -e`, so a bare `[ ] && echo` would
+# exit the whole script with status 1 in max mode — one line before the launch.
+[ "$MODE" = map ] \
+  && echo "→ ΧΑΡΤΟΓΡΑΦΗΣΗ (SLAM) — οδήγησε το σπίτι, μετά «Αποθήκευση χάρτη» στο dashboard" \
+  || true
+
+# TTS enabled with the selected fast Greek Microsoft Athina neural voice.
+ros2 launch home_robot localize.launch.py \
+  use_slam:=$([ "$MODE" = map ] && echo true || echo false) \
+  use_wake_word:=true \
+  use_stt:=true \
+  use_tts:=true \
+  use_llm:=true \
+  use_rviz:=$LOCAL_RVIZ \
+  use_arm:=false \
+  use_joy:=true \
+  use_obstacle_safety:=true \
+  use_perception:=true \
+  use_open_vocab:=true \
+  use_pose:=true \
+  use_face_detection:=true \
+  use_diarization:=true \
+  "$@"

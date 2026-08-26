@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# voicechat — φωνητική συζήτηση ΜΟΝΟ με το LLM, χωρίς ρομπότ.
+#
+# Σηκώνει τους 4 κόμβους της φωνής (wake word → STT → LLM → TTS) και ΤΙΠΟΤΑ
+# άλλο: καμία βάση Roomba, κανένα lidar/κάμερα, κανένα Nav2, κανένα RViz. Άρα
+# τρέχει με το ρομπότ σβηστό και δεν πειράζει τον χάρτη ή τον εντοπισμό.
+#
+# ‼️ Το `ros2 launch home_robot bringup.launch.py use_stt:=true …` ΔΕΝ κάνει το
+# ίδιο πράγμα — σηκώνει και όλο το υπόλοιπο stack (δες
+# project_robot_new_map_half_stack). Γι' αυτό εδώ τρέχουμε τους κόμβους σκέτους.
+#
+# Χρήση:  voicechat                 # Gemini cloud (default, ~0.9s)
+#         voicechat lemonade        # τοπικό NPU qwen3.5:4b (πιο αργό, offline)
+# Έξοδος: Ctrl-C
+set -u
+
+BACKEND="${1:-gemini}"
+
+# Ξεχωριστό ROS domain ώστε να μη «δει» ποτέ ένα ζωντανό ρομπότ στο δίκτυο και
+# αρχίσει να του στέλνει εντολές κίνησης από μια κουβέντα.
+export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-88}"
+
+# ‼️ `set -u` + ROS setup.bash = ΑΚΑΡΙΑΙΟΣ ΘΑΝΑΤΟΣ: το /opt/ros/jazzy/setup.bash
+# διαβάζει το AMENT_TRACE_SETUP_FILES χωρίς να το έχει ορίσει, οπότε με -u το
+# script βγαίνει με κωδικό 1 ΠΡΙΝ σηκώσει κόμβο — και το μόνο σημάδι είναι μια
+# γραμμή "μεταβλητή χωρίς σύνδεση" (κανένα voicechat_*.log δεν δημιουργείται).
+set +u
+source /opt/ros/jazzy/setup.bash
+source "$HOME/robot_ws/install/setup.bash"
+set -u
+
+if [ "$BACKEND" = lemonade ]; then
+  # Το τοπικό μοντέλο θέλει τον FastFlowLM server· ένας πελάτης τη φορά στο
+  # :52625, οπότε μην τρέχεις ταυτόχρονα `llmchat`.
+  if ! pgrep -f flm_keepalive >/dev/null; then
+    rm -f /tmp/flm_keepalive.stop
+    setsid nohup "$HOME/bin/flm_keepalive.sh" qwen3.5:4b >/tmp/flm_serve.log 2>&1 &
+    echo "  … φορτώνω το qwen3.5:4b στο NPU (μέχρι 60s)"
+  fi
+  for i in $(seq 1 60); do
+    curl -sf -m 5 http://127.0.0.1:52625/v1/chat/completions \
+      -H 'Content-Type: application/json' \
+      -d '{"model":"qwen3.5:4b","messages":[{"role":"user","content":"ok"}],"max_tokens":1}' \
+      2>/dev/null | grep -q '"choices"' && { echo "  ✔ NPU LLM έτοιμο"; break; }
+    [ "$i" = 60 ] && echo "  ⚠ το FLM δεν σήκωσε — δες /tmp/flm_serve.log"
+    sleep 1
+  done
+fi
+
+cleanup() {
+  echo
+  echo "Κλείνω…"
+  kill $(jobs -p) 2>/dev/null
+  # ‼️ Το `ros2 run` είναι wrapper: σκοτώνοντάς το μένει ΖΩΝΤΑΝΟ το παιδί που
+  # κρατά το μικρόφωνο (μετρημένο — τα node.py επιβίωναν του Ctrl-C). Οπότε
+  # σκότωσε ρητά και τα εγκατεστημένα paths.
+  for n in wake_word_node stt_node tts_node llm_bridge_node; do
+    pkill -f "home_robot/lib/home_robot/$n.py" 2>/dev/null || true
+  done
+  sleep 1
+  for n in wake_word_node stt_node tts_node llm_bridge_node; do
+    pkill -9 -f "home_robot/lib/home_robot/$n.py" 2>/dev/null || true
+  done
+  wait 2>/dev/null
+  # Ελευθέρωσε τα ~6 GB του NPU μοντέλου μόνο αν το ξεκινήσαμε εμείς.
+  if [ "$BACKEND" = lemonade ]; then
+    touch /tmp/flm_keepalive.stop
+    pkill -f flm_keepalive 2>/dev/null || true
+    pkill -x flm 2>/dev/null || true   # ‼️ ΟΧΙ `pkill -f "flm serve"` — αυτοκτονεί
+  fi
+}
+trap cleanup INT TERM EXIT
+
+echo "Φωνητική συζήτηση (backend=$BACKEND, domain $ROS_DOMAIN_ID)."
+echo "Πες «Έι ρομπότ» και μετά μίλα.  Ctrl-C για έξοδο."
+echo "Logs: /tmp/voicechat_{llm,stt,tts,wake}.log"
+echo
+
+ros2 run home_robot llm_bridge_node.py --ros-args \
+     -p backend:="$BACKEND" > /tmp/voicechat_llm.log 2>&1 &
+ros2 run home_robot tts_node.py        > /tmp/voicechat_tts.log 2>&1 &
+# energy_thresh καρφωμένο: το auto-calibrate έβγαλε άχρηστο κατώφλι 2/2 φορές
+# (project_robot_stt_calibration_bug). 0.030 κάθεται ανάμεσα σε θόρυβο και ομιλία.
+ros2 run home_robot stt_node.py --ros-args \
+     -p energy_thresh:=0.030 -p calibrate_on_start:=false > /tmp/voicechat_stt.log 2>&1 &
+# ‼️ ΤΑ PARAMS ΕΙΝΑΙ ΥΠΟΧΡΕΩΤΙΚΑ. Τα defaults ΜΕΣΑ στον κόμβο είναι για γενικό
+# mic, όχι για το XVF3800, και σκέτο `ros2 run` δίνει:
+#   device_name ''  → default ALSA κάρτα (η κάρτα 1 είναι το ALC269VC, όχι το array)
+#   mic_channels 3  → διαβάζει 6-κάναλο stream σε λάθος frame boundaries
+#   mic_channel 0   → wake στο AGC κανάλι (σηκώνει το noise floor στη σιωπή)
+#   stt_channel -1  → ο Whisper παίρνει το ίδιο κανάλι με το wake
+# Τα σωστά τα ορίζει το bringup.launch.py: ch4 = RAW capsule (wake),
+# ch0 = processed beam, 39.5 dB SNR (STT). Δες project_robot_stt_snr_mic_distance.
+ros2 run home_robot wake_word_node.py --ros-args \
+     -p device_name:=XVF3800 \
+     -p mic_channels:=6 \
+     -p mic_channel:=4 \
+     -p stt_channel:=0 \
+     -p threshold:=0.50 \
+     -p allow_barge_in:=false \
+     -p beep_on_wake:=true > /tmp/voicechat_wake.log 2>&1 &
+
+# Ζωντανή ροή: τι άκουσε και τι απάντησε.
+tail -f /tmp/voicechat_llm.log | grep --line-buffered -E "Heard:|Max:" &
+
+wait

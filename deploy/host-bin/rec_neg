@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Record REAL hard negatives ("ρομπότ" without "Έι") on the XVF3800.
+cd ~/robot_ws/src/home_robot/training/wake_word_hey_robot || exit 1
+exec python3 record_real.py --label neg --count "${1:-15}" --tag robot --device 5

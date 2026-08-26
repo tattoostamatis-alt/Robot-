@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -eo pipefail
+source /opt/ros/jazzy/setup.bash
+source ~/ros2_robot_ws/install/setup.bash   # sllidar_ros2
+source ~/robot_ws/install/setup.bash        # home_robot lidar.launch.py + laser_filters
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+# Needed now that this service starts a 2nd node (the filter): without the
+# shared config's MaxAutoParticipantIndex=99 the filter dies with
+# "Failed to find a free participant index" against the ~20-node stack.
+export CYCLONEDDS_URI="file://$HOME/.config/cyclonedds.xml"
+# SLLIDAR C1 -> /scan_raw, then a box filter strips the RoArm-M3 arm and
+# republishes clean /scan (see home_robot/config/lidar_arm_filter.yaml).
+exec ros2 launch home_robot lidar.launch.py

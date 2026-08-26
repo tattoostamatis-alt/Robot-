@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Remove the magic-lamp effect entirely (reversible: reinstall from
+# extensions.gnome.org or the Extension Manager app).
+PID=$(pgrep -u "$USER" -f gsd-media-keys | head -1)
+export $(tr '\0' '\n' < /proc/$PID/environ | grep -E '^(DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR)=' | xargs -d'\n')
+UUID=compiz-alike-magic-lamp-effect@hermes83.github.com
+gnome-extensions uninstall "$UUID" 2>/dev/null
+python3 - "$UUID" <<'PY'
+import ast, subprocess, sys
+cur = subprocess.run(['gsettings','get','org.gnome.shell','enabled-extensions'],
+                     capture_output=True, text=True).stdout.strip()
+lst = [x for x in ast.literal_eval(cur) if x != sys.argv[1]]
+subprocess.run(['gsettings','set','org.gnome.shell','enabled-extensions',
+                '[' + ', '.join(f"'{x}'" for x in lst) + ']'])
+PY
+rm -rf ~/.local/share/gnome-shell/extensions/$UUID
+echo "αφαιρέθηκε — αποσυνδέσου/συνδέσου για να φύγει το εφέ"
